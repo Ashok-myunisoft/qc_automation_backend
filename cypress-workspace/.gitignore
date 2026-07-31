@@ -1,0 +1,4 @@
+node_modules/
+cypress/e2e/_runs/
+cypress/videos/
+cypress/screenshots/

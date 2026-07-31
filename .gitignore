@@ -1,0 +1,73 @@
+# Byte-compiled / caches
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
+pip-wheel-metadata/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+venv.bak/
+
+# Python environment file
+.python-version
+
+# Editor and IDE files
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+
+# Logs and databases
+*.log
+*.sqlite3
+*.db
+*.db-journal
+
+# Testing / coverage
+.coverage
+.coverage.*
+.pytest_cache/
+htmlcov/
+
+# Type checkers
+.mypy_cache/
+.pyre/
+.pytype/
+
+# Uvicorn/Gunicorn/PIDs
+gunicorn.log
+*.pid
+*.sock
+
+# Environment / secrets
+.env
+.env.*
+secrets.json
+*.pem
+certs/
+
+# Jupyter
+.ipynb_checkpoints
+
+# Sphinx build
+_build/
+
+# OS generated files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# PyInstaller
+*.manifest
+*.spec
+
+# Misc
+instance/

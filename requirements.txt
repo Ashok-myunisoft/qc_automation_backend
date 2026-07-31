@@ -1,0 +1,7 @@
+python-dotenv
+agent-framework
+fastapi
+uvicorn[standard]
+python-multipart
+websockets
+python-gitlab
