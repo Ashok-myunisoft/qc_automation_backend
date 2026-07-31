@@ -1,4 +1,5 @@
 import json
+import os
 from pathlib import Path
 from agent_framework import Agent
 from agent_framework.openai import OpenAIChatClient
@@ -10,7 +11,7 @@ load_dotenv()
 class TestCaseAgent:
     def __init__(self):
         self.client = OpenAIChatClient(
-            model="gpt-4o-mini"
+            model=os.getenv("OPENAI_MODEL")
         )
 
         self.instructions = Path(

@@ -117,12 +117,15 @@ async def handle_fetch(ws: WebSocket, session: dict, msg: dict):
     await send_status(ws, "awaiting_review")
 
 
+
 # ---------------------------------------------------------------------------
 # GENERATE
 # source zip is MANDATORY — rejected immediately if not provided.
 # business context is OPTIONAL — if provided, the test case agent is
 # explicitly told to use it as the ONLY source of test data values.
 # ---------------------------------------------------------------------------
+
+
 async def handle_generate(ws: WebSocket, session: dict, msg: dict):
     module         = (msg.get("module")  or "").strip()
     screen         = (msg.get("screen")  or "").strip()

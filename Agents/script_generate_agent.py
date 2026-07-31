@@ -1,4 +1,5 @@
 import json
+import os
 from agent_framework import Agent
 from agent_framework.openai import OpenAIChatClient
 from dotenv import load_dotenv
@@ -8,7 +9,7 @@ load_dotenv()
 class ScriptGenerateAgent:
     def __init__(self):
         self.client = OpenAIChatClient(
-            model="gpt-4o-mini"
+            model=os.getenv("OPENAI_MODEL")
         )
 
         with open("prompts/script_generate_prompt.txt", "r", encoding="utf-8") as f:
