@@ -5,52 +5,30 @@ import tempfile
 import zipfile
 from pathlib import Path
 
-import logger_config  # noqa: F401  (sets up logging on import)
+import logger_config  # noqa: F401
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 
 from service.project_reader import ProjectReader
 from service.gitlab_service import GitLabService
 from service.architecture_resolver import resolve_existing, build_new_path
 from service.cypress_runner import run_cypress, CypressRunError
+from Agents.project_analyze_agent import ProjectAnalysisAgent
+from Agents.test_case_agent import TestCaseAgent
+from Agents.script_generate_agent import ScriptGenerateAgent
+from Agents.validate_agent import ValidateAgent
 from Agents.interrupt_agent import InterruptAgent
-from Agents.planner_agent import PlannerAgent
-from workflow.context import WorkflowState
-from workflow.executor import (
-    ProjectAnalysisExecutor,
-    TestCaseExecutor,
-    ScriptGenerateExecutor,
-    ValidateExecutor,
-)
 
 logger = logging.getLogger(__name__)
 
 app = FastAPI()
 
-# Executors — instantiated once, reused across requests
-planner_agent          = PlannerAgent()
-project_analysis_exec  = ProjectAnalysisExecutor()
-test_case_exec         = TestCaseExecutor()
-script_generate_exec   = ScriptGenerateExecutor()
-validate_exec          = ValidateExecutor()
+project_analysis_agent = ProjectAnalysisAgent()
+test_case_agent        = TestCaseAgent()
+script_generate_agent  = ScriptGenerateAgent()
+validate_agent         = ValidateAgent()
 interrupt_agent        = InterruptAgent()
 
 reader = ProjectReader()
-
-# Maps planner agent names → executor instances
-AGENT_MAP = {
-    "ProjectAnalysisAgent": project_analysis_exec,
-    "FeatureFileAgent":     test_case_exec,
-    "ScriptGenerationAgent": script_generate_exec,
-    "ValidationAgent":      validate_exec,
-}
-
-# Maps executor → the handler method name to call
-HANDLER_MAP = {
-    "project_analysis_executor": "analyze_project",
-    "test_case_executor":        "generate_test_cases",
-    "script_generate_executor":  "generate_script",
-    "validate_executor":         "validate",
-}
 
 
 def _gitlab_service() -> GitLabService:
@@ -60,27 +38,24 @@ def _gitlab_service() -> GitLabService:
 async def send_log(ws: WebSocket, text: str, tone: str = "secondary"):
     await ws.send_json({"type": "log", "text": text, "tone": tone})
 
-
 async def send_status(ws: WebSocket, phase: str):
     await ws.send_json({"type": "status", "phase": phase})
-
 
 async def send_error(ws: WebSocket, message: str):
     await ws.send_json({"type": "error", "message": message})
 
-
 async def send_artifacts(ws: WebSocket, session: dict, validation: dict | None = None):
     resolved = session.get("resolved")
     await ws.send_json({
-        "type": "artifacts",
-        "feature_file": session.get("feature"),
-        "script": session.get("script"),
-        "validation": validation,
-        "origin": session.get("origin"),
+        "type":          "artifacts",
+        "feature_file":  session.get("feature"),
+        "script":        session.get("script"),
+        "validation":    validation,
+        "origin":        session.get("origin"),
         "resolved_path": resolved.feature_path if resolved else None,
-        "confidence": resolved.confidence if resolved else None,
-        "ambiguous": resolved.ambiguous if resolved else False,
-        "exists": bool(session.get("pushed")),
+        "confidence":    resolved.confidence   if resolved else None,
+        "ambiguous":     resolved.ambiguous    if resolved else False,
+        "exists":        bool(session.get("pushed")),
     })
 
 
@@ -88,7 +63,8 @@ async def send_artifacts(ws: WebSocket, session: dict, validation: dict | None =
 # FETCH
 # ---------------------------------------------------------------------------
 async def handle_fetch(ws: WebSocket, session: dict, msg: dict):
-    module, screen = (msg.get("module") or "").strip(), (msg.get("screen") or "").strip()
+    module = (msg.get("module") or "").strip()
+    screen = (msg.get("screen") or "").strip()
     if not module or not screen:
         await send_error(ws, "module and screen are required.")
         return
@@ -100,7 +76,7 @@ async def handle_fetch(ws: WebSocket, session: dict, msg: dict):
     await send_log(ws, "reading gitlab repo structure...", "secondary")
 
     try:
-        gl = _gitlab_service()
+        gl   = _gitlab_service()
         tree = gl.get_repo_tree()
     except Exception as e:
         await send_error(ws, f"gitlab connection failed: {e}")
@@ -110,28 +86,18 @@ async def handle_fetch(ws: WebSocket, session: dict, msg: dict):
 
     resolved = resolve_existing(tree, module, screen)
     if resolved is None:
-        await send_log(
-            ws,
-            f"no matching feature/script pair found in the repo for '{module} / {screen}' "
-            f"— use Generate instead.",
-            "danger",
-        )
+        await send_log(ws, f"no matching feature/script pair found for '{module} / {screen}' — use Generate instead.", "danger")
         await send_status(ws, "not_found")
         return
 
     if resolved.ambiguous:
-        await send_log(
-            ws,
-            f"more than one close match found — picked {resolved.dir} "
-            f"(confidence {resolved.confidence}). Double-check this is the right screen.",
-            "accent",
-        )
+        await send_log(ws, f"more than one close match — picked {resolved.dir} (confidence {resolved.confidence}). Double-check.", "accent")
     else:
         await send_log(ws, f"matched {resolved.dir} (confidence {resolved.confidence})", "success")
 
     try:
         feature_content = gl.fetch_file(resolved.feature_path)
-        script_content = gl.fetch_file(resolved.script_path)
+        script_content  = gl.fetch_file(resolved.script_path)
     except Exception as e:
         await send_error(ws, f"gitlab fetch failed: {e}")
         return
@@ -142,9 +108,9 @@ async def handle_fetch(ws: WebSocket, session: dict, msg: dict):
         return
 
     session["feature"] = feature_content
-    session["script"] = script_content
+    session["script"]  = script_content
     session["resolved"] = resolved
-    session["pushed"] = True
+    session["pushed"]   = True
 
     await send_log(ws, "fetched — review below, then Run (or Interrupt to change first).", "success")
     await send_artifacts(ws, session)
@@ -152,17 +118,24 @@ async def handle_fetch(ws: WebSocket, session: dict, msg: dict):
 
 
 # ---------------------------------------------------------------------------
-# GENERATE  (now planner-driven via WorkflowState + Executors)
+# GENERATE
+# source zip is MANDATORY — rejected immediately if not provided.
+# business context is OPTIONAL — if provided, the test case agent is
+# explicitly told to use it as the ONLY source of test data values.
 # ---------------------------------------------------------------------------
 async def handle_generate(ws: WebSocket, session: dict, msg: dict):
-    module, screen = (msg.get("module") or "").strip(), (msg.get("screen") or "").strip()
+    module         = (msg.get("module")  or "").strip()
+    screen         = (msg.get("screen")  or "").strip()
+    user_request   = (msg.get("request") or "").strip()
     source_zip_b64 = msg.get("source_zip_base64")
+    biz_ctx_b64    = msg.get("business_context_base64")
 
     if not module or not screen:
         await send_error(ws, "module and screen are required.")
         return
+    # Source is mandatory — UI also enforces this, but backend is authoritative
     if not source_zip_b64:
-        await send_error(ws, "no source zip provided — attach the screen's source before generating.")
+        await send_error(ws, "source code (.zip) is required before generating.")
         return
 
     session["module"], session["screen"] = module, screen
@@ -175,7 +148,7 @@ async def handle_generate(ws: WebSocket, session: dict, msg: dict):
     try:
         zip_bytes = base64.b64decode(source_zip_b64)
     except Exception as e:
-        await send_error(ws, f"could not decode uploaded source zip: {e}")
+        await send_error(ws, f"could not decode source zip: {e}")
         return
 
     try:
@@ -189,64 +162,54 @@ async def handle_generate(ws: WebSocket, session: dict, msg: dict):
         await send_error(ws, f"could not read uploaded source: {e}")
         return
 
-    user_request = (
-        msg.get("request")
-        or f"Generate Cypress tests for the {screen} screen in the {module} module."
-    )
+    # Business context — optional.
+    # If provided: decoded and passed to the test case agent, which is
+    # instructed (via the prompt) to take ALL test data values strictly
+    # from it and never invent its own.
+    # If not provided: agent uses meaningful placeholder values (per prompt).
+    business_context = None
+    if biz_ctx_b64:
+        await send_log(ws, "reading business context — test data will be taken strictly from it...", "secondary")
+        try:
+            business_context = base64.b64decode(biz_ctx_b64).decode("utf-8", errors="ignore")
+        except Exception as e:
+            await send_log(ws, f"could not decode business context (skipping): {e}", "muted")
 
-    # ── Build WorkflowState ──────────────────────────────────────────────────
-    state = WorkflowState()
-    state.user_request    = user_request
-    state.project_context = project_context
-    state.business_context = msg.get("business_context") or ""
+    user_request = user_request or f"Generate Cypress tests for the {screen} screen in the {module} module."
 
-    # ── Ask PlannerAgent which agents to run ────────────────────────────────
-    await send_log(ws, "running planner agent...", "secondary")
     try:
-        plan = await planner_agent.plan(user_request=user_request)
-    except Exception as e:
-        await send_error(ws, f"planner failed: {e}")
-        return
+        await send_log(ws, "running project analysis agent...", "secondary")
+        project_analysis = await project_analysis_agent.analyze(
+            project_context=project_context,
+            user_request=user_request,
+        )
 
-    if "error" in plan:
-        await send_error(ws, f"planner could not parse a workflow: {plan['error']}")
-        return
+        await send_log(ws, "running test case agent...", "secondary")
+        test_cases = await test_case_agent.generate_test_cases(
+            project_analysis=project_analysis,
+            user_request=user_request,
+            business_context=business_context,   # None or raw text — agent handles both
+        )
 
-    state.plan = plan
-    steps = plan.get("workflow", [])
-    await send_log(ws, f"plan: {[s['agent'] for s in steps]}", "secondary")
+        await send_log(ws, "running script generate agent...", "secondary")
+        generated_script = await script_generate_agent.generate_script(test_cases=test_cases)
 
-    # ── Execute each planned step in order ──────────────────────────────────
-    try:
-        for step in steps:
-            agent_name = step.get("agent")
-            executor = AGENT_MAP.get(agent_name)
-            if executor is None:
-                await send_log(ws, f"unknown agent in plan: {agent_name} — skipping", "accent")
-                continue
-
-            handler_name = HANDLER_MAP.get(executor.id)
-            if handler_name is None:
-                await send_log(ws, f"no handler mapped for {agent_name} — skipping", "accent")
-                continue
-
-            await send_log(ws, f"running {agent_name}...", "secondary")
-            handler_fn = getattr(executor, handler_name)
-            await handler_fn(state, ctx=None)   # ctx=None: we handle messaging ourselves via ws
-
+        await send_log(ws, "running validate agent...", "secondary")
+        validation_result = await validate_agent.validate(
+            test_cases=test_cases,
+            generated_script=generated_script,
+        )
     except Exception as e:
         logger.exception("generate pipeline failed")
         await send_error(ws, f"generation failed: {e}")
         return
 
-    # ── Store results in session ─────────────────────────────────────────────
-    session["feature"] = state.test_cases        # feature file content
-    session["script"]  = state.generated_script  # cypress script content
+    session["feature"] = test_cases
+    session["script"]  = generated_script
 
-    # ── Resolve GitLab path ──────────────────────────────────────────────────
     try:
-        gl = _gitlab_service()
-        tree = gl.get_repo_tree()
+        gl      = _gitlab_service()
+        tree    = gl.get_repo_tree()
         resolved = resolve_existing(tree, module, screen)
         if resolved is None:
             resolved = build_new_path(module, screen)
@@ -254,13 +217,13 @@ async def handle_generate(ws: WebSocket, session: dict, msg: dict):
         else:
             await send_log(ws, f"existing files found at {resolved.dir} — will replace on approve.", "secondary")
     except Exception as e:
-        await send_log(ws, f"could not check gitlab for existing files ({e}) — will resolve path on approve.", "muted")
+        await send_log(ws, f"could not check gitlab ({e}) — will resolve path on approve.", "muted")
         resolved = build_new_path(module, screen)
 
     session["resolved"] = resolved
 
-    await send_log(ws, "feature file + cypress script generated — review below.", "success")
-    await send_artifacts(ws, session, validation=state.validation_result)
+    await send_log(ws, "generated — review below.", "success")
+    await send_artifacts(ws, session, validation=validation_result)
     await send_status(ws, "awaiting_approval")
 
 
@@ -273,8 +236,8 @@ async def handle_approve(ws: WebSocket, session: dict):
         return
 
     resolved = session["resolved"]
-
     await send_status(ws, "running")
+
     try:
         gl = _gitlab_service()
         gl.create_or_update_file(
@@ -311,6 +274,7 @@ async def handle_run(ws: WebSocket, session: dict):
     slug     = resolved.slug
 
     await send_status(ws, "running")
+    await send_log(ws, "cypress: preparing workspace...", "secondary")
     await send_log(ws, "cypress: starting run...", "secondary")
 
     try:
@@ -344,7 +308,7 @@ async def handle_interrupt(ws: WebSocket, session: dict, msg: dict):
         await send_error(ws, "nothing to change yet — fetch or generate first.")
         return
 
-    await send_log(ws, f'[interrupt] applying change: "{note}"', "accent")
+    await send_log(ws, f'[interrupt] applying: "{note}"', "accent")
 
     try:
         result = await interrupt_agent.apply_change(session["feature"], session["script"], note)
@@ -372,9 +336,9 @@ async def handle_interrupt(ws: WebSocket, session: dict, msg: dict):
                 resolved.script_path, session["script"],
                 commit_message=f"QC: interrupt change — {session.get('module')}/{session.get('screen')}",
             )
-            await send_log(ws, "change replaced the file in gitlab.", "success")
+            await send_log(ws, "change replaced in gitlab.", "success")
         except Exception as e:
-            await send_error(ws, f"change applied locally, but gitlab push failed: {e}")
+            await send_error(ws, f"change applied locally, gitlab push failed: {e}")
 
     await send_artifacts(ws, session)
     next_phase = "awaiting_approval" if session.get("origin") == "generate" and not session.get("pushed") else "awaiting_review"
@@ -395,13 +359,12 @@ async def qc_session(websocket: WebSocket):
 
     try:
         while True:
-            msg = await websocket.receive_json()
+            msg    = await websocket.receive_json()
             action = msg.get("action")
 
             if action == "interrupt" and session.get("process") is not None:
-                proc = session["process"]
                 try:
-                    proc.kill()
+                    session["process"].kill()
                 except ProcessLookupError:
                     pass
                 asyncio.create_task(handle_interrupt(websocket, session, msg))
@@ -422,8 +385,8 @@ async def qc_session(websocket: WebSocket):
                 session["feature"] = None
                 session["script"]  = None
                 session["resolved"] = None
-                session["pushed"] = False
-                await send_log(websocket, "rejected — nothing pushed. adjust and try generate again.", "muted")
+                session["pushed"]  = False
+                await send_log(websocket, "rejected — nothing pushed.", "muted")
                 await send_status(websocket, "idle")
 
             elif action == "run":
