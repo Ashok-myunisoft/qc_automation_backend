@@ -11,16 +11,30 @@ TREE_CACHE_SECONDS = 45
 
 
 class GitLabService:
-    def __init__(self):
-        url = os.getenv("GITLAB_URL", "https://gitlab.com")
-        token = os.getenv("GITLAB_TOKEN")
-        project_id = os.getenv("GITLAB_PROJECT_ID")
-        self._branch = os.getenv("GITLAB_BRANCH", "main")
+    """
+    Thin wrapper around a single GitLab project (repo).
+
+    By default this reads the original GITLAB_* env vars, so existing
+    callers (fetch/approve/push against the `qc_test` repo) are unaffected.
+
+    Pass `env_prefix="SOURCE_GITLAB"` to point an instance at a *second*,
+    independently-configured repo (its own URL/token/project id/branch) —
+    used for Generate's source-code lookup against the real app repo.
+    """
+
+    def __init__(self, env_prefix: str = "GITLAB"):
+        self._env_prefix = env_prefix
+
+        url        = os.getenv(f"{env_prefix}_URL", "https://gitlab.com")
+        token      = os.getenv(f"{env_prefix}_TOKEN")
+        project_id = os.getenv(f"{env_prefix}_PROJECT_ID")
+        self._branch = os.getenv(f"{env_prefix}_BRANCH", "main")
+        self._token  = token
 
         if not token or not project_id:
             raise RuntimeError(
-                "GITLAB_TOKEN and GITLAB_PROJECT_ID must be set in .env "
-                "(see .env.example)."
+                f"{env_prefix}_TOKEN and {env_prefix}_PROJECT_ID must be set "
+                "in .env (see .env.example)."
             )
 
         self._gl = gitlab.Gitlab(url, private_token=token)
@@ -34,10 +48,9 @@ class GitLabService:
         return self._branch
 
     def get_clone_url(self) -> str:
-        token = os.getenv("GITLAB_TOKEN")
-        base_url = self._project.http_url_to_repo 
+        base_url = self._project.http_url_to_repo
         scheme, rest = base_url.split("://", 1)
-        return f"{scheme}://oauth2:{token}@{rest}"
+        return f"{scheme}://oauth2:{self._token}@{rest}"
 
     def get_repo_tree(self, force_refresh: bool = False) -> list[str]:
         now = time.time()

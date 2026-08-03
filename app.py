@@ -1,8 +1,6 @@
 import asyncio
-import base64
 import logging
 import tempfile
-import zipfile
 from pathlib import Path
 
 import logger_config  # noqa: F401
@@ -10,7 +8,10 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 
 from service.project_reader import ProjectReader
 from service.gitlab_service import GitLabService
-from service.architecture_resolver import resolve_existing, resolve_module_screens, build_new_path
+from service.architecture_resolver import (
+    resolve_existing, resolve_module_screens, build_new_path,
+    resolve_source_screen, resolve_source_module_screens, ResolvedSource,
+)
 from service.cypress_runner import run_cypress, CypressRunError
 from Agents.project_analyze_agent import ProjectAnalysisAgent
 from Agents.test_case_agent import TestCaseAgent
@@ -33,6 +34,27 @@ reader = ProjectReader()
 
 def _gitlab_service() -> GitLabService:
     return GitLabService()
+
+
+def _source_gitlab_service() -> GitLabService:
+    # Separate repo — its own SOURCE_GITLAB_URL / _TOKEN / _PROJECT_ID / _BRANCH.
+    return GitLabService(env_prefix="SOURCE_GITLAB")
+
+
+def _fetch_source_project_context(src: GitLabService, resolved: ResolvedSource) -> dict:
+    """Pulls every file in the resolved source-repo folder into a temp dir
+    (preserving the folder's relative layout) and reuses ProjectReader as-is,
+    so the agent pipeline's input shape is unchanged whether the source came
+    from an upload or a repo fetch."""
+    with tempfile.TemporaryDirectory() as temp_dir:
+        target_dir = Path(temp_dir) / resolved.dir
+        target_dir.mkdir(parents=True, exist_ok=True)
+        for filename in resolved.files:
+            content = src.fetch_file(f"{resolved.dir}/{filename}")
+            if content is None:
+                continue
+            (target_dir / filename).write_text(content, encoding="utf-8")
+        return reader.read_project(temp_dir)
 
 
 async def send_log(ws: WebSocket, text: str, tone: str = "secondary"):
@@ -186,116 +208,179 @@ async def handle_fetch(ws: WebSocket, session: dict, msg: dict):
     await send_status(ws, "awaiting_review")
 
 
-
 # ---------------------------------------------------------------------------
 # GENERATE
-# source zip is MANDATORY — rejected immediately if not provided.
-# business context is OPTIONAL — if provided, the test case agent is
-# explicitly told to use it as the ONLY source of test data values.
+# Fully automated — no manual uploads. Source is fetched from the SOURCE_
+# GITLAB_* repo (scope-aware: one screen's files, or every screen in a
+# module), then run through the same 4-agent pipeline as before.
 # ---------------------------------------------------------------------------
+async def _generate_one_screen(ws: WebSocket, src: GitLabService, module: str,
+                                screen_name: str, resolved_source: ResolvedSource,
+                                user_request: str, label: str | None = None) -> dict | None:
+    """Runs the analysis -> test-case -> script -> validate pipeline for one
+    resolved source screen. Returns {feature, script, validation} or None on
+    failure (caller decides whether that's fatal or skip-and-continue)."""
+    tag = f"[{label}] " if label else ""
+    try:
+        await send_log(ws, f"{tag}fetching source files...", "secondary")
+        project_context = _fetch_source_project_context(src, resolved_source)
+
+        await send_log(ws, f"{tag}running project analysis agent...", "secondary")
+        project_analysis = await project_analysis_agent.analyze(
+            project_context=project_context, user_request=user_request,
+        )
+
+        await send_log(ws, f"{tag}running test case agent...", "secondary")
+        test_cases = await test_case_agent.generate_test_cases(
+            project_analysis=project_analysis, user_request=user_request,
+            business_context=None,
+        )
+
+        await send_log(ws, f"{tag}running script generate agent...", "secondary")
+        generated_script = await script_generate_agent.generate_script(test_cases=test_cases)
+
+        await send_log(ws, f"{tag}running validate agent...", "secondary")
+        validation_result = await validate_agent.validate(
+            test_cases=test_cases, generated_script=generated_script,
+        )
+    except Exception as e:
+        logger.exception("generate pipeline failed for %s", screen_name)
+        await send_log(ws, f"{tag}generation failed: {e}", "danger")
+        return None
+
+    return {"feature": test_cases, "script": generated_script, "validation": validation_result}
 
 
 async def handle_generate(ws: WebSocket, session: dict, msg: dict):
-    module         = (msg.get("module")  or "").strip()
-    screen         = (msg.get("screen")  or "").strip()
-    user_request   = (msg.get("request") or "").strip()
-    source_zip_b64 = msg.get("source_zip_base64")
-    biz_ctx_b64    = msg.get("business_context_base64")
+    module       = (msg.get("module")  or "").strip()
+    screen       = (msg.get("screen")  or "").strip()
+    scope        = (msg.get("scope")   or "screen").strip()
+    user_request = (msg.get("request") or "").strip()
 
-    if not module or not screen:
+    if not module:
+        await send_error(ws, "module is required.")
+        return
+    if scope == "screen" and not screen:
         await send_error(ws, "module and screen are required.")
         return
-    # Source is mandatory — UI also enforces this, but backend is authoritative
-    if not source_zip_b64:
-        await send_error(ws, "source code (.zip) is required before generating.")
-        return
 
-    session["module"], session["screen"] = module, screen
+    session["module"], session["screen"], session["scope"] = module, screen, scope
     session["origin"] = "generate"
     session["pushed"] = False
 
-    await send_status(ws, "running")
-    await send_log(ws, "reading uploaded source...", "secondary")
+    await send_status(ws, "resolving")
+    await send_log(ws, "reading source repo structure...", "secondary")
 
     try:
-        zip_bytes = base64.b64decode(source_zip_b64)
+        src      = _source_gitlab_service()
+        src_tree = src.get_repo_tree()
     except Exception as e:
-        await send_error(ws, f"could not decode source zip: {e}")
+        await send_error(ws, f"source gitlab connection failed: {e}")
         return
 
+    # Best-effort peek at the output (qc_test) repo so we know up front
+    # whether we're replacing existing files or creating new ones.
+    out_tree = None
     try:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            zip_path = Path(temp_dir) / "source.zip"
-            zip_path.write_bytes(zip_bytes)
-            with zipfile.ZipFile(zip_path, "r") as zf:
-                zf.extractall(temp_dir)
-            project_context = reader.read_project(temp_dir)
+        out_gl   = _gitlab_service()
+        out_tree = out_gl.get_repo_tree()
     except Exception as e:
-        await send_error(ws, f"could not read uploaded source: {e}")
+        await send_log(ws, f"could not check output repo ({e}) — will resolve path on approve.", "muted")
+
+    def resolve_output_path(screen_name: str):
+        resolved = resolve_existing(out_tree, module, screen_name) if out_tree is not None else None
+        if resolved is None:
+            return build_new_path(module, screen_name), False
+        return resolved, True
+
+    # -----------------------------------------------------------------
+    # Whole module: fetch + generate for every screen under it
+    # -----------------------------------------------------------------
+    if scope == "module":
+        await send_log(ws, f"scanned {len(src_tree)} source files — looking for every screen in {module}...", "secondary")
+
+        candidates = resolve_source_module_screens(src_tree, module)
+        if not candidates:
+            await send_log(ws, f"no source screens found under module '{module}' in the source repo.", "danger")
+            await send_status(ws, "not_found")
+            return
+
+        await send_log(ws, f"found {len(candidates)} screen(s) in {module}: " +
+                       ", ".join(c.dir for c in candidates), "success")
+
+        screens = []
+        for c in candidates:
+            screen_name    = c.dir.rsplit("/", 1)[-1]
+            screen_request = user_request or f"Generate Cypress tests for the {screen_name} screen in the {module} module."
+
+            outcome = await _generate_one_screen(ws, src, module, screen_name, c, screen_request, label=screen_name)
+            if outcome is None:
+                continue
+
+            resolved, existed = resolve_output_path(screen_name)
+            await send_log(
+                ws,
+                f"[{screen_name}] existing files found at {resolved.dir} — will replace on approve."
+                if existed else
+                f"[{screen_name}] new screen — will create at {resolved.dir} on approve.",
+                "secondary",
+            )
+            screens.append({"resolved": resolved, "feature": outcome["feature"], "script": outcome["script"]})
+
+        if not screens:
+            await send_log(ws, "found source screens but generation failed for all of them.", "danger")
+            await send_status(ws, "not_found")
+            return
+
+        session["screens"] = screens
+        session.pop("feature", None)
+        session.pop("script", None)
+        session.pop("resolved", None)
+
+        await send_log(ws, "generated — review each screen below, then Approve to push all of them.", "success")
+        await send_artifacts(ws, session)
+        await send_status(ws, "awaiting_approval")
         return
 
-    # Business context — optional.
-    # If provided: decoded and passed to the test case agent, which is
-    # instructed (via the prompt) to take ALL test data values strictly
-    # from it and never invent its own.
-    # If not provided: agent uses meaningful placeholder values (per prompt).
-    business_context = None
-    if biz_ctx_b64:
-        await send_log(ws, "reading business context — test data will be taken strictly from it...", "secondary")
-        try:
-            business_context = base64.b64decode(biz_ctx_b64).decode("utf-8", errors="ignore")
-        except Exception as e:
-            await send_log(ws, f"could not decode business context (skipping): {e}", "muted")
+    # -----------------------------------------------------------------
+    # Single screen
+    # -----------------------------------------------------------------
+    await send_log(ws, f"scanned {len(src_tree)} source files — looking for {module} / {screen}...", "secondary")
+
+    resolved_source = resolve_source_screen(src_tree, module, screen)
+    if resolved_source is None:
+        await send_log(ws, f"no source files found for '{module} / {screen}' in the source repo.", "danger")
+        await send_status(ws, "not_found")
+        return
+
+    if resolved_source.ambiguous:
+        await send_log(ws, f"more than one close match — picked {resolved_source.dir} (confidence {resolved_source.confidence}). Double-check.", "accent")
+    else:
+        await send_log(ws, f"matched source {resolved_source.dir} (confidence {resolved_source.confidence})", "success")
 
     user_request = user_request or f"Generate Cypress tests for the {screen} screen in the {module} module."
 
-    try:
-        await send_log(ws, "running project analysis agent...", "secondary")
-        project_analysis = await project_analysis_agent.analyze(
-            project_context=project_context,
-            user_request=user_request,
-        )
-
-        await send_log(ws, "running test case agent...", "secondary")
-        test_cases = await test_case_agent.generate_test_cases(
-            project_analysis=project_analysis,
-            user_request=user_request,
-            business_context=business_context,   # None or raw text — agent handles both
-        )
-
-        await send_log(ws, "running script generate agent...", "secondary")
-        generated_script = await script_generate_agent.generate_script(test_cases=test_cases)
-
-        await send_log(ws, "running validate agent...", "secondary")
-        validation_result = await validate_agent.validate(
-            test_cases=test_cases,
-            generated_script=generated_script,
-        )
-    except Exception as e:
-        logger.exception("generate pipeline failed")
-        await send_error(ws, f"generation failed: {e}")
+    outcome = await _generate_one_screen(ws, src, module, screen, resolved_source, user_request)
+    if outcome is None:
+        await send_error(ws, "generation failed.")
         return
 
-    session["feature"] = test_cases
-    session["script"]  = generated_script
+    session["feature"] = outcome["feature"]
+    session["script"]  = outcome["script"]
+    session.pop("screens", None)
 
-    try:
-        gl      = _gitlab_service()
-        tree    = gl.get_repo_tree()
-        resolved = resolve_existing(tree, module, screen)
-        if resolved is None:
-            resolved = build_new_path(module, screen)
-            await send_log(ws, f"new screen — will create at {resolved.dir} on approve.", "secondary")
-        else:
-            await send_log(ws, f"existing files found at {resolved.dir} — will replace on approve.", "secondary")
-    except Exception as e:
-        await send_log(ws, f"could not check gitlab ({e}) — will resolve path on approve.", "muted")
-        resolved = build_new_path(module, screen)
-
+    resolved, existed = resolve_output_path(screen)
+    await send_log(
+        ws,
+        f"existing files found at {resolved.dir} — will replace on approve."
+        if existed else
+        f"new screen — will create at {resolved.dir} on approve.",
+        "secondary",
+    )
     session["resolved"] = resolved
 
     await send_log(ws, "generated — review below.", "success")
-    await send_artifacts(ws, session, validation=validation_result)
+    await send_artifacts(ws, session, validation=outcome["validation"])
     await send_status(ws, "awaiting_approval")
 
 

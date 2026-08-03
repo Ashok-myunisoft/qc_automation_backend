@@ -154,6 +154,77 @@ def resolve_module_screens(tree: list[str], module: str) -> list[ResolvedScreen]
     return results
 
 
+@dataclass
+class ResolvedSource:
+    dir: str          # e.g. "Finance/InstrumentMaster"
+    files: list[str]  # filenames directly inside that dir, e.g. ["instrument-master.component.ts", "...html"]
+    confidence: float
+    ambiguous: bool
+
+
+def resolve_source_screen(tree: list[str], module: str, screen: str) -> ResolvedSource | None:
+    """Same fuzzy module/screen matching as resolve_existing, but against the
+    *source* repo: any non-empty folder under the module counts as a
+    candidate (source screens aren't necessarily .feature/.js pairs)."""
+    module_norm = _normalize(module)
+    screen_norm = _normalize(screen)
+
+    scored: list[tuple[float, str, list[str]]] = []
+
+    for directory, files in _group_by_dir(tree).items():
+        parts = directory.split("/")
+
+        module_hit = any(_similarity(_normalize(p), module_norm) > 0.75 for p in parts)
+        if not module_hit or not files:
+            continue
+
+        screen_folder = parts[-1]
+        score = _similarity(_normalize(screen_folder), screen_norm)
+        scored.append((score, directory, files))
+
+    if not scored:
+        return None
+
+    scored.sort(key=lambda t: t[0], reverse=True)
+    best_score, best_dir, best_files = scored[0]
+
+    if best_score < MIN_CONFIDENCE:
+        return None
+
+    ambiguous = len(scored) > 1 and (best_score - scored[1][0]) < AMBIGUITY_MARGIN
+
+    return ResolvedSource(
+        dir=best_dir,
+        files=best_files,
+        confidence=round(best_score, 3),
+        ambiguous=ambiguous,
+    )
+
+
+def resolve_source_module_screens(tree: list[str], module: str) -> list[ResolvedSource]:
+    """Like resolve_source_screen, but returns every screen folder under the
+    given module in the source repo."""
+    module_norm = _normalize(module)
+    results: list[ResolvedSource] = []
+
+    for directory, files in _group_by_dir(tree).items():
+        parts = directory.split("/")
+
+        module_hit = any(_similarity(_normalize(p), module_norm) > 0.75 for p in parts)
+        if not module_hit or not files:
+            continue
+
+        results.append(ResolvedSource(
+            dir=directory,
+            files=files,
+            confidence=1.0,
+            ambiguous=False,
+        ))
+
+    results.sort(key=lambda r: r.dir)
+    return results
+
+
 def build_new_path(module: str, screen: str) -> ResolvedScreen:
     """No existing match in the repo — construct a path for a brand new
     screen, following the same <Module>/<ScreenFolder>/<slug>.{feature,js}
