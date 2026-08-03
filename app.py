@@ -10,7 +10,7 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 
 from service.project_reader import ProjectReader
 from service.gitlab_service import GitLabService
-from service.architecture_resolver import resolve_existing, build_new_path
+from service.architecture_resolver import resolve_existing, resolve_module_screens, build_new_path
 from service.cypress_runner import run_cypress, CypressRunError
 from Agents.project_analyze_agent import ProjectAnalysisAgent
 from Agents.test_case_agent import TestCaseAgent
@@ -45,9 +45,29 @@ async def send_error(ws: WebSocket, message: str):
     await ws.send_json({"type": "error", "message": message})
 
 async def send_artifacts(ws: WebSocket, session: dict, validation: dict | None = None):
+    if session.get("scope") == "module" and session.get("screens"):
+        screens = session["screens"]
+        await ws.send_json({
+            "type":   "artifacts",
+            "scope":  "module",
+            "screens": [
+                {
+                    "name":         s["resolved"].dir,
+                    "feature_file": s["feature"],
+                    "script":       s["script"],
+                    "resolved_path": s["resolved"].feature_path,
+                }
+                for s in screens
+            ],
+            "origin":  session.get("origin"),
+            "exists":  bool(session.get("pushed")),
+        })
+        return
+
     resolved = session.get("resolved")
     await ws.send_json({
         "type":          "artifacts",
+        "scope":         "screen",
         "feature_file":  session.get("feature"),
         "script":        session.get("script"),
         "validation":    validation,
@@ -65,11 +85,16 @@ async def send_artifacts(ws: WebSocket, session: dict, validation: dict | None =
 async def handle_fetch(ws: WebSocket, session: dict, msg: dict):
     module = (msg.get("module") or "").strip()
     screen = (msg.get("screen") or "").strip()
-    if not module or not screen:
+    scope  = (msg.get("scope") or "screen").strip()
+
+    if not module:
+        await send_error(ws, "module is required.")
+        return
+    if scope == "screen" and not screen:
         await send_error(ws, "module and screen are required.")
         return
 
-    session["module"], session["screen"] = module, screen
+    session["module"], session["screen"], session["scope"] = module, screen, scope
     session["origin"] = "fetch"
 
     await send_status(ws, "resolving")
@@ -80,6 +105,49 @@ async def handle_fetch(ws: WebSocket, session: dict, msg: dict):
         tree = gl.get_repo_tree()
     except Exception as e:
         await send_error(ws, f"gitlab connection failed: {e}")
+        return
+
+    if scope == "module":
+        await send_log(ws, f"scanned {len(tree)} files — looking for every screen in {module}...", "secondary")
+
+        candidates = resolve_module_screens(tree, module)
+        if not candidates:
+            await send_log(ws, f"no screens found under module '{module}'.", "danger")
+            await send_status(ws, "not_found")
+            return
+
+        await send_log(ws, f"found {len(candidates)} screen(s) in {module}: " +
+                       ", ".join(c.dir for c in candidates), "success")
+
+        screens = []
+        for c in candidates:
+            try:
+                feature_content = gl.fetch_file(c.feature_path)
+                script_content  = gl.fetch_file(c.script_path)
+            except Exception as e:
+                await send_log(ws, f"[{c.dir}] gitlab fetch failed: {e} — skipping.", "danger")
+                continue
+            if feature_content is None or script_content is None:
+                await send_log(ws, f"[{c.dir}] couldn't read both files — skipping.", "danger")
+                continue
+            screens.append({"resolved": c, "feature": feature_content, "script": script_content})
+
+        if not screens:
+            await send_log(ws, "matched screen folders but couldn't read any files.", "danger")
+            await send_status(ws, "not_found")
+            return
+
+        session["screens"] = screens
+        session["pushed"]  = True
+        # Keep single-screen keys clear so handle_run's screen-scope path
+        # doesn't accidentally pick up stale data from an earlier fetch.
+        session.pop("feature", None)
+        session.pop("script", None)
+        session.pop("resolved", None)
+
+        await send_log(ws, "fetched — review each screen below, then Run to execute all of them.", "success")
+        await send_artifacts(ws, session)
+        await send_status(ws, "awaiting_review")
         return
 
     await send_log(ws, f"scanned {len(tree)} files — looking for {module} / {screen}...", "secondary")
@@ -111,6 +179,7 @@ async def handle_fetch(ws: WebSocket, session: dict, msg: dict):
     session["script"]  = script_content
     session["resolved"] = resolved
     session["pushed"]   = True
+    session.pop("screens", None)
 
     await send_log(ws, "fetched — review below, then Run (or Interrupt to change first).", "success")
     await send_artifacts(ws, session)
@@ -265,6 +334,57 @@ async def handle_approve(ws: WebSocket, session: dict):
 # RUN
 # ---------------------------------------------------------------------------
 async def handle_run(ws: WebSocket, session: dict):
+    if session.get("scope") == "module" and session.get("screens"):
+        screens = session["screens"]
+
+        if session.get("origin") == "generate" and not session.get("pushed"):
+            await send_error(ws, "approve the generated files before running.")
+            return
+
+        await send_status(ws, "running")
+        await send_log(ws, f"cypress: running {len(screens)} screen(s) in this module...", "secondary")
+
+        summary = []  # [(dir, passed, exit_code)]
+        for i, s in enumerate(screens, start=1):
+            resolved = s["resolved"]
+            slug     = resolved.slug
+            label    = resolved.dir
+
+            await send_log(ws, f"[{i}/{len(screens)}] {label} — preparing workspace...", "secondary")
+            await send_log(ws, f"[{i}/{len(screens)}] {label} — starting run...", "secondary")
+
+            try:
+                async for kind, payload, tone in run_cypress(
+                    session,
+                    s["feature"],
+                    s["script"],
+                    slug,
+                ):
+                    if kind == "log":
+                        await send_log(ws, f"[{label}] {payload}", tone or "secondary")
+                    elif kind == "exit":
+                        passed = payload == 0
+                        summary.append((label, passed, payload))
+                        tone_ = "success" if passed else "danger"
+                        await send_log(ws, f"[{label}] {'PASSED' if passed else 'FAILED'} (exit {payload})", tone_)
+            except CypressRunError as e:
+                summary.append((label, False, None))
+                await send_log(ws, f"[{label}] run error: {e}", "danger")
+                continue  # keep going — a broken screen shouldn't stop the rest of the module
+            except asyncio.CancelledError:
+                await send_log(ws, "run cancelled.", "muted")
+                raise
+
+        passed_count = sum(1 for _, p, _ in summary if p)
+        await send_log(ws, f"module run complete: {passed_count}/{len(summary)} screens passed.",
+                       "success" if passed_count == len(summary) else "accent")
+        await send_status(ws, "done")
+        await ws.send_json({
+            "type":    "module_result",
+            "results": [{"name": name, "passed": p, "exit_code": ec} for name, p, ec in summary],
+        })
+        return
+
     if not session.get("feature") or not session.get("script") or not session.get("resolved"):
         await send_error(ws, "nothing to run yet — fetch or generate first.")
         return

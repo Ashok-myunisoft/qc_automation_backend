@@ -63,7 +63,6 @@ class ProjectReader:
 
             project["folder_structure"].append(relative)
 
-            # Skip very large files
             try:
                 if path.stat().st_size > self.MAX_FILE_SIZE:
                     continue

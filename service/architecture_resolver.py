@@ -112,6 +112,48 @@ def resolve_existing(tree: list[str], module: str, screen: str) -> ResolvedScree
     )
 
 
+def resolve_module_screens(tree: list[str], module: str) -> list[ResolvedScreen]:
+    """Like resolve_existing, but returns every screen folder under the
+    given module instead of matching a single screen name. Reuses the
+    same module-hit fuzzy match and the same 'has a .feature + matching
+    .js' validity rule so results are consistent with single-screen fetch."""
+    module_norm = _normalize(module)
+    results: list[ResolvedScreen] = []
+
+    for directory, files in _group_by_dir(tree).items():
+        parts = directory.split("/")
+
+        module_hit = any(_similarity(_normalize(p), module_norm) > 0.75 for p in parts)
+        if not module_hit:
+            continue
+
+        feature_files = [f for f in files if f.endswith(".feature")]
+        if not feature_files:
+            continue
+
+        feature_file = feature_files[0]
+        slug = feature_file[: -len(".feature")]
+
+        script_file = next((f for f in files if f.startswith(slug) and f != feature_file), None)
+        if script_file is None:
+            script_file = next((f for f in files if f.endswith(".js")), None)
+        if script_file is None:
+            continue  # feature file with no matching script — skip, not a usable pair
+
+        results.append(ResolvedScreen(
+            dir=directory,
+            slug=slug,
+            feature_path=f"{directory}/{feature_file}",
+            script_path=f"{directory}/{script_file}",
+            confidence=1.0,   # module hit is binary here — no per-screen ambiguity
+            ambiguous=False,
+        ))
+
+    # Stable, readable order for the UI's screen-name list.
+    results.sort(key=lambda r: r.dir)
+    return results
+
+
 def build_new_path(module: str, screen: str) -> ResolvedScreen:
     """No existing match in the repo — construct a path for a brand new
     screen, following the same <Module>/<ScreenFolder>/<slug>.{feature,js}
