@@ -7,10 +7,6 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# Repo tree rarely changes second-to-second; cache it briefly so a burst of
-# fetch/generate/approve calls in one demo session doesn't refetch the whole
-# tree every time. force_refresh=True bypasses this when it matters (e.g.
-# right after a push, before resolving where to run).
 TREE_CACHE_SECONDS = 45
 
 
@@ -38,20 +34,12 @@ class GitLabService:
         return self._branch
 
     def get_clone_url(self) -> str:
-        """
-        Returns an authenticated HTTPS clone URL (token embedded), so
-        cypress_runner.py can `git clone`/`git pull` without needing its
-        own separate GitLab credentials or config.
-        """
         token = os.getenv("GITLAB_TOKEN")
-        base_url = self._project.http_url_to_repo  # e.g. https://gitlab.com/group/repo.git
+        base_url = self._project.http_url_to_repo 
         scheme, rest = base_url.split("://", 1)
         return f"{scheme}://oauth2:{token}@{rest}"
 
     def get_repo_tree(self, force_refresh: bool = False) -> list[str]:
-        """Returns every file path (blobs only, not directories) in the repo,
-        at self._branch. This is the whole "architecture" — one call, no
-        hardcoded module/screen list."""
         now = time.time()
         if (
             not force_refresh
@@ -70,7 +58,6 @@ class GitLabService:
         return paths
 
     def fetch_file(self, path: str) -> str | None:
-        """Returns file content as text, or None if it doesn't exist."""
         try:
             f = self._project.files.get(file_path=path, ref=self._branch)
         except gitlab.exceptions.GitlabGetError as e:
@@ -80,9 +67,6 @@ class GitLabService:
         return base64.b64decode(f.content).decode("utf-8")
 
     def create_or_update_file(self, path: str, content: str, commit_message: str) -> None:
-        """Creates the file if it doesn't exist, updates it (with its real
-        blob sha, via python-gitlab's file object) if it does. Also
-        invalidates the tree cache so a subsequent resolve sees the new file."""
         try:
             f = self._project.files.get(file_path=path, ref=self._branch)
             f.content = content
