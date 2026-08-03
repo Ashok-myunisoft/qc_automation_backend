@@ -1,7 +1,7 @@
 python-dotenv
-agent-framework
+agent-framework==1.12.1
 fastapi
 uvicorn[standard]
-python-multipart
-websockets
+python-multipart==8.5.0
+websockets==16.1.1
 python-gitlab
