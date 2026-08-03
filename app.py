@@ -9,8 +9,9 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from service.project_reader import ProjectReader
 from service.gitlab_service import GitLabService
 from service.architecture_resolver import (
-    resolve_existing, resolve_module_screens, build_new_path,
-    resolve_source_screen, resolve_source_module_screens, ResolvedSource,
+    build_new_path, ResolvedSource,
+    resolve_existing_precise, resolve_module_screens_precise,
+    resolve_source_screen_precise, resolve_source_module_screens_precise,
 )
 from service.cypress_runner import run_cypress, CypressRunError
 from Agents.project_analyze_agent import ProjectAnalysisAgent
@@ -132,7 +133,7 @@ async def handle_fetch(ws: WebSocket, session: dict, msg: dict):
     if scope == "module":
         await send_log(ws, f"scanned {len(tree)} files — looking for every screen in {module}...", "secondary")
 
-        candidates = resolve_module_screens(tree, module)
+        candidates = await resolve_module_screens_precise(tree, module)
         if not candidates:
             await send_log(ws, f"no screens found under module '{module}'.", "danger")
             await send_status(ws, "not_found")
@@ -174,16 +175,16 @@ async def handle_fetch(ws: WebSocket, session: dict, msg: dict):
 
     await send_log(ws, f"scanned {len(tree)} files — looking for {module} / {screen}...", "secondary")
 
-    resolved = resolve_existing(tree, module, screen)
+    resolved = await resolve_existing_precise(tree, module, screen)
     if resolved is None:
         await send_log(ws, f"no matching feature/script pair found for '{module} / {screen}' — use Generate instead.", "danger")
         await send_status(ws, "not_found")
         return
 
     if resolved.ambiguous:
-        await send_log(ws, f"more than one close match — picked {resolved.dir} (confidence {resolved.confidence}). Double-check.", "accent")
+        await send_log(ws, f"more than one close match ({resolved.resolved_by}) — picked {resolved.dir} (confidence {resolved.confidence}). Double-check.", "accent")
     else:
-        await send_log(ws, f"matched {resolved.dir} (confidence {resolved.confidence})", "success")
+        await send_log(ws, f"matched {resolved.dir} via {resolved.resolved_by} (confidence {resolved.confidence})", "success")
 
     try:
         feature_content = gl.fetch_file(resolved.feature_path)
@@ -287,8 +288,8 @@ async def handle_generate(ws: WebSocket, session: dict, msg: dict):
     except Exception as e:
         await send_log(ws, f"could not check output repo ({e}) — will resolve path on approve.", "muted")
 
-    def resolve_output_path(screen_name: str):
-        resolved = resolve_existing(out_tree, module, screen_name) if out_tree is not None else None
+    async def resolve_output_path(screen_name: str):
+        resolved = await resolve_existing_precise(out_tree, module, screen_name) if out_tree is not None else None
         if resolved is None:
             return build_new_path(module, screen_name), False
         return resolved, True
@@ -299,7 +300,7 @@ async def handle_generate(ws: WebSocket, session: dict, msg: dict):
     if scope == "module":
         await send_log(ws, f"scanned {len(src_tree)} source files — looking for every screen in {module}...", "secondary")
 
-        candidates = resolve_source_module_screens(src_tree, module)
+        candidates = await resolve_source_module_screens_precise(src_tree, module)
         if not candidates:
             await send_log(ws, f"no source screens found under module '{module}' in the source repo.", "danger")
             await send_status(ws, "not_found")
@@ -317,7 +318,7 @@ async def handle_generate(ws: WebSocket, session: dict, msg: dict):
             if outcome is None:
                 continue
 
-            resolved, existed = resolve_output_path(screen_name)
+            resolved, existed = await resolve_output_path(screen_name)
             await send_log(
                 ws,
                 f"[{screen_name}] existing files found at {resolved.dir} — will replace on approve."
@@ -347,16 +348,16 @@ async def handle_generate(ws: WebSocket, session: dict, msg: dict):
     # -----------------------------------------------------------------
     await send_log(ws, f"scanned {len(src_tree)} source files — looking for {module} / {screen}...", "secondary")
 
-    resolved_source = resolve_source_screen(src_tree, module, screen)
+    resolved_source = await resolve_source_screen_precise(src_tree, module, screen)
     if resolved_source is None:
         await send_log(ws, f"no source files found for '{module} / {screen}' in the source repo.", "danger")
         await send_status(ws, "not_found")
         return
 
     if resolved_source.ambiguous:
-        await send_log(ws, f"more than one close match — picked {resolved_source.dir} (confidence {resolved_source.confidence}). Double-check.", "accent")
+        await send_log(ws, f"more than one close match ({resolved_source.resolved_by}) — picked {resolved_source.dir} (confidence {resolved_source.confidence}). Double-check.", "accent")
     else:
-        await send_log(ws, f"matched source {resolved_source.dir} (confidence {resolved_source.confidence})", "success")
+        await send_log(ws, f"matched source {resolved_source.dir} via {resolved_source.resolved_by} (confidence {resolved_source.confidence})", "success")
 
     user_request = user_request or f"Generate Cypress tests for the {screen} screen in the {module} module."
 
@@ -369,7 +370,7 @@ async def handle_generate(ws: WebSocket, session: dict, msg: dict):
     session["script"]  = outcome["script"]
     session.pop("screens", None)
 
-    resolved, existed = resolve_output_path(screen)
+    resolved, existed = await resolve_output_path(screen)
     await send_log(
         ws,
         f"existing files found at {resolved.dir} — will replace on approve."

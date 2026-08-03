@@ -1,9 +1,23 @@
+import logging
 import re
 from dataclasses import dataclass
 from difflib import SequenceMatcher
 
+from Agents.architecture_agent import ArchitectureAgent
+
+logger = logging.getLogger(__name__)
+
+# Single shared agent instance — same eager-instantiation pattern app.py
+# already uses for the other four agents.
+_architecture_agent = ArchitectureAgent()
+
 # Below this similarity score, we don't trust the match at all.
 MIN_CONFIDENCE = 0.55
+
+# Below this agent-reported confidence, treat the agent's answer as not
+# trustworthy enough to use on its own — fall back to the fuzzy matcher
+# instead of accepting a low-confidence guess.
+MIN_AGENT_CONFIDENCE = 0.6
 
 # If the best and second-best candidate are within this distance of each
 # other, the match is ambiguous rather than confident. Surfaced to the
@@ -42,6 +56,7 @@ class ResolvedScreen:
     script_path: str
     confidence: float
     ambiguous: bool
+    resolved_by: str = "fuzzy"  # "agent" or "fuzzy" — which resolver produced this
 
 
 def _group_by_dir(tree: list[str]) -> dict[str, list[str]]:
@@ -154,12 +169,108 @@ def resolve_module_screens(tree: list[str], module: str) -> list[ResolvedScreen]
     return results
 
 
+def _valid_test_candidate(tree_set: set[str], directory: str, feature_path: str, script_path: str) -> bool:
+    """An agent-proposed test-repo answer is only trustworthy if every path
+    it named is copied verbatim from the real tree — never trust a path the
+    agent might have constructed or normalized itself."""
+    if not directory or not feature_path or not script_path:
+        return False
+    if feature_path not in tree_set or script_path not in tree_set:
+        return False
+    if not feature_path.startswith(directory + "/") or not script_path.startswith(directory + "/"):
+        return False
+    if not feature_path.endswith(".feature"):
+        return False
+    if script_path == feature_path or not script_path.endswith((".js", ".cy.js")):
+        return False
+    return True
+
+
+def _screen_from_agent_test_result(result: dict) -> ResolvedScreen | None:
+    directory     = result.get("dir")
+    feature_path  = result.get("feature_path")
+    script_path   = result.get("script_path")
+    confidence    = result.get("confidence")
+
+    if not isinstance(confidence, (int, float)) or confidence < MIN_AGENT_CONFIDENCE:
+        return None
+
+    feature_file = feature_path.rsplit("/", 1)[-1]
+    slug = feature_file[:-len(".feature")] if feature_file.endswith(".feature") else feature_file
+
+    return ResolvedScreen(
+        dir=directory,
+        slug=slug,
+        feature_path=feature_path,
+        script_path=script_path,
+        confidence=round(float(confidence), 3),
+        ambiguous=bool(result.get("ambiguous", False)),
+        resolved_by="agent",
+    )
+
+
+async def resolve_existing_precise(tree: list[str], module: str, screen: str) -> ResolvedScreen | None:
+    """Agent-first version of resolve_existing: asks ArchitectureAgent to
+    pick the exact folder/feature/script for this module+screen, verifies
+    the answer is actually present in the tree, and only falls back to the
+    deterministic fuzzy matcher if the agent errors, is under-confident, or
+    names something that isn't real."""
+    result = await _architecture_agent.resolve_screen(tree, module, screen, repo_kind="test")
+
+    if "error" not in result:
+        tree_set = set(tree)
+        if _valid_test_candidate(tree_set, result.get("dir"), result.get("feature_path"), result.get("script_path")):
+            resolved = _screen_from_agent_test_result(result)
+            if resolved is not None:
+                logger.info(
+                    "architecture agent resolved module=%r screen=%r -> dir=%r confidence=%.3f ambiguous=%s",
+                    module, screen, resolved.dir, resolved.confidence, resolved.ambiguous,
+                )
+                return resolved
+
+    logger.info("architecture agent unusable for %s/%s (%r) — falling back to fuzzy matcher", module, screen, result)
+    return resolve_existing(tree, module, screen)
+
+
+async def resolve_module_screens_precise(tree: list[str], module: str) -> list[ResolvedScreen]:
+    """Agent-first version of resolve_module_screens. Falls back to the
+    fuzzy matcher as a whole if the agent errors or returns nothing usable
+    at all — a partially-bad module response isn't trustworthy either, since
+    we can't tell if the agent simply missed a screen."""
+    result = await _architecture_agent.resolve_module(tree, module, repo_kind="test")
+
+    if "error" not in result and isinstance(result.get("screens"), list) and result["screens"]:
+        tree_set = set(tree)
+        resolved_list: list[ResolvedScreen] = []
+        for item in result["screens"]:
+            if not _valid_test_candidate(tree_set, item.get("dir"), item.get("feature_path"), item.get("script_path")):
+                resolved_list = []
+                break
+            screen = _screen_from_agent_test_result(item)
+            if screen is None:
+                resolved_list = []
+                break
+            resolved_list.append(screen)
+
+        if resolved_list:
+            resolved_list.sort(key=lambda r: r.dir)
+            logger.info(
+                "architecture agent resolved module=%r -> %d screen(s): %s",
+                module, len(resolved_list), [r.dir for r in resolved_list],
+            )
+            return resolved_list
+
+    logger.info("architecture agent unusable for module %s (%r) — falling back to fuzzy matcher", module, result)
+    return resolve_module_screens(tree, module)
+
+
 @dataclass
 class ResolvedSource:
     dir: str          # e.g. "Finance/InstrumentMaster"
     files: list[str]  # filenames directly inside that dir, e.g. ["instrument-master.component.ts", "...html"]
     confidence: float
     ambiguous: bool
+    resolved_by: str = "fuzzy"  # "agent" or "fuzzy" — which resolver produced this
 
 
 def resolve_source_screen(tree: list[str], module: str, screen: str) -> ResolvedSource | None:
@@ -223,6 +334,73 @@ def resolve_source_module_screens(tree: list[str], module: str) -> list[Resolved
 
     results.sort(key=lambda r: r.dir)
     return results
+
+
+def _source_from_agent_result(dirs_to_files: dict[str, list[str]], result: dict) -> ResolvedSource | None:
+    directory  = result.get("dir")
+    confidence = result.get("confidence")
+
+    if not directory or directory not in dirs_to_files:
+        return None
+    if not isinstance(confidence, (int, float)) or confidence < MIN_AGENT_CONFIDENCE:
+        return None
+
+    return ResolvedSource(
+        dir=directory,
+        files=dirs_to_files[directory],   # file list comes from the real tree, never the agent
+        confidence=round(float(confidence), 3),
+        ambiguous=bool(result.get("ambiguous", False)),
+        resolved_by="agent",
+    )
+
+
+async def resolve_source_screen_precise(tree: list[str], module: str, screen: str) -> ResolvedSource | None:
+    """Agent-first version of resolve_source_screen. The agent only ever
+    needs to name the correct folder — the actual file list inside it is
+    taken from the real tree, not from the agent, so a hallucinated
+    filename can't slip through."""
+    result = await _architecture_agent.resolve_screen(tree, module, screen, repo_kind="source")
+
+    if "error" not in result:
+        dirs_to_files = _group_by_dir(tree)
+        resolved = _source_from_agent_result(dirs_to_files, result)
+        if resolved is not None:
+            logger.info(
+                "architecture agent resolved source module=%r screen=%r -> dir=%r confidence=%.3f ambiguous=%s",
+                module, screen, resolved.dir, resolved.confidence, resolved.ambiguous,
+            )
+            return resolved
+
+    logger.info("architecture agent unusable for source %s/%s (%r) — falling back to fuzzy matcher", module, screen, result)
+    return resolve_source_screen(tree, module, screen)
+
+
+async def resolve_source_module_screens_precise(tree: list[str], module: str) -> list[ResolvedSource]:
+    """Agent-first version of resolve_source_module_screens. Falls back to
+    the fuzzy matcher as a whole if the agent's response isn't fully usable
+    — same reasoning as resolve_module_screens_precise."""
+    result = await _architecture_agent.resolve_module(tree, module, repo_kind="source")
+
+    if "error" not in result and isinstance(result.get("screens"), list) and result["screens"]:
+        dirs_to_files = _group_by_dir(tree)
+        resolved_list: list[ResolvedSource] = []
+        for item in result["screens"]:
+            resolved = _source_from_agent_result(dirs_to_files, item)
+            if resolved is None:
+                resolved_list = []
+                break
+            resolved_list.append(resolved)
+
+        if resolved_list:
+            resolved_list.sort(key=lambda r: r.dir)
+            logger.info(
+                "architecture agent resolved source module=%r -> %d screen(s): %s",
+                module, len(resolved_list), [r.dir for r in resolved_list],
+            )
+            return resolved_list
+
+    logger.info("architecture agent unusable for source module %s (%r) — falling back to fuzzy matcher", module, result)
+    return resolve_source_module_screens(tree, module)
 
 
 def build_new_path(module: str, screen: str) -> ResolvedScreen:

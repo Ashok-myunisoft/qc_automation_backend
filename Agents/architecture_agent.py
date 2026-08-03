@@ -5,7 +5,6 @@ from pathlib import Path
 from agent_framework import Agent
 from agent_framework.openai import OpenAIChatClient
 from dotenv import load_dotenv
-from service.git_service import fetch_qc_repo_tree, fetch_qc_file_by_path
 
 load_dotenv()
 
@@ -21,77 +20,53 @@ class ArchitectureAgent:
         self.agent = Agent(
             name="ArchitectureAgent",
             client=self.client,
-            instructions=self.instructions
+            instructions=self.instructions,
         )
 
-    async def find_files(self, module: str, screen: str) -> dict:
-        """
-        Given a module name and screen name, fetches the QC test repo tree
-        and uses the agent to identify the correct .feature and .cy.js paths.
-        Then fetches their content and returns everything.
-
-        Returns:
-        {
-            "feature_path": "features/crm/lead_management.feature",
-            "feature_content": "<full .feature content>",
-            "script_path": "cypress/e2e/crm/lead_management.cy.js",
-            "script_content": "<full .cy.js content>",
-        }
-        Or on failure:
-        {
-            "error": "reason"
-        }
-        """
-
-        # Step 1 — fetch the full QC repo file tree (paths only)
-        all_paths = fetch_qc_repo_tree()
-
-        if not all_paths:
-            return {"error": "Could not fetch QC repo tree from GitHub"}
-
-        # Step 2 — ask agent to identify the right paths
-        user_message = f"""
-Module: {module}
-Screen: {screen}
-
-QC test repo file paths:
-{chr(10).join(all_paths)}
-"""
-
-        logger.info("ArchitectureAgent: calling agent.run()...")
-        response = await self.agent.run(user_message)
-        logger.info("ArchitectureAgent: agent.run() returned")
+    async def _ask(self, user_message: str) -> dict:
+        try:
+            response = await self.agent.run(user_message)
+        except Exception as e:
+            logger.warning("ArchitectureAgent call failed: %s", e)
+            return {"error": f"agent call failed: {e}"}
 
         try:
-            identified = json.loads(response.text)
-            logger.info(f"ArchitectureAgent: parsed JSON = {identified}")
+            return json.loads(response.text)
         except json.JSONDecodeError:
-            return {"error": f"Agent returned invalid JSON: {response.text}"}
+            logger.warning("ArchitectureAgent returned invalid JSON: %s", response.text)
+            return {"error": "agent returned invalid JSON"}
 
-        feature_path = identified.get("feature_path")
-        script_path  = identified.get("script_path")
+    async def resolve_screen(self, tree: list[str], module: str, screen: str, repo_kind: str) -> dict:
+        logger.info(
+            "ArchitectureAgent.resolve_screen called with module=%r screen=%r repo_kind=%r (%d tree entries)",
+            module, screen, repo_kind, len(tree),
+        )
+        user_message = f"""
+repo_kind: {repo_kind}
+scope: screen
+module: {module}
+screen: {screen}
 
-        if not feature_path or not script_path:
-            return {"error": f"Agent could not identify files for {module} > {screen}"}
+repo file paths:
+{chr(10).join(tree)}
+"""
+        result = await self._ask(user_message)
+        logger.info("ArchitectureAgent.resolve_screen raw result for module=%r screen=%r: %r", module, screen, result)
+        return result
 
-        # Step 3 — fetch the actual file contents
-        logger.info(f"ArchitectureAgent: fetching feature file {feature_path}...")
-        feature_content = fetch_qc_file_by_path(feature_path)
-        logger.info("ArchitectureAgent: feature file fetched")
+    async def resolve_module(self, tree: list[str], module: str, repo_kind: str) -> dict:
+        logger.info(
+            "ArchitectureAgent.resolve_module called with module=%r repo_kind=%r (%d tree entries)",
+            module, repo_kind, len(tree),
+        )
+        user_message = f"""
+repo_kind: {repo_kind}
+scope: module
+module: {module}
 
-        logger.info(f"ArchitectureAgent: fetching script file {script_path}...")
-        script_content  = fetch_qc_file_by_path(script_path)
-        logger.info("ArchitectureAgent: script file fetched")
-
-        if not feature_content:
-            return {"error": f"File not found in repo: {feature_path}"}
-
-        if not script_content:
-            return {"error": f"File not found in repo: {script_path}"}
-
-        return {
-            "feature_path":    feature_path,
-            "feature_content": feature_content,
-            "script_path":     script_path,
-            "script_content":  script_content,
-        }
+repo file paths:
+{chr(10).join(tree)}
+"""
+        result = await self._ask(user_message)
+        logger.info("ArchitectureAgent.resolve_module raw result for module=%r: %r", module, result)
+        return result
