@@ -1,0 +1,19 @@
+diff --git a/node_modules/@badeball/cypress-cucumber-preprocessor/dist/template.js b/node_modules/@badeball/cypress-cucumber-preprocessor/dist/template.js
+index 81664cf..82447ea 100644
+--- a/node_modules/@badeball/cypress-cucumber-preprocessor/dist/template.js
++++ b/node_modules/@badeball/cypress-cucumber-preprocessor/dist/template.js
+@@ -33,9 +33,11 @@ async function compile(configuration, data, uri) {
+     }
+     const gherkinDocument = (0, assertions_1.assertAndReturn)(envelopes.map((envelope) => envelope.gherkinDocument).find(type_guards_1.notNull), "Expected to find a gherkin document amongst the envelopes.");
+     const pickles = envelopes.map((envelope) => envelope.pickle).filter(type_guards_1.notNull);
+-    const implicitIntegrationFolder = (0, assertions_1.assertAndReturn)((0, common_ancestor_path_1.default)(...(0, find_cypress_specs_1.getSpecs)(configuration, "foobar", true)
+-        .map(path_1.default.dirname)
+-        .map(path_1.default.normalize)), "Expected to find a common ancestor path");
++    const _allSpecs = (0, find_cypress_specs_1.getSpecs)(configuration, "e2e", true);
++    const implicitIntegrationFolder = _allSpecs.length > 0
++        ? (0, common_ancestor_path_1.default)(..._allSpecs.map(path_1.default.dirname).map(path_1.default.normalize))
++        : (0, path_1.default.join)(configuration.projectRoot, "cypress", "src", "features");
++    (0, assertions_1.assertAndReturn)(implicitIntegrationFolder, "Expected to find a common ancestor path");
+     const preprocessor = await (0, preprocessor_configuration_1.resolve)(configuration, configuration.env, implicitIntegrationFolder);
+     const { stepDefinitions } = preprocessor;
+     (0, debug_1.default)(`resolving step definitio|ns using template(s) ${(0, util_1.inspect)(stepDefinitions)}`);

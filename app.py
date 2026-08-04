@@ -2,10 +2,10 @@ import asyncio
 import logging
 import tempfile
 from pathlib import Path
-
-import logger_config  # noqa: F401
+import sys
+import logger_config 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-
+import warnings
 from service.project_reader import ProjectReader
 from service.gitlab_service import GitLabService
 from service.architecture_resolver import (
@@ -31,6 +31,10 @@ validate_agent         = ValidateAgent()
 interrupt_agent        = InterruptAgent()
 
 reader = ProjectReader()
+if sys.platform == "win32":
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", DeprecationWarning)
+        asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
 
 
 def _gitlab_service() -> GitLabService:

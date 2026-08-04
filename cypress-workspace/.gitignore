@@ -1,4 +1,10 @@
-node_modules/
-cypress/e2e/_runs/
-cypress/videos/
-cypress/screenshots/
+node_modules
+reports
+mochawesome-reports
+screenshots
+videos
+downloads
+gitlab-ci.yml
+test-result.txt
+HRMS.txt
+cypress.env.json

@@ -27,8 +27,11 @@ class TestCaseAgent:
         self,
         project_analysis: dict,
         user_request: str,
-        business_context: dict = None
-    ):    
+        business_context: dict = None,
+    ):
+        """No existing-step-vocabulary input anymore — every generated screen
+        is self-contained (see ScriptGenerateAgent), so there's nothing to
+        phrase steps to match. Gherkin wording is free to read naturally."""
         user_message = f"""
 User Request:
 {user_request}
@@ -40,6 +43,5 @@ Business Context:
 {json.dumps(business_context, indent=2) if business_context else "No business context provided."}
 """
 
-        response = await self.agent.run(user_message)    
+        response = await self.agent.run(user_message)
         return response.text
-  

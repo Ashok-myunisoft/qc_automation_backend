@@ -1,6 +1,0 @@
-{
-  "required": "This field is required",
-  "invalidEmail": "Please enter a valid email address",
-  "invalidDate": "Please enter a valid date",
-  "invalidNumber": "Please enter a valid number"
-}

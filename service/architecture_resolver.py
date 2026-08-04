@@ -7,36 +7,30 @@ from Agents.architecture_agent import ArchitectureAgent
 
 logger = logging.getLogger(__name__)
 
-# Single shared agent instance — same eager-instantiation pattern app.py
-# already uses for the other four agents.
 _architecture_agent = ArchitectureAgent()
 
-# Below this similarity score, we don't trust the match at all.
 MIN_CONFIDENCE = 0.55
-
-# Below this agent-reported confidence, treat the agent's answer as not
-# trustworthy enough to use on its own — fall back to the fuzzy matcher
-# instead of accepting a low-confidence guess.
+MIN_MODULE_CONFIDENCE = 0.5
 MIN_AGENT_CONFIDENCE = 0.6
-
-# If the best and second-best candidate are within this distance of each
-# other, the match is ambiguous rather than confident. Surfaced to the
-# caller so the UI/logs can say "found a couple of close matches" instead
-# of silently picking one. (This is also the seam described above where an
-# LLM tie-breaker could be inserted later if needed.)
 AMBIGUITY_MARGIN = 0.08
+MODULE_HIT_THRESHOLD = 0.75
+
+_MODULE_STOPWORDS = {"module", "the", "and"}
+
+# If present, real-repo test trees keep UI regression screens under this
+# prefix, separate from API_Tests/Smoke-Testing trees that reuse the same
+# module names. Auto-detected — repos without this prefix (e.g. a flat
+# dummy/demo repo) are scanned in full instead.
+REGRESSION_TESTING_PREFIX = "cypress/src/features/Regression-Testing/"
 
 
 def _normalize(text: str) -> str:
-    """Strip everything but letters/digits and lowercase, so 'Instrument
-    Master', 'instrument-master', and 'InstrumentMaster' all compare equal."""
     return re.sub(r"[^a-z0-9]", "", text.lower())
 
 
-def _slugify(text: str) -> str:
-    text = text.strip().lower()
-    text = re.sub(r"[^a-z0-9]+", "-", text)
-    return text.strip("-")
+def _normalize_module_text(text: str) -> str:
+    words = re.split(r"[^a-zA-Z0-9]+", text.strip().lower())
+    return "".join(w for w in words if w and w not in _MODULE_STOPWORDS)
 
 
 def _pascal(text: str) -> str:
@@ -48,15 +42,255 @@ def _similarity(a: str, b: str) -> float:
     return SequenceMatcher(None, a, b).ratio()
 
 
+def _searchable_tree(tree: list[str]) -> list[str]:
+    scoped = [p for p in tree if p.startswith(REGRESSION_TESTING_PREFIX)]
+    return scoped if scoped else tree
+
+
+# ---------------------------------------------------------------------------
+# qc_test (output) repo shape — NO fixed depth, NO shared step library.
+# Every real screen is a folder containing exactly one .feature file and
+# one script file (.js or .cy.js) — self-contained, no dependency on any
+# other screen's file. e.g.:
+#
+#   cypress/src/features/Regression-Testing/ESS_Module/PaySlip/PaySlip.feature
+#   cypress/src/features/Regression-Testing/ESS_Module/PaySlip/PaySlip.js
+#
+#   -- or, in a flatter demo/dummy repo --
+#
+#   Finance/InstrumentMaster/instrument-master.feature
+#   Finance/InstrumentMaster/instrument-master.js
+# ---------------------------------------------------------------------------
 @dataclass
-class ResolvedScreen:
-    dir: str  # e.g. "Finance/InstrumentMaster"
-    slug: str  # e.g. "instrument-master"
-    feature_path: str
-    script_path: str
+class ResolvedFeature:
+    dir: str            # the screen's folder
+    feature_path: str   # full path to the .feature file
+    script_path: str    # full path to the paired script file
+    slug: str            # filesystem-safe screen identifier (folder's own name), used to name the isolated local run folder — never a repo path
     confidence: float
     ambiguous: bool
-    resolved_by: str = "fuzzy"  # "agent" or "fuzzy" — which resolver produced this
+    resolved_by: str = "fuzzy"  # "agent" or "fuzzy"
+
+
+def _group_screen_folders(tree: list[str]) -> dict[str, dict]:
+    """Every folder containing >=1 .feature file, with the .feature path and
+    every candidate script path (.js/.cy.js, excluding the feature itself)
+    directly inside it."""
+    folders: dict[str, dict] = {}
+    for path in tree:
+        if "/" not in path:
+            continue
+        directory, filename = path.rsplit("/", 1)
+        if filename.endswith(".feature"):
+            folders.setdefault(directory, {"feature": None, "scripts": []})
+            folders[directory]["feature"] = path
+        elif filename.endswith(".cy.js") or filename.endswith(".js"):
+            folders.setdefault(directory, {"feature": None, "scripts": []})
+            folders[directory]["scripts"].append(path)
+
+    return {d: v for d, v in folders.items() if v["feature"] is not None and v["scripts"]}
+
+
+def _pick_script(scripts: list[str], screen: str) -> str:
+    """Most screens have exactly one script in their folder. If there's ever
+    more than one, pick the one whose filename best matches the screen name."""
+    if len(scripts) == 1:
+        return scripts[0]
+    screen_norm = _normalize(screen)
+    scored = sorted(
+        scripts,
+        key=lambda p: _similarity(_normalize(p.rsplit("/", 1)[-1].rsplit(".", 1)[0]), screen_norm),
+        reverse=True,
+    )
+    return scored[0]
+
+
+def resolve_existing(tree: list[str], module: str, screen: str) -> ResolvedFeature | None:
+    """Fuzzy matcher: finds the screen folder whose path contains the given
+    module (anywhere in the path) and whose folder name / feature filename
+    best matches the given screen — independent of folder depth."""
+    module_norm = _normalize_module_text(module)
+    screen_norm = _normalize(screen)
+
+    scored = []
+    for directory, info in _group_screen_folders(_searchable_tree(tree)).items():
+        parts = directory.split("/")
+        module_hit = any(_similarity(_normalize_module_text(p), module_norm) > MODULE_HIT_THRESHOLD for p in parts)
+        if not module_hit:
+            continue
+
+        screen_folder = parts[-1]
+        feature_stem = info["feature"].rsplit("/", 1)[-1][: -len(".feature")]
+        score = max(
+            _similarity(_normalize(screen_folder), screen_norm),
+            _similarity(_normalize(feature_stem), screen_norm),
+        )
+        scored.append((score, directory, info))
+
+    if not scored:
+        return None
+
+    scored.sort(key=lambda t: t[0], reverse=True)
+    best_score, best_dir, best_info = scored[0]
+    if best_score < MIN_CONFIDENCE:
+        return None
+
+    ambiguous = len(scored) > 1 and (best_score - scored[1][0]) < AMBIGUITY_MARGIN
+    script_path = _pick_script(best_info["scripts"], screen)
+
+    return ResolvedFeature(
+        dir=best_dir,
+        feature_path=best_info["feature"],
+        script_path=script_path,
+        slug=best_dir.rsplit("/", 1)[-1],
+        confidence=round(best_score, 3),
+        ambiguous=ambiguous,
+    )
+
+
+def resolve_module_screens(tree: list[str], module: str) -> list[ResolvedFeature]:
+    """Every screen folder anywhere under a path matching the given module."""
+    module_norm = _normalize_module_text(module)
+    results = []
+    for directory, info in _group_screen_folders(_searchable_tree(tree)).items():
+        parts = directory.split("/")
+        module_hit = any(_similarity(_normalize_module_text(p), module_norm) > MODULE_HIT_THRESHOLD for p in parts)
+        if not module_hit:
+            continue
+
+        screen_name = directory.rsplit("/", 1)[-1]
+        results.append(ResolvedFeature(
+            dir=directory,
+            feature_path=info["feature"],
+            script_path=_pick_script(info["scripts"], screen_name),
+            slug=screen_name,
+            confidence=1.0,
+            ambiguous=False,
+        ))
+
+    results.sort(key=lambda r: r.dir)
+    return results
+
+
+def _valid_feature_candidate(tree_set: set[str], directory: str, feature_path: str, script_path: str) -> bool:
+    if not directory or not feature_path or not script_path:
+        return False
+    if feature_path not in tree_set or script_path not in tree_set:
+        return False
+    # Must be the EXACT immediate parent folder of both files — not merely
+    # a string prefix. A prefix check (e.g. "startswith(directory + '/')")
+    # would wrongly accept a truncated/hallucinated dir like "cypress",
+    # since virtually every real path in this repo starts with "cypress/".
+    # That let a wrong dir slip through with a correct feature_path/script_path,
+    # corrupting resolved.dir/resolved.slug downstream (both would become
+    # "cypress" instead of the real screen folder name).
+    if feature_path.rsplit("/", 1)[0] != directory:
+        return False
+    if script_path.rsplit("/", 1)[0] != directory:
+        return False
+    if not feature_path.endswith(".feature"):
+        return False
+    if script_path == feature_path:
+        return False
+    if not (script_path.endswith(".js") or script_path.endswith(".cy.js")):
+        return False
+    return True
+
+
+def _feature_from_agent_result(result: dict) -> ResolvedFeature | None:
+    directory    = result.get("dir")
+    feature_path = result.get("feature_path")
+    script_path  = result.get("script_path")
+    confidence   = result.get("confidence")
+
+    if not isinstance(confidence, (int, float)) or confidence < MIN_AGENT_CONFIDENCE:
+        return None
+
+    return ResolvedFeature(
+        dir=directory,
+        feature_path=feature_path,
+        script_path=script_path,
+        slug=directory.rsplit("/", 1)[-1],
+        confidence=round(float(confidence), 3),
+        ambiguous=bool(result.get("ambiguous", False)),
+        resolved_by="agent",
+    )
+
+
+async def resolve_existing_precise(tree: list[str], module: str, screen: str) -> ResolvedFeature | None:
+    result = await _architecture_agent.resolve_screen(tree, module, screen, repo_kind="test")
+
+    if "error" not in result:
+        tree_set = set(tree)
+        if _valid_feature_candidate(tree_set, result.get("dir"), result.get("feature_path"), result.get("script_path")):
+            resolved = _feature_from_agent_result(result)
+            if resolved is not None:
+                logger.info(
+                    "architecture agent resolved module=%r screen=%r -> feature_path=%r script_path=%r confidence=%.3f ambiguous=%s",
+                    module, screen, resolved.feature_path, resolved.script_path, resolved.confidence, resolved.ambiguous,
+                )
+                return resolved
+
+    logger.info("architecture agent unusable for %s/%s (%r) — falling back to fuzzy matcher", module, screen, result)
+    return resolve_existing(tree, module, screen)
+
+
+async def resolve_module_screens_precise(tree: list[str], module: str) -> list[ResolvedFeature]:
+    result = await _architecture_agent.resolve_module(tree, module, repo_kind="test")
+
+    if "error" not in result and isinstance(result.get("screens"), list) and result["screens"]:
+        tree_set = set(tree)
+        resolved_list: list[ResolvedFeature] = []
+        for item in result["screens"]:
+            if not _valid_feature_candidate(tree_set, item.get("dir"), item.get("feature_path"), item.get("script_path")):
+                resolved_list = []
+                break
+            feature = _feature_from_agent_result(item)
+            if feature is None:
+                resolved_list = []
+                break
+            resolved_list.append(feature)
+
+        if resolved_list:
+            resolved_list.sort(key=lambda r: r.feature_path)
+            logger.info(
+                "architecture agent resolved module=%r -> %d screen(s): %s",
+                module, len(resolved_list), [r.feature_path for r in resolved_list],
+            )
+            return resolved_list
+
+    logger.info("architecture agent unusable for module %s (%r) — falling back to fuzzy matcher", module, result)
+    return resolve_module_screens(tree, module)
+
+
+def build_new_path(module: str, screen: str) -> ResolvedFeature:
+    """No existing match — construct a path for a brand new screen, per-screen
+    folder with its own self-contained feature + script."""
+    module_folder = f"{_pascal(module)}_Module"
+    screen_name = _pascal(screen)
+    directory = f"cypress/src/features/Regression-Testing/{module_folder}/{screen_name}"
+
+    return ResolvedFeature(
+        dir=directory,
+        feature_path=f"{directory}/{screen_name}.feature",
+        script_path=f"{directory}/{screen_name}.js",
+        slug=screen_name,
+        confidence=1.0,
+        ambiguous=False,
+    )
+
+
+# ---------------------------------------------------------------------------
+# qc_source (input) repo shape — UNCHANGED. Angular source folders, each a
+# loose bag of files, no fixed pairing.
+# ---------------------------------------------------------------------------
+@dataclass
+class ResolvedSource:
+    dir: str
+    files: list[str]
+    confidence: float
+    ambiguous: bool
+    resolved_by: str = "fuzzy"
 
 
 def _group_by_dir(tree: list[str]) -> dict[str, list[str]]:
@@ -69,226 +303,16 @@ def _group_by_dir(tree: list[str]) -> dict[str, list[str]]:
     return groups
 
 
-def resolve_existing(tree: list[str], module: str, screen: str) -> ResolvedScreen | None:
-    module_norm = _normalize(module)
-    screen_norm = _normalize(screen)
-
-    scored: list[tuple[float, str, list[str]]] = []
-
-    for directory, files in _group_by_dir(tree).items():
-        parts = directory.split("/")
-
-        # The module must appear somewhere in the path (fuzzy — tolerates
-        # "Finance" vs "finance" vs "Fin" typos to a degree).
-        module_hit = any(_similarity(_normalize(p), module_norm) > 0.75 for p in parts)
-        if not module_hit:
-            continue
-
-        # Score the deepest folder name (the screen-level folder) against
-        # the requested screen name.
-        screen_folder = parts[-1]
-        score = _similarity(_normalize(screen_folder), screen_norm)
-
-        # A repo folder only counts as a real candidate if it actually has
-        # a .feature file in it — otherwise it's not a screen's test folder.
-        if not any(f.endswith(".feature") for f in files):
-            continue
-
-        scored.append((score, directory, files))
-
-    if not scored:
-        return None
-
-    scored.sort(key=lambda t: t[0], reverse=True)
-    best_score, best_dir, best_files = scored[0]
-
-    if best_score < MIN_CONFIDENCE:
-        return None
-
-    ambiguous = len(scored) > 1 and (best_score - scored[1][0]) < AMBIGUITY_MARGIN
-
-    feature_files = [f for f in best_files if f.endswith(".feature")]
-    feature_file = feature_files[0]
-    slug = feature_file[: -len(".feature")]
-
-    script_file = next((f for f in best_files if f.startswith(slug) and f != feature_file), None)
-    if script_file is None:
-        script_file = next((f for f in best_files if f.endswith(".js")), None)
-    if script_file is None:
-        return None  # feature file with no matching script — not a usable pair
-
-    return ResolvedScreen(
-        dir=best_dir,
-        slug=slug,
-        feature_path=f"{best_dir}/{feature_file}",
-        script_path=f"{best_dir}/{script_file}",
-        confidence=round(best_score, 3),
-        ambiguous=ambiguous,
-    )
-
-
-def resolve_module_screens(tree: list[str], module: str) -> list[ResolvedScreen]:
-    """Like resolve_existing, but returns every screen folder under the
-    given module instead of matching a single screen name. Reuses the
-    same module-hit fuzzy match and the same 'has a .feature + matching
-    .js' validity rule so results are consistent with single-screen fetch."""
-    module_norm = _normalize(module)
-    results: list[ResolvedScreen] = []
-
-    for directory, files in _group_by_dir(tree).items():
-        parts = directory.split("/")
-
-        module_hit = any(_similarity(_normalize(p), module_norm) > 0.75 for p in parts)
-        if not module_hit:
-            continue
-
-        feature_files = [f for f in files if f.endswith(".feature")]
-        if not feature_files:
-            continue
-
-        feature_file = feature_files[0]
-        slug = feature_file[: -len(".feature")]
-
-        script_file = next((f for f in files if f.startswith(slug) and f != feature_file), None)
-        if script_file is None:
-            script_file = next((f for f in files if f.endswith(".js")), None)
-        if script_file is None:
-            continue  # feature file with no matching script — skip, not a usable pair
-
-        results.append(ResolvedScreen(
-            dir=directory,
-            slug=slug,
-            feature_path=f"{directory}/{feature_file}",
-            script_path=f"{directory}/{script_file}",
-            confidence=1.0,   # module hit is binary here — no per-screen ambiguity
-            ambiguous=False,
-        ))
-
-    # Stable, readable order for the UI's screen-name list.
-    results.sort(key=lambda r: r.dir)
-    return results
-
-
-def _valid_test_candidate(tree_set: set[str], directory: str, feature_path: str, script_path: str) -> bool:
-    """An agent-proposed test-repo answer is only trustworthy if every path
-    it named is copied verbatim from the real tree — never trust a path the
-    agent might have constructed or normalized itself."""
-    if not directory or not feature_path or not script_path:
-        return False
-    if feature_path not in tree_set or script_path not in tree_set:
-        return False
-    if not feature_path.startswith(directory + "/") or not script_path.startswith(directory + "/"):
-        return False
-    if not feature_path.endswith(".feature"):
-        return False
-    if script_path == feature_path or not script_path.endswith((".js", ".cy.js")):
-        return False
-    return True
-
-
-def _screen_from_agent_test_result(result: dict) -> ResolvedScreen | None:
-    directory     = result.get("dir")
-    feature_path  = result.get("feature_path")
-    script_path   = result.get("script_path")
-    confidence    = result.get("confidence")
-
-    if not isinstance(confidence, (int, float)) or confidence < MIN_AGENT_CONFIDENCE:
-        return None
-
-    feature_file = feature_path.rsplit("/", 1)[-1]
-    slug = feature_file[:-len(".feature")] if feature_file.endswith(".feature") else feature_file
-
-    return ResolvedScreen(
-        dir=directory,
-        slug=slug,
-        feature_path=feature_path,
-        script_path=script_path,
-        confidence=round(float(confidence), 3),
-        ambiguous=bool(result.get("ambiguous", False)),
-        resolved_by="agent",
-    )
-
-
-async def resolve_existing_precise(tree: list[str], module: str, screen: str) -> ResolvedScreen | None:
-    """Agent-first version of resolve_existing: asks ArchitectureAgent to
-    pick the exact folder/feature/script for this module+screen, verifies
-    the answer is actually present in the tree, and only falls back to the
-    deterministic fuzzy matcher if the agent errors, is under-confident, or
-    names something that isn't real."""
-    result = await _architecture_agent.resolve_screen(tree, module, screen, repo_kind="test")
-
-    if "error" not in result:
-        tree_set = set(tree)
-        if _valid_test_candidate(tree_set, result.get("dir"), result.get("feature_path"), result.get("script_path")):
-            resolved = _screen_from_agent_test_result(result)
-            if resolved is not None:
-                logger.info(
-                    "architecture agent resolved module=%r screen=%r -> dir=%r confidence=%.3f ambiguous=%s",
-                    module, screen, resolved.dir, resolved.confidence, resolved.ambiguous,
-                )
-                return resolved
-
-    logger.info("architecture agent unusable for %s/%s (%r) — falling back to fuzzy matcher", module, screen, result)
-    return resolve_existing(tree, module, screen)
-
-
-async def resolve_module_screens_precise(tree: list[str], module: str) -> list[ResolvedScreen]:
-    """Agent-first version of resolve_module_screens. Falls back to the
-    fuzzy matcher as a whole if the agent errors or returns nothing usable
-    at all — a partially-bad module response isn't trustworthy either, since
-    we can't tell if the agent simply missed a screen."""
-    result = await _architecture_agent.resolve_module(tree, module, repo_kind="test")
-
-    if "error" not in result and isinstance(result.get("screens"), list) and result["screens"]:
-        tree_set = set(tree)
-        resolved_list: list[ResolvedScreen] = []
-        for item in result["screens"]:
-            if not _valid_test_candidate(tree_set, item.get("dir"), item.get("feature_path"), item.get("script_path")):
-                resolved_list = []
-                break
-            screen = _screen_from_agent_test_result(item)
-            if screen is None:
-                resolved_list = []
-                break
-            resolved_list.append(screen)
-
-        if resolved_list:
-            resolved_list.sort(key=lambda r: r.dir)
-            logger.info(
-                "architecture agent resolved module=%r -> %d screen(s): %s",
-                module, len(resolved_list), [r.dir for r in resolved_list],
-            )
-            return resolved_list
-
-    logger.info("architecture agent unusable for module %s (%r) — falling back to fuzzy matcher", module, result)
-    return resolve_module_screens(tree, module)
-
-
-@dataclass
-class ResolvedSource:
-    dir: str          # e.g. "Finance/InstrumentMaster"
-    files: list[str]  # filenames directly inside that dir, e.g. ["instrument-master.component.ts", "...html"]
-    confidence: float
-    ambiguous: bool
-    resolved_by: str = "fuzzy"  # "agent" or "fuzzy" — which resolver produced this
-
-
 def resolve_source_screen(tree: list[str], module: str, screen: str) -> ResolvedSource | None:
-    """Same fuzzy module/screen matching as resolve_existing, but against the
-    *source* repo: any non-empty folder under the module counts as a
-    candidate (source screens aren't necessarily .feature/.js pairs)."""
     module_norm = _normalize(module)
     screen_norm = _normalize(screen)
 
     scored: list[tuple[float, str, list[str]]] = []
-
     for directory, files in _group_by_dir(tree).items():
         parts = directory.split("/")
-
-        module_hit = any(_similarity(_normalize(p), module_norm) > 0.75 for p in parts)
+        module_hit = any(_similarity(_normalize(p), module_norm) > MODULE_HIT_THRESHOLD for p in parts)
         if not module_hit or not files:
             continue
-
         screen_folder = parts[-1]
         score = _similarity(_normalize(screen_folder), screen_norm)
         scored.append((score, directory, files))
@@ -298,7 +322,6 @@ def resolve_source_screen(tree: list[str], module: str, screen: str) -> Resolved
 
     scored.sort(key=lambda t: t[0], reverse=True)
     best_score, best_dir, best_files = scored[0]
-
     if best_score < MIN_CONFIDENCE:
         return None
 
@@ -313,24 +336,14 @@ def resolve_source_screen(tree: list[str], module: str, screen: str) -> Resolved
 
 
 def resolve_source_module_screens(tree: list[str], module: str) -> list[ResolvedSource]:
-    """Like resolve_source_screen, but returns every screen folder under the
-    given module in the source repo."""
     module_norm = _normalize(module)
     results: list[ResolvedSource] = []
-
     for directory, files in _group_by_dir(tree).items():
         parts = directory.split("/")
-
-        module_hit = any(_similarity(_normalize(p), module_norm) > 0.75 for p in parts)
+        module_hit = any(_similarity(_normalize(p), module_norm) > MODULE_HIT_THRESHOLD for p in parts)
         if not module_hit or not files:
             continue
-
-        results.append(ResolvedSource(
-            dir=directory,
-            files=files,
-            confidence=1.0,
-            ambiguous=False,
-        ))
+        results.append(ResolvedSource(dir=directory, files=files, confidence=1.0, ambiguous=False))
 
     results.sort(key=lambda r: r.dir)
     return results
@@ -347,7 +360,7 @@ def _source_from_agent_result(dirs_to_files: dict[str, list[str]], result: dict)
 
     return ResolvedSource(
         dir=directory,
-        files=dirs_to_files[directory],   # file list comes from the real tree, never the agent
+        files=dirs_to_files[directory],
         confidence=round(float(confidence), 3),
         ambiguous=bool(result.get("ambiguous", False)),
         resolved_by="agent",
@@ -355,10 +368,6 @@ def _source_from_agent_result(dirs_to_files: dict[str, list[str]], result: dict)
 
 
 async def resolve_source_screen_precise(tree: list[str], module: str, screen: str) -> ResolvedSource | None:
-    """Agent-first version of resolve_source_screen. The agent only ever
-    needs to name the correct folder — the actual file list inside it is
-    taken from the real tree, not from the agent, so a hallucinated
-    filename can't slip through."""
     result = await _architecture_agent.resolve_screen(tree, module, screen, repo_kind="source")
 
     if "error" not in result:
@@ -376,9 +385,6 @@ async def resolve_source_screen_precise(tree: list[str], module: str, screen: st
 
 
 async def resolve_source_module_screens_precise(tree: list[str], module: str) -> list[ResolvedSource]:
-    """Agent-first version of resolve_source_module_screens. Falls back to
-    the fuzzy matcher as a whole if the agent's response isn't fully usable
-    — same reasoning as resolve_module_screens_precise."""
     result = await _architecture_agent.resolve_module(tree, module, repo_kind="source")
 
     if "error" not in result and isinstance(result.get("screens"), list) and result["screens"]:
@@ -401,22 +407,3 @@ async def resolve_source_module_screens_precise(tree: list[str], module: str) ->
 
     logger.info("architecture agent unusable for source module %s (%r) — falling back to fuzzy matcher", module, result)
     return resolve_source_module_screens(tree, module)
-
-
-def build_new_path(module: str, screen: str) -> ResolvedScreen:
-    """No existing match in the repo — construct a path for a brand new
-    screen, following the same <Module>/<ScreenFolder>/<slug>.{feature,js}
-    convention the resolver looks for above."""
-    module_folder = module.strip().replace(" ", "")
-    screen_folder = _pascal(screen)
-    slug = _slugify(screen)
-    directory = f"{module_folder}/{screen_folder}"
-
-    return ResolvedScreen(
-        dir=directory,
-        slug=slug,
-        feature_path=f"{directory}/{slug}.feature",
-        script_path=f"{directory}/{slug}.js",
-        confidence=1.0,
-        ambiguous=False,
-    )
