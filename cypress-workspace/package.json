@@ -8,7 +8,7 @@
     "cy-open": "cypress open",
     "cy-run": "cypress run",
     "cy-dashboard": "npx cypress run --record --key f3e0f52b-c143-488c-8b40-23752b37fea0",
-    "test-master": "cypress run --config-file cypress.master.config.js",
+    "test-master": "cypress run --config-file cypress.config.js",
     "check-fixtures": "node scripts/check-fixture-versions.js"
   },
   "keywords": [],
