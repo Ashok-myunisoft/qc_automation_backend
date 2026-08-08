@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import re
 import tempfile
 from pathlib import Path
 import sys
@@ -20,6 +21,7 @@ from Agents.script_generate_agent import ScriptGenerateAgent
 from Agents.validate_agent import ValidateAgent
 from Agents.interrupt_agent import InterruptAgent
 from Agents.append_agent import AppendAgent
+from Agents.business_context_agent import BusinessContextAgent
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +33,7 @@ script_generate_agent  = ScriptGenerateAgent()
 validate_agent         = ValidateAgent()
 interrupt_agent        = InterruptAgent()
 append_agent           = AppendAgent()
+business_context_agent = BusinessContextAgent()
 
 reader = ProjectReader()
 if sys.platform == "win32":
@@ -62,6 +65,59 @@ def _fetch_source_project_context(src: GitLabService, resolved: ResolvedSource) 
                 continue
             (target_dir / filename).write_text(content, encoding="utf-8")
         return reader.read_project(temp_dir)
+
+
+def _extract_source_hints(project_context: dict, limit: int = 30) -> list[str]:
+    """Pulls candidate identifiers out of the already-fetched Angular source
+    for BusinessContextAgent to start from — API route fragments and form
+    field names tend to survive table/column renames better than a screen's
+    display name does (see prompts/business_context_prompt.txt). This is a
+    best-effort regex scan, not a real TS/HTML parser — good enough as a
+    starting signal, not treated as ground truth by the agent itself."""
+    route_re = re.compile(r"""['"`]/api/([A-Za-z0-9_/-]+)['"`]""")
+    field_re = re.compile(r"""(?:formControlName|data-cy|\[data-cy\])\s*=\s*['"]([A-Za-z0-9_]+)['"]""")
+
+    hints: list[str] = []
+    seen = set()
+    for f in project_context.get("source_files", []):
+        content = f.get("content", "")
+        for pattern in (route_re, field_re):
+            for m in pattern.finditer(content):
+                val = m.group(1)
+                if val and val not in seen:
+                    seen.add(val)
+                    hints.append(val)
+                if len(hints) >= limit:
+                    return hints
+    return hints
+
+
+def _build_locator_map(project_analysis: dict) -> dict[str, str]:
+    """Distills the full project_analysis JSON (from ProjectAnalysisAgent)
+    down to a small field-name -> real, verified locator lookup — just
+    {name: data-cy value}, nothing else from that larger structure. Handed
+    to ScriptGenerateAgent so it can use an already-confirmed selector
+    instead of guessing one from the field name that ended up quoted in
+    the Gherkin. Keyed by BOTH label and control_name, pointing at the
+    same locator value, since it is not guaranteed which of the two
+    TestCaseAgent actually quotes in a given step."""
+    locator_map: dict[str, str] = {}
+    for module in project_analysis.get("modules", []) or []:
+        for page in module.get("pages", []) or []:
+            for form in page.get("forms", []) or []:
+                for field in form.get("fields", []) or []:
+                    locator = (
+                        field.get("preferred_locator")
+                        or field.get("data_cy")
+                        or field.get("id")
+                        or field.get("name")
+                    )
+                    if not locator or locator == "Unknown":
+                        continue
+                    for key in (field.get("label"), field.get("control_name"), field.get("data_cy")):
+                        if key and key != "Unknown":
+                            locator_map[key] = locator
+    return locator_map
 
 
 async def send_log(ws: WebSocket, text: str, tone: str = "secondary"):
@@ -267,14 +323,26 @@ async def _generate_one_screen(ws: WebSocket, src: GitLabService, module: str,
             project_context=project_context, user_request=user_request,
         )
 
+        source_hints = _extract_source_hints(project_context)
+        await send_log(ws, f"{tag}looking up real test data ({len(source_hints)} hint(s) from source)...", "secondary")
+        business_context_result = await business_context_agent.find_context(module, screen_name, source_hints)
+        if "error" in business_context_result:
+            await send_log(ws, f"{tag}business context: {business_context_result['error']} — using placeholder values.", "muted")
+            business_context = None
+        else:
+            preview = ", ".join(f"{k}={v!r}" for k, v in list(business_context_result.items())[:3])
+            await send_log(ws, f"{tag}business context found: {preview} — spot-check one of these against the DB if unsure.", "success")
+            business_context = business_context_result
+
         await send_log(ws, f"{tag}running test case agent...", "secondary")
         test_cases = await test_case_agent.generate_test_cases(
             project_analysis=project_analysis, user_request=user_request,
-            business_context=None,
+            business_context=business_context,
         )
 
-        await send_log(ws, f"{tag}running script generate agent...", "secondary")
-        generated_script = await script_generate_agent.generate_script(test_cases=test_cases)
+        locator_map = _build_locator_map(project_analysis)
+        await send_log(ws, f"{tag}running script generate agent ({len(locator_map)} known locator(s))...", "secondary")
+        generated_script = await script_generate_agent.generate_script(test_cases=test_cases, locator_map=locator_map)
 
         await send_log(ws, f"{tag}running validate agent...", "secondary")
         validation_result = await validate_agent.validate(

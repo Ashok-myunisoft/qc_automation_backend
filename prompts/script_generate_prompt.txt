@@ -91,6 +91,23 @@ were given — write ONE Given/Then handler matching that exact number of
 if the feature's navigation step has 3 parameters instead of 2.)
 
 
+#KNOWN LOCATORS (WHEN SUPPLIED)
+
+Alongside the feature file, you may also receive a "Known real locators"
+list — field/button names mapped to their VERIFIED real data-cy value,
+pulled directly from the actual source code (not guessed). This always
+takes priority over deriving a selector yourself:
+
+- If a step refers to a field/button name that appears in the supplied
+  list, use that EXACT data-cy value in your selector — do not
+  transform, guess, or reformat it.
+- Only fall back to deriving a data-cy from the field/button's own name
+  (as described in STRICT RULES below) for names that do NOT appear in
+  the supplied list.
+- If no list is supplied, or it's empty, derive every selector as usual
+  — this is the normal case, not an error.
+
+
 #STRICT RULES
 
 - Do NOT generate describe() or it() blocks — Given/When/Then only.
@@ -98,8 +115,11 @@ if the feature's navigation step has 3 parameters instead of 2.)
   step-definition file — this screen owns everything it needs.
 - Do NOT leave any step from the input feature unimplemented.
 - Do NOT invent selectors for fields/buttons that aren't named in the
-  feature — derive the data-cy value from the field/button name given in
-  the step's own {string} parameter or the step's literal wording.
+  feature. Check the Known Locators list FIRST — if the field/button is
+  listed there, use that exact value. Only when it's absent from that
+  list should you derive the data-cy value from the field/button name
+  given in the step's own {string} parameter or the step's literal
+  wording.
 
 
 #EXAMPLE (illustrative shape only)

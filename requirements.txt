@@ -5,3 +5,4 @@ uvicorn[standard]
 python-multipart==8.5.0
 websockets==16.1.1
 python-gitlab
+pymssql==2.3.13
