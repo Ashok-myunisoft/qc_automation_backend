@@ -624,6 +624,29 @@ async def handle_approve(ws: WebSocket, session: dict):
     await send_status(ws, "awaiting_review")
 
 
+async def _fetch_shared_fixtures(ws: WebSocket) -> dict:
+    """Fetches shared fixture files that live in the QC repo (not the
+    cypress-workspace) — currently just fixtures/validation-error-message.json,
+    used by VerifyFormValidationMessage across many screens. Always fetched
+    fresh so the QC repo stays the single source of truth for these — a
+    fetch failure is logged but doesn't block the run, since not every
+    screen actually needs it."""
+    fixtures = {}
+    try:
+        out_gl = _gitlab_service()
+        content = out_gl.fetch_file("fixtures/validation-error-message.json")
+        if content:
+            fixtures["validation-error-message.json"] = content
+    except Exception as e:
+        await send_log(
+            ws,
+            f"could not fetch shared fixtures from the QC repo ({e}) — "
+            f"screens using cy.fixture() may fail.",
+            "muted",
+        )
+    return fixtures
+
+
 # ---------------------------------------------------------------------------
 # RUN
 # ---------------------------------------------------------------------------
@@ -637,6 +660,8 @@ async def handle_run(ws: WebSocket, session: dict):
 
         await send_status(ws, "running")
         await send_log(ws, f"cypress: running {len(screens)} screen(s) in this module...", "secondary")
+
+        fixtures = await _fetch_shared_fixtures(ws)
 
         summary = []  # [(dir, passed, exit_code)]
         for i, s in enumerate(screens, start=1):
@@ -653,6 +678,7 @@ async def handle_run(ws: WebSocket, session: dict):
                     s["feature"],
                     s["script"],
                     slug,
+                    fixtures=fixtures,
                 ):
                     if kind == "log":
                         await send_log(ws, f"[{label}] {payload}", tone or "secondary")
@@ -694,12 +720,15 @@ async def handle_run(ws: WebSocket, session: dict):
     await send_log(ws, "cypress: preparing workspace...", "secondary")
     await send_log(ws, "cypress: starting run...", "secondary")
 
+    fixtures = await _fetch_shared_fixtures(ws)
+
     try:
         async for kind, payload, tone in run_cypress(
             session,
             session["feature"],
             session["script"],
             slug,
+            fixtures=fixtures,
         ):
             if kind == "log":
                 await send_log(ws, payload, tone or "secondary")
@@ -772,6 +801,7 @@ async def qc_session(websocket: WebSocket):
         "module": None, "screen": None, "origin": None,
         "feature": None, "script": None, "resolved": None,
         "pushed": False, "process": None, "pending_generate": None,
+        "current_task": None,
     }
 
     try:
@@ -784,22 +814,22 @@ async def qc_session(websocket: WebSocket):
                     session["process"].kill()
                 except ProcessLookupError:
                     pass
-                asyncio.create_task(handle_interrupt(websocket, session, msg))
+                session["current_task"] = asyncio.create_task(handle_interrupt(websocket, session, msg))
 
             elif action == "interrupt":
-                asyncio.create_task(handle_interrupt(websocket, session, msg))
+                session["current_task"] = asyncio.create_task(handle_interrupt(websocket, session, msg))
 
             elif action == "fetch":
-                asyncio.create_task(handle_fetch(websocket, session, msg))
+                session["current_task"] = asyncio.create_task(handle_fetch(websocket, session, msg))
 
             elif action == "generate":
-                asyncio.create_task(handle_generate(websocket, session, msg))
+                session["current_task"] = asyncio.create_task(handle_generate(websocket, session, msg))
 
             elif action == "generate_decision":
-                asyncio.create_task(handle_generate_decision(websocket, session, msg))
+                session["current_task"] = asyncio.create_task(handle_generate_decision(websocket, session, msg))
 
             elif action == "approve":
-                asyncio.create_task(handle_approve(websocket, session))
+                session["current_task"] = asyncio.create_task(handle_approve(websocket, session))
 
             elif action == "reject":
                 session["feature"] = None
@@ -812,7 +842,34 @@ async def qc_session(websocket: WebSocket):
                 await send_status(websocket, "idle")
 
             elif action == "run":
-                asyncio.create_task(handle_run(websocket, session))
+                session["current_task"] = asyncio.create_task(handle_run(websocket, session))
+
+            elif action == "terminate":
+                task = session.get("current_task")
+                cancelled = False
+                if task is not None and not task.done():
+                    task.cancel()
+                    cancelled = True
+                proc = session.get("process")
+                if proc is not None:
+                    try:
+                        proc.kill()
+                    except ProcessLookupError:
+                        pass
+                    session["process"] = None
+                    cancelled = True
+                session["feature"] = None
+                session["script"]  = None
+                session["resolved"] = None
+                session["pushed"]  = False
+                session.pop("screens", None)
+                session.pop("pending_generate", None)
+                await send_log(
+                    websocket,
+                    "terminated — cancelled the in-progress run." if cancelled else "nothing in progress to terminate.",
+                    "muted",
+                )
+                await send_status(websocket, "idle")
 
             else:
                 await send_error(websocket, f"unknown action: {action}")

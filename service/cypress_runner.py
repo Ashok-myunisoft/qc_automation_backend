@@ -13,7 +13,9 @@ _WORKSPACE = Path(__file__).resolve().parent.parent / "cypress-workspace"
 # exactly cypress/_runs/<slug>/ on demand and deletes it when done — nothing
 # here ever requires src/ to exist, and nothing here ever touches
 # pageObject/, support/, cypress.config.js, cypress.env.json, or
-# package.json.
+# package.json. The one exception is cypress/fixtures/, which gets
+# refreshed (not deleted) when a run needs shared fixture files — see
+# run_cypress()'s `fixtures` param.
 _RUNS_DIR = _WORKSPACE / "cypress" / "_runs"
 
 TABLE_CHARS = set("┌┐└┘├┤┬┴┼─│═╞╡╥╨╫")
@@ -68,23 +70,36 @@ def _stream_process(proc: subprocess.Popen, out_queue: "queue.Queue"):
         out_queue.put(("__exit__", returncode))
 
 
-async def run_cypress(session: dict, feature_content: str, script_content: str, slug: str):
+async def run_cypress(session: dict, feature_content: str, script_content: str, slug: str,
+                       fixtures: dict | None = None):
     """
     Runs ONE screen in complete isolation, touching NOTHING in the workspace
-    except its own throwaway run folder.
+    except its own throwaway run folder — plus, if given, refreshing shared
+    fixture files that live in the QC repo (not this workspace), since
+    cy.fixture() resolves relative to the workspace's fixed fixturesFolder,
+    not per-spec. These are NOT screen-specific and NOT deleted afterward —
+    they're just kept current, overwritten fresh before every run so there's
+    a single source of truth (the QC repo) and zero risk of this workspace
+    silently drifting out of sync with it.
 
     feature_content / script_content: the screen's self-contained pair,
       already fetched/generated — pulled fresh from GitLab (or freshly
       generated) every single call, never read from local disk.
+
+    fixtures: {filename: content} for any shared fixture files this screen's
+      script depends on (e.g. "validation-error-message.json"), already
+      fetched fresh from the QC repo by the caller. Written into
+      cypress-workspace/cypress/fixtures/ before the run.
 
     slug: filesystem-safe screen identifier, used only to name this run's
       folder at cypress/_runs/<slug>/ — never a real repo path.
 
     Lifecycle, every run:
       1. cypress/_runs/<slug>/ created (mkdir parents=True — this is the
-         ONLY folder ever created; package.json, cypress.config.js,
+         ONLY per-run folder; package.json, cypress.config.js,
          cypress.env.json, cypress/pageObject/, cypress/support/ are never
-         touched, read-modified, or recreated).
+         touched, read-modified, or recreated). cypress/fixtures/ is
+         refreshed in place if `fixtures` is given, but never deleted.
       2. <slug>.feature and <slug>.js written into it.
       3. Cypress runs against just that spec.
       4. The ENTIRE cypress/_runs/<slug>/ folder is deleted in `finally`,
@@ -93,6 +108,12 @@ async def run_cypress(session: dict, feature_content: str, script_content: str, 
     """
     _ensure_workspace()
     _ensure_npm_installed()
+
+    if fixtures:
+        fixtures_dir = _WORKSPACE / "cypress" / "fixtures"
+        fixtures_dir.mkdir(parents=True, exist_ok=True)
+        for filename, content in fixtures.items():
+            (fixtures_dir / filename).write_text(content, encoding="utf-8")
 
     run_dir = _RUNS_DIR / slug
     if run_dir.exists():

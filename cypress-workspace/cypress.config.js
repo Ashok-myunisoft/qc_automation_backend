@@ -374,7 +374,7 @@ module.exports = defineConfig({
     video: false,
     specPattern: "cypress/_runs/**/*.feature",
     baseUrl: "https://qcws.goodbookserp.in/5.5",   // GoodBooks app root
-    fixturesFolder: false,
+    fixturesFolder: "cypress/fixtures",
     defaultCommandTimeout: 70000,
     execTimeout: 120000,
     pageLoadTimeout: 270000,

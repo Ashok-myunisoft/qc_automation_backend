@@ -303,6 +303,37 @@ def _group_by_dir(tree: list[str]) -> dict[str, list[str]]:
     return groups
 
 
+CROSS_MODULE_MARGIN = 0.15  # how much better the module-agnostic pick must
+                             # score before we trust it over a module-scoped
+                             # one — this is a deliberately high bar, since
+                             # ignoring the module_hit gate risks pulling in
+                             # an unrelated same-named screen from a totally
+                             # different feature area. Only worth it when the
+                             # improvement is decisive, not marginal.
+
+
+def _best_by_screen_name_only(tree: list[str], screen: str) -> tuple[float, str, list[str]] | None:
+    """Ignores the module entirely — scores every directory in the tree by
+    how well its LAST segment matches the screen name. Exists because some
+    real repos implement a module's screen inside a *different* project
+    folder (e.g. an ESS screen whose actual source lives under hrms/, since
+    HRMS owns the underlying employee data and ESS just surfaces it) — a
+    module-scoped search can never find that, no matter how good the
+    screen-name matching is, because it never even looks at that path."""
+    screen_norm = _normalize(screen)
+    scored = []
+    for directory, files in _group_by_dir(tree).items():
+        if not files:
+            continue
+        screen_folder = directory.rsplit("/", 1)[-1]
+        score = _similarity(_normalize(screen_folder), screen_norm)
+        scored.append((score, directory, files))
+    if not scored:
+        return None
+    scored.sort(key=lambda t: t[0], reverse=True)
+    return scored[0]
+
+
 def resolve_source_screen(tree: list[str], module: str, screen: str) -> ResolvedSource | None:
     module_norm = _normalize(module)
     screen_norm = _normalize(screen)
@@ -317,11 +348,35 @@ def resolve_source_screen(tree: list[str], module: str, screen: str) -> Resolved
         score = _similarity(_normalize(screen_folder), screen_norm)
         scored.append((score, directory, files))
 
-    if not scored:
+    scored.sort(key=lambda t: t[0], reverse=True)
+    module_scoped_best = scored[0] if scored else None
+
+    cross_module_best = _best_by_screen_name_only(tree, screen)
+
+    if cross_module_best and (
+        module_scoped_best is None
+        or cross_module_best[0] - module_scoped_best[0] >= CROSS_MODULE_MARGIN
+    ):
+        best_score, best_dir, best_files = cross_module_best
+        if best_score < MIN_CONFIDENCE:
+            return None
+        logger.info(
+            "resolve_source_screen: cross-module match for module=%r screen=%r -> %r "
+            "(score %.3f beat module-scoped %s by >= %.2f)",
+            module, screen, best_dir, best_score,
+            f"{module_scoped_best[0]:.3f}" if module_scoped_best else "None",
+            CROSS_MODULE_MARGIN,
+        )
+        return ResolvedSource(
+            dir=best_dir, files=best_files, confidence=round(best_score, 3),
+            ambiguous=True,  # crossed module boundaries — always worth a human glance
+            resolved_by="fuzzy-cross-module",
+        )
+
+    if module_scoped_best is None:
         return None
 
-    scored.sort(key=lambda t: t[0], reverse=True)
-    best_score, best_dir, best_files = scored[0]
+    best_score, best_dir, best_files = module_scoped_best
     if best_score < MIN_CONFIDENCE:
         return None
 
