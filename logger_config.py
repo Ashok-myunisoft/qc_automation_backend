@@ -7,7 +7,7 @@ os.makedirs(LOG_DIR, exist_ok=True)
 
 file_handler = RotatingFileHandler(
     os.path.join(LOG_DIR, "app.log"),
-    maxBytes=5 * 1024 * 1024,  # 5 MB
+    maxBytes=5 * 1024 * 1024,
     backupCount=5,
     encoding="utf-8"
 )
@@ -25,7 +25,6 @@ logger = logging.getLogger()
 
 logger.setLevel(logging.INFO)
 
-# Prevent duplicate handlers on reload
 if logger.hasHandlers():
     logger.handlers.clear()
 

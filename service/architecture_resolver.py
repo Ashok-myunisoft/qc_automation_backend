@@ -17,10 +17,6 @@ MODULE_HIT_THRESHOLD = 0.75
 
 _MODULE_STOPWORDS = {"module", "the", "and"}
 
-# If present, real-repo test trees keep UI regression screens under this
-# prefix, separate from API_Tests/Smoke-Testing trees that reuse the same
-# module names. Auto-detected — repos without this prefix (e.g. a flat
-# dummy/demo repo) are scanned in full instead.
 REGRESSION_TESTING_PREFIX = "cypress/src/features/Regression-Testing/"
 
 
@@ -47,29 +43,15 @@ def _searchable_tree(tree: list[str]) -> list[str]:
     return scoped if scoped else tree
 
 
-# ---------------------------------------------------------------------------
-# qc_test (output) repo shape — NO fixed depth, NO shared step library.
-# Every real screen is a folder containing exactly one .feature file and
-# one script file (.js or .cy.js) — self-contained, no dependency on any
-# other screen's file. e.g.:
-#
-#   cypress/src/features/Regression-Testing/ESS_Module/PaySlip/PaySlip.feature
-#   cypress/src/features/Regression-Testing/ESS_Module/PaySlip/PaySlip.js
-#
-#   -- or, in a flatter demo/dummy repo --
-#
-#   Finance/InstrumentMaster/instrument-master.feature
-#   Finance/InstrumentMaster/instrument-master.js
-# ---------------------------------------------------------------------------
 @dataclass
 class ResolvedFeature:
-    dir: str            # the screen's folder
-    feature_path: str   # full path to the .feature file
-    script_path: str    # full path to the paired script file
-    slug: str            # filesystem-safe screen identifier (folder's own name), used to name the isolated local run folder — never a repo path
+    dir: str
+    feature_path: str
+    script_path: str
+    slug: str
     confidence: float
     ambiguous: bool
-    resolved_by: str = "fuzzy"  # "agent" or "fuzzy"
+    resolved_by: str = "fuzzy"
 
 
 def _group_screen_folders(tree: list[str]) -> dict[str, dict]:
@@ -177,13 +159,6 @@ def _valid_feature_candidate(tree_set: set[str], directory: str, feature_path: s
         return False
     if feature_path not in tree_set or script_path not in tree_set:
         return False
-    # Must be the EXACT immediate parent folder of both files — not merely
-    # a string prefix. A prefix check (e.g. "startswith(directory + '/')")
-    # would wrongly accept a truncated/hallucinated dir like "cypress",
-    # since virtually every real path in this repo starts with "cypress/".
-    # That let a wrong dir slip through with a correct feature_path/script_path,
-    # corrupting resolved.dir/resolved.slug downstream (both would become
-    # "cypress" instead of the real screen folder name).
     if feature_path.rsplit("/", 1)[0] != directory:
         return False
     if script_path.rsplit("/", 1)[0] != directory:
@@ -280,10 +255,6 @@ def build_new_path(module: str, screen: str) -> ResolvedFeature:
     )
 
 
-# ---------------------------------------------------------------------------
-# qc_source (input) repo shape — UNCHANGED. Angular source folders, each a
-# loose bag of files, no fixed pairing.
-# ---------------------------------------------------------------------------
 @dataclass
 class ResolvedSource:
     dir: str
@@ -303,13 +274,7 @@ def _group_by_dir(tree: list[str]) -> dict[str, list[str]]:
     return groups
 
 
-CROSS_MODULE_MARGIN = 0.15  # how much better the module-agnostic pick must
-                             # score before we trust it over a module-scoped
-                             # one — this is a deliberately high bar, since
-                             # ignoring the module_hit gate risks pulling in
-                             # an unrelated same-named screen from a totally
-                             # different feature area. Only worth it when the
-                             # improvement is decisive, not marginal.
+CROSS_MODULE_MARGIN = 0.15
 
 
 def _best_by_screen_name_only(tree: list[str], screen: str) -> tuple[float, str, list[str]] | None:
@@ -369,7 +334,7 @@ def resolve_source_screen(tree: list[str], module: str, screen: str) -> Resolved
         )
         return ResolvedSource(
             dir=best_dir, files=best_files, confidence=round(best_score, 3),
-            ambiguous=True,  # crossed module boundaries — always worth a human glance
+            ambiguous=True,
             resolved_by="fuzzy-cross-module",
         )
 

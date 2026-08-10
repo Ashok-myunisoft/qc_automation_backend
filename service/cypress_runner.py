@@ -9,23 +9,12 @@ from pathlib import Path
 
 _WORKSPACE = Path(__file__).resolve().parent.parent / "cypress-workspace"
 
-# Per-run scratch — deleted after each run.
 _RUNS_DIR = _WORKSPACE / "cypress" / "_runs"
 
-# Where mochawesome writes its per-run JSON+HTML report. See cypress.config.js:
-# reporterOptions.reportDir + overwrite:true — that "overwrite" is exactly why
-# run_cypress() has to READ this file inside its own finally block, per run,
-# before the next screen in a module loop overwrites it.
 _REPORTS_DIR = _WORKSPACE / "cypress" / "reports" / "mochawesome-reports"
 
-# Where Cypress drops screenshots (default; not overridden in cypress.config.js).
-# Same overwrite hazard as the reports dir — we copy them out per run.
 _SCREENSHOTS_DIR = _WORKSPACE / "cypress" / "screenshots"
 
-# Persistent per-run stash for screenshots + report JSON, keyed by slug.
-# NOT auto-cleaned per run (unlike _RUNS_DIR) — cleaned when a session's
-# results are cleared (terminate/reject) via clear_stash(), or overwritten
-# by the next run of the same slug.
 _STASH_DIR = _WORKSPACE / "cypress" / "_stash"
 
 TABLE_CHARS = set("┌┐└┘├┤┬┴┼─│═╞╡╥╨╫")
@@ -281,9 +270,6 @@ async def run_cypress(session: dict, feature_content: str, script_content: str, 
                 yield ("exit", returncode, None)
                 break
 
-        # Read report JSON + copy screenshots BEFORE the next module-loop
-        # iteration overwrites the mochawesome file. This is the whole reason
-        # capture is inline in run_cypress rather than after all runs.
         mocha = _read_latest_mochawesome()
         screenshots = _stash_screenshots(slug)
         summary = _summarize_run(mocha, returncode, slug, screenshots)

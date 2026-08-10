@@ -15,23 +15,6 @@ load_dotenv()
 logger = logging.getLogger(__name__)
 
 
-# ---------------------------------------------------------------------------
-# Tools — thin, annotated wrappers around service/db_service.py.
-# These are the ONLY way the agent can touch the DB: no raw SQL, and every
-# dynamic identifier gets validated against INFORMATION_SCHEMA inside
-# db_service before it can reach a query (see db_service.py's module
-# docstring for the full reasoning).
-#
-# Every wrapper catches Exception broadly, not just DbServiceError — a hard
-# connection failure (bad TESTDB_HOST, server unreachable, timeout) surfaces
-# as a raw pymssql error, not a DbServiceError, and the framework re-raises
-# anything a tool throws. Catching narrowly meant a connection problem blew
-# up the whole agent.run() on the first tool call instead of reporting back
-# cleanly. Now every failure returns {"error": ...} to the model, so it can
-# react per its prompt (try another lookup, or give up honestly) — and the
-# real exception is logged server-side, since the model only sees a short
-# message.
-# ---------------------------------------------------------------------------
 
 @tool
 def list_tables(

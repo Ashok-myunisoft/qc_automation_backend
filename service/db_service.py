@@ -9,7 +9,7 @@ load_dotenv()
 
 logger = logging.getLogger(__name__)
 
-_MAX_SAMPLE_LIMIT = 50  # hard ceiling regardless of what a caller asks for
+_MAX_SAMPLE_LIMIT = 50
 
 
 class DbServiceError(Exception):
@@ -123,7 +123,6 @@ def describe_table(table_name: str) -> dict:
         (table_name,),
     )
 
-    # FKs where this table is the child (references another table)
     outgoing = _query(
         """
         SELECT
@@ -140,7 +139,6 @@ def describe_table(table_name: str) -> dict:
         (table_name,),
     )
 
-    # FKs where this table is the parent (other tables reference it)
     incoming = _query(
         """
         SELECT
@@ -163,11 +161,11 @@ def describe_table(table_name: str) -> dict:
             {"name": c["COLUMN_NAME"], "type": c["DATA_TYPE"], "nullable": c["IS_NULLABLE"] == "YES"}
             for c in columns
         ],
-        "references": [  # this table -> other tables (follow these for parent/lookup data)
+        "references": [
             {"column": r["column_name"], "references_table": r["referenced_table"], "references_column": r["referenced_column"]}
             for r in outgoing
         ],
-        "referenced_by": [  # other tables -> this table (this table is shared/lookup data for these)
+        "referenced_by": [
             {"table": r["referencing_table"], "column": r["referencing_column"], "via_column": r["column_name"]}
             for r in incoming
         ],
@@ -187,9 +185,6 @@ def get_sample_values(table_name: str, column_name: str, limit: int = 10) -> lis
     if not _column_exists(table_name, column_name):
         raise DbServiceError(f"no such column: {column_name!r} on table {table_name!r}")
 
-    # table_name/column_name are validated above (real identifiers, no
-    # arbitrary text can reach this point) — safe to reference directly in
-    # the identifier position, which SQL doesn't allow parameterizing anyway.
     sql = (
         f"SELECT DISTINCT TOP ({limit}) [{column_name}] AS value "
         f"FROM [{table_name}] WHERE [{column_name}] IS NOT NULL"

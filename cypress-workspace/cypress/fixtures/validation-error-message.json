@@ -1,0 +1,1398 @@
+{
+    "InstrumentMasterErrorMessages": {
+        "ErrorMessages": [
+            "Name* Should not be Empty",
+            "Account* Should not be Empty"
+        ]
+    },
+    "SkillMasterErrorMessages": {
+        "ErrorMessages": [
+            "Code* Should not be Empty",
+            "Name* Should not be Empty",
+            "Type* Should not be Empty",
+            "Domain* Should not be Empty"
+        ]
+    },
+    "MeasureOptionsTypeErrorMessages": {
+        "ErrorMessages": [
+            "Code* Should not be Empty",
+            "Name* Should not be Empty"
+        ]
+    },
+    "SubjectDetailsErrorMessages": {
+        "ErrorMessages": [
+            "Code* Should not be Empty",
+            "Name* Should not be Empty",
+            "Particulars* Should not be Empty"
+        ]
+    },
+    "DAPointGroupErrorMessages": {
+        "ErrorMessages": [
+            "Code* Should not be Empty",
+            "Name* Should not be Empty",
+            "Set* Should not be Empty",
+            "Base Index* Should not be Empty",
+            "Rate Per Point* Should not be Empty"
+        ]
+    },
+    "KeyResultAreaErrorMessages": {
+        "ErrorMessages": [
+            "Name* Should not be Empty"
+        ]
+    },
+    "LeadCycleErrorMessages": {
+        "ErrorMessages": [
+            "Code* Should not be Empty",
+            "Name* Should not be Empty",
+            "Please Give the Entry in Grid"
+        ]
+    },
+    "ShiftMasterErrorMessages": {
+        "ErrorMessages": [
+            "Code* Should not be Empty",
+            "Description* Should not be Empty",
+            "Start Time* Should not be Empty",
+            "End Time* Should not be Empty",
+            "First Half End Time* Should not be Empty",
+            "Second Half Start Time* Should not be Empty"
+        ]
+    },
+    "ShiftMasterFullErrorMessages": {
+        "ErrorMessages": [
+            "Code* Should not be Empty",
+            "Description* Should not be Empty",
+            "Start Time* Should not be Empty",
+            "End Time* Should not be Empty",
+            "First Half End Time* Should not be Empty",
+            "Second Half Start Time* Should not be Empty",
+            "Grace Minutes* Should not be Empty",
+            "Full Day Minutes* Should not be Empty",
+            "Half Day Minutes* Should not be Empty",
+            "First Half Cut Off Minutes* Should not be Empty",
+            "Second Half Cut Off Minutes* Should not be Empty"
+        ]
+    },
+    "StandardErrorMessages": {
+        "ErrorMessages": [
+            "Code* Should not be Empty",
+            "Name* Should not be Empty"
+        ]
+    },
+    "CounterErrorMessages": {
+        "ErrorMessages": [
+            "Code* Should not be Empty",
+            "Name* Should not be Empty",
+            "Store* Should not be Empty",
+            "Under* Should not be Empty",
+            "Supervisor* Should not be Empty",
+            "Remarks* Should not be Empty",
+            "Terminal* Should not be Empty"
+        ]
+    },
+    "NOCListErrorMessages": {
+        "ErrorMessages": [
+            "Code* Should not be Empty",
+            "Name* Should not be Empty",
+            "Please Give the Entry in Grid"
+        ]
+    },
+    "CommonErrorMessages": {
+        "ErrorMessages": [
+            "Code* Should not be Empty",
+            "Name* Should not be Empty"
+        ]
+    },
+    "TermsErrorMessages": {
+        "ErrorMessages": [
+            "Section* Should not be Empty",
+            "Description* Should not be Empty"
+        ]
+    },
+    "MachineErrorMessages": {
+        "ErrorMessages": [
+            "Code* Should not be Empty",
+            "Name* Should not be Empty",
+            "OU* Should not be Empty",
+            "Item* Should not be Empty",
+            "Machine type* Should not be Empty",
+            "Model* Should not be Empty",
+            "Brand* Should not be Empty",
+            "Category* Should not be Empty",
+            "Sub Category* Should not be Empty",
+            "Mfr SlNo* Should not be Empty",
+            "Supplier* Should not be Empty",
+            "Bill Number* Should not be Empty",
+            "Last Number* Should not be Empty",
+            "Machine Value* Should not be Empty",
+            "Batch* Should not be Empty",
+            "Value in Bill* Should not be Empty",
+            "Capacity* Should not be Empty",
+            "Lot Per Day* Should not be Empty",
+            "Efficiency* Should not be Empty",
+            "Min Capacity* Should not be Empty",
+            "Speed* Should not be Empty",
+            "Max Capacity* Should not be Empty",
+            "Capacity UOM* Should not be Empty",
+            "Process* Should not be Empty",
+            "Work Center* Should not be Empty",
+            "Service Status* Should not be Empty",
+            "Service Provider* Should not be Empty"
+        ]
+    },
+    "PackErrorMessages": {
+        "ErrorMessages": [
+            "Code* Should not be Empty",
+            "Name* Should not be Empty",
+            "Conversion Factor Should not be Empty"
+        ]
+    },
+    "PackSetErrorMessages": {
+        "ErrorMessages": [
+            "Code* Should not be Empty",
+            "Name* Should not be Empty",
+            "Please Give the Entry in Grid"
+        ]
+    },
+    "BankBranchErrorMessages": {
+        "ErrorMessages": [
+            "IFSC* Should not be Empty",
+            "Bank* Should not be Empty",
+            "Country* Should not be Empty",
+            "City* Should not be Empty",
+            "State* Should not be Empty",
+            "Branch* Should not be Empty"
+        ]
+    },
+    "ActivityErrorMessages": {
+        "ErrorMessages": [
+            "Code* Should not be Empty",
+            "Name* Should not be Empty",
+            "Activity Type* Should not be Empty"
+        ]
+    },
+    "CompanyErrorMessages": {
+        "ErrorMessages": [
+            "Code* Should not be Empty",
+            "Name* Should not be Empty",
+            "Short Name* Should not be Empty",
+            "Import/Export Code* Should not be Empty",
+            "IEC Date* Should not be Empty"
+        ]
+    },
+    "AllocationTypeErrorMessages": {
+        "ErrorMessages": [
+            "Code* Should not be Empty",
+            "Name* Should not be Empty",
+            "Category* Should not be Empty",
+            "Entity* Should not be Empty"
+        ]
+    },
+    "ProcessMasterErrorMessages": {
+        "ErrorMessages": [
+            "Code* Should not be Empty",
+            "Name* Should not be Empty",
+            "UOM* Should not be Empty",
+            "Pay Account* Should not be Empty",
+            "Receive Account* Should not be Empty",
+            "HSN Code* Should not be Empty",
+            "GST* Should not be Empty",
+            "Type* Should not be Empty",
+            "Rate Type* Should not be Empty",
+            "Type* Should not be Empty"
+        ]
+    },
+    "AssetTypeErrorMessages": {
+        "ErrorMessages": [
+            "Code Category* Should not be Empty",
+            "Code* Should not be Empty",
+            "Name* Should not be Empty",
+            "Asset Schedule* Should not be Empty",
+            "Resource Type Name* Should not be Empty",
+            "Depreciation* Should not be Empty",
+            "Tax Depreciation Should not be Empty",
+            "Please Give the Entry in Grid"
+        ]
+    },
+    "TargetMasterErrorMessages": {
+        "ErrorMessages": [
+            "Code* Should not be Empty",
+            "Name* Should not be Empty",
+            "Split Type* Should not be Empty",
+            "Item Level* Should not be Empty"
+        ]
+    },
+    "CostCenterPatternErrorMessages": {
+        "ErrorMessages": [
+            "Cost Center Type* Should not be Empty",
+            "Code* Should not be Empty",
+            "Name* Should not be Empty",
+            "Please Give the Entry in Grid"
+        ]
+    },
+    "DepartmentErrorMessages": {
+        "ErrorMessages": [
+            "Department Code* Should not be Empty",
+            "Department Name* Should not be Empty",
+            "Process* Should not be Empty",
+            "Calendar* Should not be Empty",
+            "Department Head* Should not be Empty"
+        ]
+    },
+    "CostAnalysisErrorMessages": {
+        "ErrorMessages": [
+            "Code* Should not be Empty",
+            "Name* Should not be Empty",
+            "From Date* Should not be Empty",
+            "To Date * Should not be Empty"
+        ]
+    },
+    "CostCenterTypeErrorMessages": {
+        "ErrorMessages": [
+            " Code* Should not be Empty",
+            " Name* Should not be Empty",
+            "Organization Unit* Should not be Empty"
+        ]
+    },
+    "ResourceTypeErrorMessages": {
+        "ErrorMessages": [
+            "Code* Should not be Empty",
+            "Name* Should not be Empty",
+            "Parent Type* Should not be Empty",
+            "UOM* Should not be Empty",
+            "Department* Should not be Empty",
+            "Machine Type* Should not be Empty",
+            "Employee Type* Should not be Empty",
+            "Process* Should not be Empty",
+            "Work Center* Should not be Empty",
+            "Asset Type* Should not be Empty",
+            "Is Capacity Planning* Should not be Empty",
+            "Is RCCP* Should not be Empty",
+            "Cost Type* Should not be Empty",
+            "Resource Nature* Should not be Empty",
+            "Is Production* Should not be Empty"
+        ]
+    },
+    "DriverErrorMessages": {
+        "ErrorMessages": [
+            "Driver* Should not be Empty",
+            "Country* Should not be Empty",
+            "City* Should not be Empty",
+            "State* Should not be Empty",
+            "Region* Should not be Empty",
+            "Licence No* Should not be Empty",
+            "Zip Code* Should not be Empty",
+            "Address Line 1* Should not be Empty",
+            "Address Line 2* Should not be Empty"
+        ]
+    },
+    "PartyTaxTypeErrorMessages": {
+        "ErrorMessages": [
+            "Code* Should not be Empty",
+            "Name* Should not be Empty",
+            "Remarks* Should not be Empty",
+            "Please Give the Entry in Grid"
+        ]
+    },
+    "DBJoinTypeErrorMessages": {
+        "ErrorMessages": [
+            "Description* Should not be Empty",
+            "From* Should not be Empty",
+            "To* Should not be Empty",
+            "Expression* Should not be Empty"
+        ]
+    },
+    "DivisionErrorMessages": {
+        "ErrorMessages": [
+            "Code* Should not be Empty",
+            "Name* Should not be Empty",
+            "Short Name* Should not be Empty"
+        ]
+    },
+    "ItemSubCategoryErrorMessages": {
+        "ErrorMessages": [
+            "Item Category* Should not be Empty",
+            "Code* Should not be Empty",
+            "Name* Should not be Empty"
+        ]
+    },
+    "ModelErrorMessages": {
+        "ErrorMessages": [
+            "Code* Should not be Empty",
+            "Name* Should not be Empty",
+            "Short Name* Should not be Empty",
+            "Category* Should not be Empty",
+            "Brand* Should not be Empty"
+        ]
+    },
+    "CountMasterErrorMessages": {
+        "ErrorMessages": [
+            "Code* Should not be Empty",
+            "Name* Should not be Empty",
+            "Category* Should not be Empty",
+            "Sub Category* Should not be Empty",
+            "Count Type* Should not be Empty",
+            "Single Count* Should not be Empty",
+            "Length Per Meter* Should not be Empty",
+            "Weight Per Kg* Should not be Empty"
+        ]
+    },
+    "ProcessOperationErrorMessages": {
+        "ErrorMessages": [
+            "Code* Should not be Empty",
+            "Name* Should not be Empty",
+            "Process* Should not be Empty"
+        ]
+    },
+    "SingleVisitorPassErrorMessages": {
+        "ErrorMessages": [
+            "Person To Meet* Should not be Empty",
+            "Visitor* Should not be Empty",
+            "Purpose* Should not be Empty",
+            "Visitor Type* Should not be Empty"
+        ]
+    },
+    "ProgramAssemblyErrorMessages": {
+        "ErrorMessages": [
+            "Assembly Name* Should not be Empty",
+            "Module* Should not be Empty",
+            "Section* Should not be Empty"
+        ]
+    },
+    "FormulaFieldErrorMessages": {
+        "ErrorMessages": [
+            "Code* Should not be Empty",
+            "Name* Should not be Empty",
+            "Module* Should not be Empty",
+            "Entity* Should not be Empty",
+            "Section* Should not be Empty"
+        ]
+    },
+    "InspectionAreaErrorMessages": {
+        "ErrorMessages": [
+            "Inspection Area* Should not be Empty",
+            "Inspection Type* Should not be Empty",
+            "Work Center* Should not be Empty"
+        ]
+    },
+    "AccountMasterErrorMessages": {
+        "ErrorMessages": [
+            "Category* Should not be Empty",
+            "Code* Should not be Empty",
+            "Name* Should not be Empty",
+            "Short Name* Should not be Empty",
+            "Account Group* Should not be Empty",
+            "Combine Account* Should not be Empty"
+        ]
+    },
+    "DeviceErrorMessages": {
+        "ErrorMessages": [
+            "Code* Should not be Empty",
+            "Name* Should not be Empty",
+            "Device Type* Should not be Empty",
+            "User* Should not be Empty",
+            "Location Type* Should not be Empty",
+            "Machine* Should not be Empty",
+            "Port* Should not be Empty"
+        ]
+    },
+    "UOMErrorMessages": {
+        "ErrorMessages": [
+            "Code* Should not be Empty",
+            "Name* Should not be Empty",
+            "Gst UOM Code* Should not be Empty"
+        ]
+    },
+    "CurrencyErrorMessages": {
+        "ErrorMessages": [
+            "Code* Should not be Empty",
+            "Name* Should not be Empty",
+            "Symbol* Should not be Empty",
+            "Full Name* Should not be Empty",
+            "Decimal Name* Should not be Empty",
+            "Decimal* Should not be Empty",
+            "Gst Currency Code* Should not be Empty"
+        ]
+    },
+    "LeaveTypeErrorMessages": {
+        "ErrorMessages": [
+            "Code* Should not be Empty",
+            "Name* Should not be Empty",
+            "Leave Credit Formula* Should not be Empty",
+            "Leave Salary Formula* Should not be Empty"
+        ]
+    },
+    "CycleCountClassErrorMessages": {
+        "ErrorMessages": [
+            "Cycle Class* Should not be Empty"
+        ]
+    },
+    "InsuranceMasterErrorMessages": {
+        "ErrorMessages": [
+            "Party* Should not be Empty",
+            "Policy Number* Should not be Empty"
+        ]
+    },
+    "CityErrorMessages": {
+        "ErrorMessages": [
+            "Code* Should not be Empty",
+            "Name* Should not be Empty",
+            "Country* Should not be Empty",
+            "State* Should not be Empty",
+            "City Class* Should not be Empty"
+        ]
+    },
+    "GoalErrorMessages": {
+        "ErrorMessages": [
+            "Employee* Should not be Empty",
+            "Goal* Should not be Empty",
+            "KRA* Should not be Empty"
+        ]
+    },
+    "BinErrorMessages": {
+        "ErrorMessages": [
+            "Bin Number* Should not be Empty",
+            "Ware House* Should not be Empty",
+            "Bin Type* Should not be Empty"
+        ]
+    },
+    "UserGroupErrorMessages": {
+        "ErrorMessages": [
+            "Code* Should not be Empty",
+            "Name* Should not be Empty",
+            "User - 1 Should not be Empty"
+        ]
+    },
+    "DistributionListErrorMessages": {
+        "ErrorMessages": [
+            "Code* Should not be Empty",
+            "Name* Should not be Empty",
+            "Pack - 1 Should not be Empty"
+        ]
+    },
+    "CostCategoryErrorMessages": {
+        "ErrorMessages": [
+            "Code* Should not be Empty",
+            "Name* Should not be Empty",
+            "Cost Center Type* Should not be Empty",
+            "Short Name* Should not be Empty"
+        ]
+    },
+    "CostCenterErrorMessages": {
+        "ErrorMessages": [
+            "Cost Center Type* Should not be Empty",
+            "Code* Should not be Empty",
+            "Name* Should not be Empty",
+            "Under* Should not be Empty",
+            "Short Name* Should not be Empty"
+        ]
+    },
+    "PageErrorMessages": {
+        "ErrorMessages": [
+            "Code* Should not be Empty",
+            "Name* Should not be Empty",
+            "Module* Should not be Empty",
+            "Image* Should not be Empty"
+        ]
+    },
+    "AnalysisErrorMessages": {
+        "ErrorMessages": [
+            "Code* Should not be Empty",
+            "Name* Should not be Empty",
+            "Base Object* Should not be Empty",
+            "DB Object* - 1 Should not be Empty",
+            "Expression - 1 Should not be Empty",
+            "Variable - 1 Should not be Empty"
+        ]
+    },
+    "MeasureOptionsErrorMessages": {
+        "ErrorMessages": [
+            "Lov Type* Should not be Empty",
+            "Code* Should not be Empty",
+            "Name* Should not be Empty"
+        ]
+    },
+    "DocumentTypsErrorMessages": {
+        "ErrorMessages": [
+            "Code* Should not be Empty",
+            "Name* Should not be Empty",
+            "Document Category ID* Should not be Empty",
+            "Module* Should not be Empty"
+        ]
+    },
+    "SecurityGroupErrorMessages": {
+        "ErrorMessages": [
+            "Code* Should not be Empty",
+            "Name* Should not be Empty",
+            "Mark Code* - 1 Should not be Empty",
+            "Mark Name* - 1 Should not be Empty",
+            "Particulars - 1 Should not be Empty"
+        ]
+    },
+    "ModuleErrorMessages": {
+        "ErrorMessages": [
+            "Code* Should not be Empty",
+            "Name* Should not be Empty",
+            "Project* Should not be Empty",
+            "Image* Should not be Empty",
+            "Default Menu* Should not be Empty"
+        ]
+    },
+    "MRPPartyTypeErrorMessages": {
+        "ErrorMessages": [
+            "Code* Should not be Empty",
+            "Name* Should not be Empty",
+            "BIZ Transaction* - 1 Should not be Empty",
+            "BIZ Transaction* - 2 Should not be Empty",
+            "BIZ Transaction* - 3 Should not be Empty",
+            "BIZ Transaction* - 4 Should not be Empty",
+            "BIZ Transaction* - 5 Should not be Empty",
+            "BIZ Transaction* - 6 Should not be Empty",
+            "BIZ Transaction* - 7 Should not be Empty",
+            "BIZ Transaction* - 8 Should not be Empty"
+        ]
+    },
+    "SKUSettingErrorMessages": {
+        "ErrorMessages": [
+            "Code* Should not be Empty",
+            "Name* Should not be Empty",
+            "Particulars - 1 Should not be Empty",
+            "SKU Code Expression - 1 Should not be Empty",
+            "SKU Name Expression - 1 Should not be Empty",
+            "Process - 1 Should not be Empty",
+            "SKU Match Filter - 1 Should not be Empty"
+        ]
+    },
+    "ShiftPatternErrorMessages": {
+        "ErrorMessages": [
+            "Code* Should not be Empty",
+            "Name* Should not be Empty",
+            "Action - 1 Should not be Empty",
+            "No of Days - 1 Should not be Empty"
+        ]
+    },
+    "CasteCategoryErrorMessages": {
+        "ErrorMessages": [
+            "Code* Should not be Empty",
+            "Name* Should not be Empty",
+            "Caste Name* - 1 Should not be Empty"
+        ]
+    },
+    "GratuitySettingsErrorMessages": {
+        "ErrorMessages": [
+            "Code* Should not be Empty",
+            "Name* Should not be Empty",
+            "Eligibility Days* Should not be Empty",
+            "Eligibility Years* Should not be Empty",
+            "Years From - 1 Should not be Empty",
+            "Years To - 1 Should not be Empty",
+            "Days/Years - 1 Should not be Empty",
+            "Based On - 1 Should not be Empty"
+        ]
+    },
+    "ManPowerRequirementPlanErrorMessages": {
+        "ErrorMessages": [
+            "Number* Should not be Empty",
+            "Department* - 1 Should not be Empty",
+            "Work Type* - 1 Should not be Empty",
+            "Shift* - 1 Should not be Empty",
+            "Required* - 1 Should not be Empty"
+        ]
+    },
+    "SelectionCycleErrorMessages": {
+        "ErrorMessages": [
+            "Code* Should not be Empty",
+            "Name* Should not be Empty",
+            "Round* - 1 Should not be Empty"
+        ]
+    },
+    "PerformanceMeasureErrorMessages": {
+        "ErrorMessages": [
+            "Name* Should not be Empty",
+            "KRA* Should not be Empty",
+            "List of Value* Should not be Empty"
+        ]
+    },
+    "EmployeeNomineeErrorMessages": {
+        "ErrorMessages": [
+            "Employee Code* Should not be Empty",
+            "Employee Name* Should not be Empty",
+            "Nomination Type* Should not be Empty",
+            "Nominee Name* - 1 Should not be Empty",
+            "Relationship* - 1 Should not be Empty"
+        ]
+    },
+    "ForecastErrorMessages": {
+        "ErrorMessages": [
+            "Code* Should not be Empty",
+            "Name* Should not be Empty",
+            "Set* Should not be Empty"
+        ]
+    },
+    "UOMSETErrorMessages": {
+        "ErrorMessages": [
+            "Code* Should not be Empty",
+            "Name* Should not be Empty",
+            "BaseUOM* Should not be Empty",
+            "From UOM* - 1 Should not be Empty",
+            "To UOM* - 1 Should not be Empty",
+            "Value* - 1 Should not be Empty"
+        ]
+    },
+    "ActivityRecruitmentProcessErrorMessages": {
+        "ErrorMessages": [
+            "Code* Should not be Empty",
+            "Name* Should not be Empty",
+            "Activity Type* Should not be Empty"
+        ]
+    },
+    "ParameterErrorMessages": {
+        "ErrorMessages": [
+            "Parameter Code* Should not be Empty",
+            "Parameter Name* Should not be Empty",
+            "Unit of Measurement* Should not be Empty",
+            "Particulars Should not be Empty"
+        ]
+    },
+    "organizationGroupErrorMessages": {
+        "ErrorMessages": [
+            "Code* Should not be Empty",
+            "Name* Should not be Empty",
+            "Group Type - 1 Should not be Empty",
+            "Particulars - 1 Should not be Empty"
+        ]
+    },
+    "vehicleErrorMessages": {
+        "ErrorMessages": [
+            "Vehicle Number* Should not be Empty",
+            "Vehicle Type* Should not be Empty",
+            "Driver* Should not be Empty",
+            "Asset* Should not be Empty",
+            "Empty Weight* Should not be Empty",
+            "Tonnage* Should not be Empty",
+            "Minimum Tonnage* Should not be Empty"
+        ]
+    },
+    "ContactErrorMessages": {
+        "ErrorMessages": [
+            "First Name* Should not be Empty",
+            "Mail Id* Should not be Empty",
+            "Mobile No* Should not be Empty",
+            "Designation* Should not be Empty",
+            "Company* Should not be Empty",
+            "Address* Should not be Empty",
+            "Zip Code* Should not be Empty",
+            "City* Should not be Empty",
+            "Country* Should not be Empty"
+        ]
+    },
+    "GCMTypeErrorMessages": {
+        "ErrorMessages": [
+            "Code* Should not be Empty",
+            "Description* Should not be Empty",
+            "Code Size* Should not be Empty",
+            "Remarks* Should not be Empty",
+            "Module* Should not be Empty"
+        ]
+    },
+    "BizTransactionErrorMessages": {
+        "ErrorMessages": [
+            "Code* Should not be Empty",
+            "Name* Should not be Empty",
+            "Sub Class* Should not be Empty",
+            "Process* Should not be Empty"
+        ]
+    },
+    "SettingCostingErrorMessages": {
+        "ErrorMessages": [
+            "Code* Should not be Empty",
+            "Name* Should not be Empty",
+            "Display Name* Should not be Empty",
+            "Data Type* Should not be Empty",
+            "Data Size* Should not be Empty",
+            "Default Value* Should not be Empty",
+            "Remarks* Should not be Empty"
+        ]
+    },
+    "BranchErrorMessages": {
+        "ErrorMessages": [
+            "Code* Should not be Empty",
+            "Name* Should not be Empty",
+            "Short Name* Should not be Empty",
+            "Company* Should not be Empty"
+        ]
+    },
+    "AccountScheduleErrorMessages": {
+        "ErrorMessages": [
+            "Code* Should not be Empty",
+            "Name* Should not be Empty",
+            "Short Name* Should not be Empty",
+            "Parent* Should not be Empty"
+        ]
+    },
+    "BizTransactionSubClassErrorMessages": {
+        "ErrorMessages": [
+            "Code* Should not be Empty",
+            "Name* Should not be Empty",
+            "Class* Should not be Empty"
+        ]
+    },
+    "AssetTypeMaterialErrorMessages": {
+        "ErrorMessages": [
+            "Activity* Should not be Empty",
+            "Asset Type* Should not be Empty",
+            "Item* - 1 Should not be Empty"
+        ]
+    },
+    "ForecastSetErrorMessages": {
+        "ErrorMessages": [
+            "Code* Should not be Empty",
+            "Name* Should not be Empty",
+            "Incharge* Should not be Empty",
+            "Max % Per Document* Should not be Empty",
+            "Forward Days* Should not be Empty",
+            "Backward Days* Should not be Empty"
+        ]
+    },
+    "EventTypeErrorMessages": {
+        "ErrorMessages": [
+            "Code* Should not be Empty",
+            "Name* Should not be Empty",
+            "Entity* Should not be Empty",
+            "Linked Form* Should not be Empty",
+            "Section* Should not be Empty",
+            "Security* Should not be Empty"
+        ]
+    },
+    "MachineTypeErrorMessages": {
+        "ErrorMessages": [
+            "Code* Should not be Empty",
+            "Name* Should not be Empty",
+            "Parameter Set* Should not be Empty",
+            "Resource Type Name* Should not be Empty"
+        ]
+    },
+    "SettingsErrorMessages": {
+        "ErrorMessages": [
+            "Code* Should not be Empty",
+            "Name* Should not be Empty",
+            "Display Name* Should not be Empty",
+            "Display Code* Should not be Empty"
+        ]
+    },
+    "TDSCategoryErrorMessages": {
+        "ErrorMessages": [
+            "Code* Should not be Empty",
+            "Name* Should not be Empty",
+            "Section* Should not be Empty",
+            "Deducation Account* Should not be Empty",
+            "Paid Account* Should not be Empty",
+            "Claim Account* Should not be Empty",
+            "Suffered Account* Should not be Empty",
+            "Reference* Should not be Empty",
+            "Form* Should not be Empty"
+        ]
+    },
+    "DocumentSetErrorMessages": {
+        "ErrorMessages": [
+            "Code* Should not be Empty",
+            "Name* Should not be Empty",
+            "Module* Should not be Empty",
+            "Property Fields* Should not be Empty",
+            "Tag Fields* Should not be Empty",
+            "Doc. Type ID* - 1 Should not be Empty",
+            "Doc. Name Template - 1 Should not be Empty",
+            "Location Template* - 1 Should not be Empty",
+            "MarkID* - 1 Should not be Empty"
+        ]
+    },
+    "EventClassErrorMessages": {
+        "ErrorMessages": [
+            "Code* Should not be Empty",
+            "Name* Should not be Empty",
+            "Color* Should not be Empty",
+            "Event Text* Should not be Empty",
+            "Tag* Should not be Empty",
+            "Source* Should not be Empty",
+            "Link* Should not be Empty"
+        ]
+    },
+    "MailListErrorMessages": {
+        "ErrorMessages": [
+            "Name* Should not be Empty",
+            "Particulars* Should not be Empty"
+        ]
+    },
+    "MRPErrorMessages": {
+        "ErrorMessages": [
+            "Code* Should not be Empty",
+            "Name* Should not be Empty",
+            "Master Schedule* Should not be Empty"
+        ]
+    },
+    "EmployeeVsQualificationErrorMessages": {
+        "ErrorMessages": [
+            "Employee Code* Should not be Empty",
+            "Employee Name* Should not be Empty",
+            "Course - 1 Should not be Empty",
+            "Institute - 1 Should not be Empty",
+            "Grade - 1 Should not be Empty",
+            "Remarks - 1 Should not be Empty"
+        ]
+    },
+    "WorkFlowRuleErrorMessages": {
+        "ErrorMessages": [
+            "Code* Should not be Empty",
+            "Name* Should not be Empty",
+            "Workflow* Should not be Empty",
+            "Entity* Should not be Empty",
+            "Workflow Deployment* Should not be Empty",
+            "Approval Expression - 1 Should not be Empty"
+        ]
+    },
+    "EmployeeReferenceMasterErrorMessages": {
+        "ErrorMessages": [
+            "Employee Code* Should not be Empty",
+            "Employee Name* Should not be Empty",
+            "Reference Name - 1 Should not be Empty",
+            "Company - 1 Should not be Empty",
+            "Designation - 1 Should not be Empty",
+            "RelationShip - 1 Should not be Empty",
+            "Time known - 1 Should not be Empty",
+            "Verified - 1 Should not be Empty",
+            "Employee code - 1 Should not be Empty",
+            "Employee name - 1 Should not be Empty",
+            "Remarks - 1 Should not be Empty"
+        ]
+    },
+    "ProblemVsSolutionErrorMessages": {
+        "ErrorMessages": [
+            "Problem* Should not be Empty",
+            "Solution* - 1 Should not be Empty",
+            "Remark* - 1 Should not be Empty"
+        ]
+    },
+    "StoreErrorMessages": {
+        "ErrorMessages": [
+            "Code* Should not be Empty",
+            "Name* Should not be Empty",
+            "Organization Unit* Should not be Empty",
+            "Party Branch* Should not be Empty"
+        ]
+    },
+    "ChargeElementErrorMessages": {
+        "ErrorMessages": [
+            "Code* Should not be Empty",
+            "Name* Should not be Empty",
+            "Depends On* Should not be Empty",
+            "Formula* Should not be Empty",
+            "Input Data Field Type Should not be Empty",
+            "Minimum Data Field Type* Should not be Empty",
+            "Maximum Data Field Type* Should not be Empty",
+            "Minimum Value Field* Should not be Empty",
+            "Maximum Value Field* Should not be Empty",
+            "Input Value Field* Should not be Empty",
+            "Section* Should not be Empty"
+        ]
+    },
+    "WorkCenterErrorMessages": {
+        "ErrorMessages": [
+            "Code* Should not be Empty",
+            "Name* Should not be Empty",
+            "Org Unit* Should not be Empty",
+            "Department* Should not be Empty",
+            "Process* Should not be Empty",
+            "UOM* Should not be Empty",
+            "Incharge* Should not be Empty",
+            "Cost Center* Should not be Empty",
+            "Calendar* Should not be Empty",
+            "No of Units* Should not be Empty",
+            "Available Capacity* Should not be Empty",
+            "Working Minutes* Should not be Empty",
+            "Utilization %* Should not be Empty",
+            "Efficiency %* Should not be Empty"
+        ]
+    },
+    "ECMRightsErrorMessages": {
+        "ErrorMessages": [
+            "User* Should not be Empty",
+            "Rights for Type* Should not be Empty"
+        ]
+    },
+    "DocumentMapErrorMessages": {
+        "ErrorMessages": [
+            "Entity* Should not be Empty",
+            "BIZ Transaction Class* Should not be Empty",
+            "BIZ Transaction ID* Should not be Empty"
+        ]
+    },
+    "PayPeriodErrorMessages": {
+        "ErrorMessages": [
+            "Pay Period Code* Should not be Empty",
+            "Pay Period Name* Should not be Empty",
+            "From Date* Should not be Empty",
+            "To Date* Should not be Empty",
+            "Pay Date* Should not be Empty",
+            "Lock Date* Should not be Empty",
+            "Account Date* Should not be Empty"
+        ]
+    },
+    "ContractWorkDetailsEntryErrorMessages": {
+        "ErrorMessages": [
+            "Employee Code* Should not be Empty",
+            "Employee Name* Should not be Empty",
+            "Shift* Should not be Empty",
+            "Process* - 1 Should not be Empty",
+            "Item* - 1 Should not be Empty",
+            "Machine* - 1 Should not be Empty"
+        ]
+    },
+    "PeriodUpdateErrorMessages": {
+        "ErrorMessages": [
+            "Pay Tax Type* Should not be Empty",
+            "Current Period* Should not be Empty"
+        ]
+    },
+    "PriceListTypeErrorMessages": {
+        "ErrorMessages": [
+            "Code* Should not be Empty",
+            "Name* Should not be Empty",
+            "Charges* Should not be Empty",
+            "Currency* Should not be Empty"
+        ]
+    },
+    "CashDiscountErrorMessages": {
+        "ErrorMessages": [
+            "Code* Should not be Empty",
+            "Name* Should not be Empty",
+            "Percentage* - 1 Should not be Empty"
+        ]
+    },
+    "OULevelSettingErrorMessages": {
+        "ErrorMessages": [
+            "Organization Unit* Should not be Empty",
+            "PF Admin Amount* Should not be Empty",
+            "PF LOP Days* Should not be Empty",
+            "EDLI Admin Amount* Should not be Empty",
+            "Absent Leave* Should not be Empty",
+            "Sale Order* Should not be Empty",
+            "Sale Invoice* Should not be Empty",
+            "Receipt* Should not be Empty",
+            "Pack Excise SlNo* Should not be Empty",
+            "Inter BizTransaction* Should not be Empty",
+            "Adjustment Biztransaction* Should not be Empty",
+            "Inter Account* Should not be Empty",
+            "Inter MMBizTransaction* Should not be Empty",
+            "Delivery Biztransaction* Should not be Empty",
+            "MRP Buy Biztransaction Action* Should not be Empty",
+            "MRP Make Biztransaction Action* Should not be Empty",
+            "Work Order Biztransaction Action* Should not be Empty",
+            "Sub Contract Biztransaction Action* Should not be Empty",
+            "From Location* Should not be Empty",
+            "To Location* Should not be Empty",
+            "Branch Transfer Biztransaction* Should not be Empty",
+            "From City* Should not be Empty",
+            "ToCity Should not be Empty",
+            "Booking Biztransaction* Should not be Empty",
+            "Auto Call Biztransaction* Should not be Empty",
+            "ToDo Biztransaction* Should not be Empty"
+        ]
+    },
+    "EmployeeMasterErrorMessages": {
+        "ErrorMessages": [
+            "Code Category* Should not be Empty",
+            "Employee code Should not be Empty",
+            "Current Ou* Should not be Empty",
+            "Name* Should not be Empty",
+            "First Name* Should not be Empty"
+        ]
+    },
+    "EmployeeWorkingHistoryErrorMessages": {
+        "ErrorMessages": [
+            "Employee Code* Should not be Empty",
+            "Employee Name* Should not be Empty"
+        ]
+    },
+    "EmployeeVsExperienceErrorMessages": {
+        "ErrorMessages": [
+            "Employee Name* Should not be Empty",
+            "Employer* - 1 Should not be Empty",
+            "City* - 1 Should not be Empty",
+            "Designation* - 1 Should not be Empty"
+        ]
+    },
+    "EmployeeSalaryHistoryErrorMessages": {
+        "ErrorMessages": [
+            "Employee Code* Should not be Empty",
+            "Employee Name* Should not be Empty",
+            "Earnings - 1 Should not be Empty",
+            "Deduction - 1 Should not be Empty",
+            "Net Pay - 1 Should not be Empty",
+            "C2C - 1 Should not be Empty",
+            "Gratuity Days - 1 Should not be Empty",
+            "Bonus On Amount - 1 Should not be Empty"
+        ]
+    },
+    "LeaveCreditProcessErrorMessages": {
+        "ErrorMessages": [
+            "Employee Code* - 1 Should not be Empty",
+            "Employee Name* - 1 Should not be Empty"
+        ]
+    },
+    "UndoPayrollProcessingErrorMessages": {
+        "ErrorMessages": [
+            "Configuration Name* Should Not Be Empty",
+            "Period Name* Should Not Be Empty",
+            "Org.Unit Should Not Be Empty"
+        ]
+    },
+    "LeaveDebitProcessErrorMessages": {
+        "ErrorMessages": [
+            "Leave Type* Should not be Empty",
+            "Remarks* Should not be Empty",
+            "Employee Code* - 1 Should not be Empty",
+            "Employee Name* - 1 Should not be Empty",
+            "Days* - 1 Should not be Empty"
+        ]
+    },
+    "LeaveRequestBulkErrorMessages": {
+        "ErrorMessages": [
+            "Leave Type Should not be Empty",
+            "Employee Code* - 1 Should not be Empty",
+            "Employee Name* - 1 Should not be Empty",
+            "Days* - 1 Should not be Empty"
+        ]
+    },
+    "OtherEarningsDetailErrorMessages": {
+        "ErrorMessages": [
+            "Employee Name* Should not be Empty"
+        ]
+    },
+    "Perquisites12BAErrorMessages": {
+        "ErrorMessages": [
+            "Number* Should not be Empty",
+            "Ref.Number* Should not be Empty",
+            "Salary* Should not be Empty",
+            "TDS Deducted* Should not be Empty",
+            "TDS Deposited* Should not be Empty",
+            "Incharge* Should not be Empty",
+            "TDS Employer* Should not be Empty",
+            "Designation* Should not be Empty",
+            "Profit in Lieu of Salary* Should not be Empty",
+            "Remarks* Should not be Empty",
+            "Please Give the Entry in Grid"
+        ]
+    },
+    "EMIRescheduleErrorMessages": {
+        "ErrorMessages": [
+            "Payperiod Name* Should not be Empty",
+            "Employee Name* Should not be Empty",
+            "Advance Number* Should not be Empty"
+        ]
+    },
+    "PunchAddEditScreenErrorMessages": {
+        "ErrorMessages": [
+            "Employee Code* should not be empty",
+            "Employee Name* should not be empty"
+        ]
+    },
+    "AdvancePaymentErrorMessages": {
+        "ErrorMessages": [
+            "Employee Name* Should not be Empty",
+            "Advance Type* Should not be Empty",
+            "Instrument Type* Should not be Empty"
+        ]
+    },
+    "TargetShareErrorMessages": {
+        "ErrorMessages": [
+            "CostCenterType.OrganizationUnit Should not be Empty",
+            "Targetmaster.TargetData Should not be Empty",
+            "Please Give the Entry in Grid"
+        ]
+    },
+    "LovErrorMessages": {
+        "ErrorMessages": [
+            "Code* Should not be Empty",
+            "Name* Should not be Empty",
+            "Lov Type* Should not be Empty",
+            "Parent* Should not be Empty"
+        ]
+    },
+    "SecurityQuestionErrorMessages": {
+        "ErrorMessages": [
+            "Security Question* Should not be Empty",
+            "Remarks* Should not be Empty"
+        ]
+    },
+    "ItemSKUErrorMessages": {
+        "ErrorMessages": [
+            "Item Code* Should not be Empty",
+            "Item Name* Should not be Empty",
+            "SKU Code* Should not be Empty",
+            "SKU Name* Should not be Empty"
+        ]
+    },
+    "AssetActivityErrorMessages": {
+        "ErrorMessages": [
+            "Asset Type* Should not be Empty",
+            "Asset* Should not be Empty",
+            "Activity* Should not be Empty",
+            "User* Should not be Empty",
+            "Parameter Set* Should not be Empty"
+        ]
+    },
+    "DeliveryErrorMessages": {
+        "ErrorMessages": [
+            "From Country* Should not be Empty",
+            "To Country* Should not be Empty",
+            "Please give the Entry in Grid for Country"
+        ]
+    },
+    "ResourceErrorMessages": {
+        "ErrorMessages": [
+            "Code* Should not be Empty",
+            "Name* Should not be Empty",
+            "Resource Type* Should not be Empty",
+            "Model* Should not be Empty",
+            "Brand* Should not be Empty",
+            "Category* Should not be Empty",
+            "Sub Category* Should not be Empty",
+            "Batch* Should not be Empty",
+            "Capacity UOM* Should not be Empty",
+            "Item* Should not be Empty",
+            "Supplier* Should not be Empty",
+            "Service Provider* Should not be Empty",
+            "YOM* Should not be Empty"
+        ]
+    },
+    "ProblemErrorMessages": {
+        "ErrorMessages": [
+            "Code* Should not be Empty",
+            "Name* Should not be Empty",
+            "Problem Category* Should not be Empty",
+            "Applicable Category* Should not be Empty"
+        ]
+    },
+    "DieMasterErrorMessages": {
+        "ErrorMessages": [
+            "Pattern Code* Should not be Empty",
+            "Pattern Name* Should not be Empty",
+            "Moulding* Should not be Empty",
+            "Item* Should not be Empty",
+            "Type* Should not be Empty",
+            "Approved Status* Should not be Empty",
+            "Item Code* - 1 Should not be Empty",
+            "Item Name* - 1 Should not be Empty"
+        ]
+    },
+    "AdvanceRequestErrorMessages": {
+        "ErrorMessages": [
+            "Employee Name* Should not be Empty",
+            "Advance Type* Should not be Empty",
+            "Amount Required* Should not be Empty"
+        ]
+    },
+    "BIZTransactionKeyErrorMessages": {
+        "ErrorMessages": [
+            "Class* Should not be Empty",
+            "Sub Class* Should not be Empty",
+            "BIZ Transaction Type* Should not be Empty",
+            "Number to Start From* Should not be Empty"
+        ]
+    },
+    "EmployeePersonalDetailsErrorMessages": {
+        "ErrorMessages": [
+            "Father Name* Should not be Empty",
+            "Mother Name* Should not be Empty",
+            "Aadhaar Number* Should not be Empty",
+            "Experience* Should not be Empty",
+            "Aadhaar Number* Should not be Empty",
+            "Nominee* Should not be Empty",
+            "Nominee Relation* Should not be Empty"
+        ]
+    },
+    "LotTypeErrorMessages": {
+        "ErrorMessages": [
+            "Code* Should not be Empty",
+            "Process* Should not be Empty"
+        ]
+    },
+    "PartyPriceCategoryErrorMessages": {
+        "ErrorMessages": [
+            "Code* Should not be Empty",
+            "Name* Should not be Empty",
+            "Price Category - 1 Should not be Empty",
+            "Purchase Price List Type - 1 Should not be Empty",
+            "Sales Price List Type - 1 Should not be Empty",
+            "Transfer Price List Type - 1 Should not be Empty",
+            "Payment Term - 1 Should not be Empty",
+            "Credit Limit - 1 Should not be Empty",
+            "Credit Days - 1 Should not be Empty",
+            "No of Bills - 1 Should not be Empty"
+        ]
+    },
+    "DeferralPlanMasterErrorMessages": {
+        "ErrorMessages": [
+            "Code* Should not be Empty",
+            "Name* Should not be Empty",
+            "Deferral A/C Number* Should not be Empty",
+            "Description Should not be Empty",
+            "Deferral Percentage* Should not be Empty",
+            "Period Description* Should not be Empty"
+        ]
+    },
+    "MailSettingErrorMessages": {
+        "ErrorMessages": [
+            "Mail* Should not be Empty",
+            "Parent Mail* Should not be Empty",
+            "Smtp Port* Should not be Empty",
+            "Pop3 Port* Should not be Empty",
+            "Description Should not be Empty",
+            "OU Id* Should not be Empty",
+            "Password* Should not be Empty",
+            "Incoming Port* Should not be Empty",
+            "Outgoing Port* Should not be Empty"
+        ]
+    },
+    "ApplyAdvanceErrorMessages": {
+        "ErrorMessages": [
+            "Type Should not be Empty",
+            "Employee Name* Should not be Empty",
+            "Advance Type* Should not be Empty",
+            "Amount Required* Should not be Empty"
+        ]
+    },
+    "ApplyLeaveErrorMessages": {
+        "ErrorMessages": [
+            "Leave Type* Should not be Empty",
+            "Reason* Should not be Empty"
+        ]
+    },
+    "EmployeeSkillErrorMessages": {
+        "ErrorMessages": [
+            "Skill - 1 Should not be Empty",
+            "Level - 1 Should not be Empty",
+            "Particulars - 1 Should not be Empty"
+        ]
+    },
+    "SeparationErrorMessages": {
+        "ErrorMessages": [
+            "Employee Code* Should not be Empty",
+            "Employee Name* Should not be Empty",
+            "Relieving Type* Should not be Empty",
+            "NOC List* Should not be Empty",
+            "Reason* Should not be Empty",
+            "Incharge* Should not be Empty",
+            "Pay Period* Should not be Empty",
+            "Please Give the Entry in Grid"
+        ]
+    },
+    "AdvanceRepaymentErrorMessages": {
+        "ErrorMessages": [
+            "Payment Type* Should not be Empty",
+            "Bank* Should not be Empty",
+            "Advance Number* Should not be Empty",
+            "Employee Name* Should not be Empty",
+            "Remarks* Should not be Empty"
+        ]
+    },
+    "OULevelErrorMessages": {
+        "ErrorMessages": [
+            "Revision No Should not be Empty",
+            "Organization Unit* Should not be Empty",
+            "Employee Code* Should not be Empty",
+            "Employee Name* Should not be Empty",
+            "Pay Configuration* Should not be Empty"
+        ]
+    },
+    "ITDeclarationErrorMessages": {
+        "ErrorMessages": [
+            "Particulars Should not be Empty",
+            "Remarks Should not be Empty"
+        ]
+    },
+    "AttendanceAdjustmentEntryErrorMessages": {
+        "ErrorMessages": [
+            "Reason* Should not be Empty",
+            "Please Give the Entry in Grid"
+        ]
+    },
+    "HolidayUpdateErrorMessages": {
+        "ErrorMessages": [
+            "Org. Unit Should not be Empty",
+            "Remarks Should not be Empty"
+        ]
+    },
+    "StateErrorMessages": {
+        "ErrorMessages": [
+            "Code* Should not be Empty",
+            "Name* Should not be Empty",
+            "Country* Should not be Empty"
+        ]
+    },
+    "OrganizationUnitErrorMessages": {
+        "ErrorMessages": [
+            "Code* Should not be Empty",
+            "Name* Should not be Empty",
+            "Company* Should not be Empty",
+            "Branch* Should not be Empty",
+            "Division* Should not be Empty",
+            "Currency* Should not be Empty",
+            "Calendar* Should not be Empty"
+        ]
+    },
+    "PaymentTermErrorMessages": {
+        "ErrorMessages": [
+            "Code* Should not be Empty",
+            "Name* Should not be Empty"
+        ]
+    },
+    "UserErrorMessages": {
+        "ErrorMessages": [
+            "Code* Should not be Empty",
+            "Name* Should not be Empty",
+            "Login Name* Should not be Empty",
+            "Primary Mail* Should not be Empty",
+            "Primary Mobile* Should not be Empty",
+            "Org. Unit* Should not be Empty",
+            "Role* Should not be Empty",
+            "TimeZone* Should not be Empty"
+        ]
+    },
+    "TDSCalculateErrorMessages": {
+        "ErrorMessages": [
+            "PayConfigurationName* Should Not Be Empty",
+            "PayperiodName* Should Not Be Empty"
+        ]
+    },
+    "TDSChallanErrorMessages": {
+        "ErrorMessages": [
+            "Pay Period* Should not be Empty",
+            "Minor Head* Should not be Empty",
+            "Please Give the Entry in Grid"
+        ]
+    },
+    "GroupMasterErrorMessages": {
+        "ErrorMessages": [
+            "Account Name* Should not be Empty",
+            "Account Code* Should not be Empty",
+            "Account Short Name* Should not be Empty",
+            "Under* Should not be Empty",
+            "Schedule* Should not be Empty",
+            "Opposite Group* Should not be Empty"
+        ]
+    },
+    "NarrationMasterErrorMessages": {
+        "ErrorMessages": [
+            "Name* Should not be Empty",
+            "Narration* Should not be Empty"
+        ]
+    },
+    "SkillProcessStageMapErrorMessages": {
+        "ErrorMessages": [
+            "Skill Name* Should not be Empty",
+            "Skill* Should not be Empty",
+            "No Record Selected",
+            "Please Select a Record to Delete"
+        ]
+    }
+}

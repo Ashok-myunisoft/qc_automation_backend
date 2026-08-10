@@ -5,7 +5,7 @@ import re
 import tempfile
 from pathlib import Path
 import sys
-import logger_config 
+import logger_config
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 import warnings
 from service.project_reader import ProjectReader
@@ -50,7 +50,6 @@ def _gitlab_service() -> GitLabService:
 
 
 def _source_gitlab_service() -> GitLabService:
-    # Separate repo — its own SOURCE_GITLAB_URL / _TOKEN / _PROJECT_ID / _BRANCH.
     return GitLabService(env_prefix="SOURCE_GITLAB")
 
 
@@ -167,9 +166,6 @@ async def send_artifacts(ws: WebSocket, session: dict, validation: dict | None =
     })
 
 
-# ---------------------------------------------------------------------------
-# FETCH
-# ---------------------------------------------------------------------------
 async def handle_fetch(ws: WebSocket, session: dict, msg: dict):
     module = (msg.get("module") or "").strip()
     screen = (msg.get("screen") or "").strip()
@@ -227,8 +223,6 @@ async def handle_fetch(ws: WebSocket, session: dict, msg: dict):
 
         session["screens"] = screens
         session["pushed"]  = True
-        # Keep single-screen keys clear so handle_run's screen-scope path
-        # doesn't accidentally pick up stale data from an earlier fetch.
         session.pop("feature", None)
         session.pop("script", None)
         session.pop("resolved", None)
@@ -274,12 +268,6 @@ async def handle_fetch(ws: WebSocket, session: dict, msg: dict):
     await send_status(ws, "awaiting_review")
 
 
-# ---------------------------------------------------------------------------
-# GENERATE
-# Fully automated — no manual uploads. Source is fetched from the SOURCE_
-# GITLAB_* repo (scope-aware: one screen's files, or every screen in a
-# module), then run through the same 4-agent pipeline as before.
-# ---------------------------------------------------------------------------
 async def _check_output_existing(out_gl: GitLabService, out_tree, module: str, screen_name: str):
     """Returns (resolved, existed, existing_feature, existing_script).
     existing_feature/script are None whenever existed is False — including
@@ -387,8 +375,6 @@ async def handle_generate(ws: WebSocket, session: dict, msg: dict):
         await send_error(ws, f"source gitlab connection failed: {e}")
         return
 
-    # Best-effort peek at the output (qc_test) repo so we know up front
-    # whether we're replacing existing files or creating new ones.
     out_tree = None
     out_gl   = None
     try:
@@ -397,9 +383,6 @@ async def handle_generate(ws: WebSocket, session: dict, msg: dict):
     except Exception as e:
         await send_log(ws, f"could not check output repo ({e}) — will resolve path on approve.", "muted")
 
-    # -----------------------------------------------------------------
-    # Whole module: fetch + generate for every screen under it
-    # -----------------------------------------------------------------
     if scope == "module":
         await send_log(ws, f"scanned {len(src_tree)} source files — looking for every screen in {module}...", "secondary")
 
@@ -412,8 +395,8 @@ async def handle_generate(ws: WebSocket, session: dict, msg: dict):
         await send_log(ws, f"found {len(candidates)} screen(s) in {module}: " +
                        ", ".join(c.dir for c in candidates), "success")
 
-        conflicts = {}         # screen_name -> {resolved, existing_feature, existing_script, source}
-        fresh_candidates = []  # [(screen_name, source_resolved)] — no existing output, always fresh
+        conflicts = {}
+        fresh_candidates = []
 
         for c in candidates:
             screen_name = c.dir.rsplit("/", 1)[-1]
@@ -451,7 +434,6 @@ async def handle_generate(ws: WebSocket, session: dict, msg: dict):
             await send_status(ws, "awaiting_conflict")
             return
 
-        # no conflicts at all — generate every screen fresh, same as before
         screens = []
         for screen_name, c in fresh_candidates:
             screen_request = user_request or f"Generate Cypress tests for the {screen_name} screen in the {module} module."
@@ -477,9 +459,6 @@ async def handle_generate(ws: WebSocket, session: dict, msg: dict):
         await send_status(ws, "awaiting_approval")
         return
 
-    # -----------------------------------------------------------------
-    # Single screen
-    # -----------------------------------------------------------------
     await send_log(ws, f"scanned {len(src_tree)} source files — looking for {module} / {screen}...", "secondary")
 
     resolved_source = await resolve_source_screen_precise(src_tree, module, screen)
@@ -536,10 +515,6 @@ async def handle_generate(ws: WebSocket, session: dict, msg: dict):
     await send_status(ws, "awaiting_approval")
 
 
-# ---------------------------------------------------------------------------
-# GENERATE DECISION (Replace / Append) — resumes a paused handle_generate
-# once the QC repo already had a feature/script for the target screen(s).
-# ---------------------------------------------------------------------------
 async def handle_generate_decision(ws: WebSocket, session: dict, msg: dict):
     pending = session.get("pending_generate")
     if not pending:
@@ -561,11 +536,6 @@ async def handle_generate_decision(ws: WebSocket, session: dict, msg: dict):
 
     await send_status(ws, "resolving")
 
-    # -----------------------------------------------------------------
-    # Whole module — decision applies uniformly to every conflicting
-    # screen; screens with no existing output are always freshly
-    # generated, independent of the decision.
-    # -----------------------------------------------------------------
     if pending["scope"] == "module":
         try:
             src = _source_gitlab_service()
@@ -619,9 +589,6 @@ async def handle_generate_decision(ws: WebSocket, session: dict, msg: dict):
         await send_status(ws, "awaiting_approval")
         return
 
-    # -----------------------------------------------------------------
-    # Single screen
-    # -----------------------------------------------------------------
     screen          = pending["screen"]
     resolved_output = pending["resolved_output"]
     validation      = None
@@ -664,9 +631,6 @@ async def handle_generate_decision(ws: WebSocket, session: dict, msg: dict):
     await send_status(ws, "awaiting_approval")
 
 
-# ---------------------------------------------------------------------------
-# APPROVE
-# ---------------------------------------------------------------------------
 async def handle_approve(ws: WebSocket, session: dict, msg: dict | None = None):
     """Approves and pushes to GitLab. If the UI sent edited content in
     msg (Task C — inline edit before commit), that edited text replaces
@@ -677,7 +641,6 @@ async def handle_approve(ws: WebSocket, session: dict, msg: dict | None = None):
     entries in session['screens'])."""
     msg = msg or {}
 
-    # ---- Module scope: apply per-screen edits before pushing ----
     if session.get("scope") == "module" and session.get("screens"):
         for edit in msg.get("edits") or []:
             i = edit.get("index")
@@ -711,7 +674,6 @@ async def handle_approve(ws: WebSocket, session: dict, msg: dict | None = None):
         await send_status(ws, "awaiting_review")
         return
 
-    # ---- Single-screen scope ----
     if not session.get("feature") or not session.get("script") or not session.get("resolved"):
         await send_error(ws, "nothing to approve — generate something first.")
         return
@@ -769,9 +731,6 @@ async def _fetch_shared_fixtures(ws: WebSocket) -> dict:
     return fixtures
 
 
-# ---------------------------------------------------------------------------
-# RUN
-# ---------------------------------------------------------------------------
 async def handle_run(ws: WebSocket, session: dict):
     if session.get("scope") == "module" and session.get("screens"):
         screens = session["screens"]
@@ -780,7 +739,6 @@ async def handle_run(ws: WebSocket, session: dict):
             await send_error(ws, "approve the generated files before running.")
             return
 
-        # Fresh run — clear any prior run's stashed data before starting.
         clear_screenshot_stash()
         session["run_results"] = []
 
@@ -789,7 +747,7 @@ async def handle_run(ws: WebSocket, session: dict):
 
         fixtures = await _fetch_shared_fixtures(ws)
 
-        summary = []  # [(dir, passed, exit_code)]
+        summary = []
         for i, s in enumerate(screens, start=1):
             resolved = s["resolved"]
             slug     = resolved.slug
@@ -818,7 +776,7 @@ async def handle_run(ws: WebSocket, session: dict):
             except CypressRunError as e:
                 summary.append((label, False, None))
                 await send_log(ws, f"[{label}] run error: {e}", "danger")
-                continue  # keep going — a broken screen shouldn't stop the rest of the module
+                continue
             except asyncio.CancelledError:
                 await send_log(ws, "run cancelled.", "muted")
                 raise
@@ -844,7 +802,6 @@ async def handle_run(ws: WebSocket, session: dict):
     resolved = session["resolved"]
     slug     = resolved.slug
 
-    # Fresh run — clear any prior run's stashed data before starting.
     clear_screenshot_stash()
     session["run_results"] = []
 
@@ -877,9 +834,6 @@ async def handle_run(ws: WebSocket, session: dict):
         raise
 
 
-# ---------------------------------------------------------------------------
-# INTERRUPT
-# ---------------------------------------------------------------------------
 async def handle_interrupt(ws: WebSocket, session: dict, msg: dict):
     """Applies a plain-language change. Both single-screen and module
     scope are supported (Task D — must work identically for both). For a
@@ -890,7 +844,6 @@ async def handle_interrupt(ws: WebSocket, session: dict, msg: dict):
     if not note:
         return
 
-    # ---- Module scope ----
     if session.get("scope") == "module" and session.get("screens"):
         idx = msg.get("screen_index")
         if not isinstance(idx, int) or idx < 0 or idx >= len(session["screens"]):
@@ -936,7 +889,6 @@ async def handle_interrupt(ws: WebSocket, session: dict, msg: dict):
         await send_status(ws, next_phase)
         return
 
-    # ---- Single-screen scope ----
     if not session.get("feature") or not session.get("script"):
         await send_error(ws, "nothing to change yet — fetch or generate first.")
         return
@@ -978,15 +930,6 @@ async def handle_interrupt(ws: WebSocket, session: dict, msg: dict):
     await send_status(ws, next_phase)
 
 
-# ---------------------------------------------------------------------------
-# REPORT (Task A) + SCREENSHOTS (Task B)
-# Task A builds a deterministic Excel workbook (Module/Screen/Scenario/
-# Test Case/Pass-Failed), Task B a self-contained screenshot HTML — both
-# from the run_results the runner stashed on the session (see
-# cypress_runner ("result", ...) events). No LLM anywhere in this path —
-# every number and status comes straight from mochawesome. See
-# service/report_builder.py.
-# ---------------------------------------------------------------------------
 async def handle_report(ws: WebSocket, session: dict):
     """Task A — Excel report. Deterministic: every number comes straight
     from mochawesome via cypress_runner's stashed run_results, no LLM
@@ -1026,9 +969,6 @@ async def handle_screenshots(ws: WebSocket, session: dict):
     })
 
 
-# ---------------------------------------------------------------------------
-# WebSocket entrypoint
-# ---------------------------------------------------------------------------
 @app.websocket("/ws/qc")
 async def qc_session(websocket: WebSocket):
     await websocket.accept()

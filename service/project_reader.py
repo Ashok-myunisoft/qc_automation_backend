@@ -35,7 +35,7 @@ class ProjectReader:
         ".java"
     }
 
-    MAX_FILE_SIZE = 500 * 1024  # 500 KB
+    MAX_FILE_SIZE = 500 * 1024
 
     def read_project(self, project_path: str):
 
@@ -55,7 +55,6 @@ class ProjectReader:
             if any(part in self.IGNORE_DIRS for part in path.parts):
                 continue
 
-            # Skip directories
             if path.is_dir():
                 continue
 
@@ -69,28 +68,28 @@ class ProjectReader:
             except Exception:
                 continue
 
-            
+
             if path.name == "package.json":
                 project["package_json"] = path.read_text(
                     encoding="utf-8",
                     errors="ignore"
                 )
 
-            
+
             elif path.name == "requirements.txt":
                 project["requirements_txt"] = path.read_text(
                     encoding="utf-8",
                     errors="ignore"
                 )
 
-            
+
             elif path.name.lower().startswith("readme"):
                 project["readme"] = path.read_text(
                     encoding="utf-8",
                     errors="ignore"
                 )
 
-            
+
             if path.suffix.lower() in self.SOURCE_EXTENSIONS:
 
                 try:
