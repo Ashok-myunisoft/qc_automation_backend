@@ -1,22 +1,32 @@
 import asyncio
+import json
 import queue
 import shutil
 import subprocess
 import threading
+from datetime import datetime
 from pathlib import Path
 
 _WORKSPACE = Path(__file__).resolve().parent.parent / "cypress-workspace"
 
-# Deliberately NOT under cypress/src/ — this workspace no longer keeps a
-# src/ tree at all (config/env/cypress.config.js + pageObject/ + support/
-# are the only things that need to exist ahead of time). Each run creates
-# exactly cypress/_runs/<slug>/ on demand and deletes it when done — nothing
-# here ever requires src/ to exist, and nothing here ever touches
-# pageObject/, support/, cypress.config.js, cypress.env.json, or
-# package.json. The one exception is cypress/fixtures/, which gets
-# refreshed (not deleted) when a run needs shared fixture files — see
-# run_cypress()'s `fixtures` param.
+# Per-run scratch — deleted after each run.
 _RUNS_DIR = _WORKSPACE / "cypress" / "_runs"
+
+# Where mochawesome writes its per-run JSON+HTML report. See cypress.config.js:
+# reporterOptions.reportDir + overwrite:true — that "overwrite" is exactly why
+# run_cypress() has to READ this file inside its own finally block, per run,
+# before the next screen in a module loop overwrites it.
+_REPORTS_DIR = _WORKSPACE / "cypress" / "reports" / "mochawesome-reports"
+
+# Where Cypress drops screenshots (default; not overridden in cypress.config.js).
+# Same overwrite hazard as the reports dir — we copy them out per run.
+_SCREENSHOTS_DIR = _WORKSPACE / "cypress" / "screenshots"
+
+# Persistent per-run stash for screenshots + report JSON, keyed by slug.
+# NOT auto-cleaned per run (unlike _RUNS_DIR) — cleaned when a session's
+# results are cleared (terminate/reject) via clear_stash(), or overwritten
+# by the next run of the same slug.
+_STASH_DIR = _WORKSPACE / "cypress" / "_stash"
 
 TABLE_CHARS = set("┌┐└┘├┤┬┴┼─│═╞╡╥╨╫")
 
@@ -70,41 +80,146 @@ def _stream_process(proc: subprocess.Popen, out_queue: "queue.Queue"):
         out_queue.put(("__exit__", returncode))
 
 
+def _walk_mocha_suites(suites: list, out: list) -> None:
+    """mochawesome nests suites inside suites arbitrarily deep. Flatten the
+    tree into a single list of {suite_name, scenarios[]} entries — one per
+    leaf suite that actually contains tests. Empty container suites are
+    skipped, since they carry no pass/fail information a QC reviewer needs."""
+    for suite in suites or []:
+        tests = suite.get("tests") or []
+        if tests:
+            scenarios = []
+            for t in tests:
+                err = t.get("err") or {}
+                err_message = err.get("message") or ""
+                err_stack = err.get("estack") or err.get("stack") or ""
+                scenarios.append({
+                    "name":       t.get("title") or "(untitled scenario)",
+                    "state":      t.get("state") or ("passed" if t.get("pass") else "failed"),
+                    "duration":   t.get("duration") or 0,
+                    "err_message": err_message,
+                    "err_stack":   err_stack,
+                })
+            out.append({
+                "suite_name": suite.get("title") or "(untitled suite)",
+                "scenarios":  scenarios,
+            })
+        _walk_mocha_suites(suite.get("suites") or [], out)
+
+
+def _read_latest_mochawesome() -> dict | None:
+    """Reads mochawesome's just-written JSON report — the one FROM the run
+    that just finished. Called ONCE, right after that run's process exits and
+    before the next module-loop iteration starts (per the overwrite hazard
+    documented above). Returns None if no report was produced (e.g. the run
+    crashed before any test executed)."""
+    if not _REPORTS_DIR.exists():
+        return None
+    candidates = sorted(_REPORTS_DIR.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
+    if not candidates:
+        return None
+    try:
+        return json.loads(candidates[0].read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def _summarize_run(mocha: dict | None, exit_code: int, slug: str,
+                   stash_screenshots: list[str]) -> dict:
+    """Turn the raw mochawesome JSON into the compact shape app.py stashes
+    and report_builder.py renders. Always returns a dict — even for a
+    crashed run with no report, so downstream code never has to null-check.
+    stash_screenshots: workspace-relative paths of screenshots already
+    copied into _STASH_DIR."""
+    result = {
+        "slug":        slug,
+        "exit_code":   exit_code,
+        "passed":      exit_code == 0,
+        "duration":    0,
+        "stats":       {"passes": 0, "failures": 0, "pending": 0, "tests": 0},
+        "suites":      [],
+        "screenshots": stash_screenshots,
+    }
+    if not mocha:
+        return result
+
+    stats = mocha.get("stats") or {}
+    result["duration"] = stats.get("duration") or 0
+    result["stats"] = {
+        "passes":   stats.get("passes")   or 0,
+        "failures": stats.get("failures") or 0,
+        "pending":  stats.get("pending")  or 0,
+        "tests":    stats.get("tests")    or 0,
+    }
+    flat: list = []
+    for r in mocha.get("results") or []:
+        _walk_mocha_suites(r.get("suites") or [], flat)
+    result["suites"] = flat
+    return result
+
+
+def _stash_screenshots(slug: str) -> list[str]:
+    """Copy every screenshot the just-finished run produced into the
+    persistent stash (keyed by slug), returning workspace-relative paths.
+    Returns [] if none exist. Deletes the source Cypress screenshot tree
+    afterward so the next module iteration starts clean."""
+    if not _SCREENSHOTS_DIR.exists():
+        return []
+
+    stash_target = _STASH_DIR / slug
+    if stash_target.exists():
+        shutil.rmtree(stash_target, ignore_errors=True)
+    stash_target.mkdir(parents=True, exist_ok=True)
+
+    stashed: list[str] = []
+    for src in _SCREENSHOTS_DIR.rglob("*.png"):
+        rel = src.relative_to(_SCREENSHOTS_DIR)
+        dst = stash_target / rel
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            shutil.copy2(src, dst)
+            stashed.append(str(dst.relative_to(_WORKSPACE)).replace("\\", "/"))
+        except OSError:
+            continue
+
+    shutil.rmtree(_SCREENSHOTS_DIR, ignore_errors=True)
+    return stashed
+
+
+def clear_stash(slugs: list[str] | None = None) -> None:
+    """Called from app.py on terminate/reject to wipe stashed screenshots.
+    slugs=None wipes the whole _STASH_DIR."""
+    if not _STASH_DIR.exists():
+        return
+    if slugs is None:
+        shutil.rmtree(_STASH_DIR, ignore_errors=True)
+        return
+    for slug in slugs:
+        target = _STASH_DIR / slug
+        shutil.rmtree(target, ignore_errors=True)
+
+
+def screenshot_absolute_path(rel_path: str) -> Path:
+    """report_builder.py uses this to resolve a stashed-screenshot path
+    (which app.py sends as workspace-relative) back to an absolute filesystem
+    path for base64-embedding into the final HTML report."""
+    return _WORKSPACE / rel_path
+
+
 async def run_cypress(session: dict, feature_content: str, script_content: str, slug: str,
                        fixtures: dict | None = None):
     """
-    Runs ONE screen in complete isolation, touching NOTHING in the workspace
-    except its own throwaway run folder — plus, if given, refreshing shared
-    fixture files that live in the QC repo (not this workspace), since
-    cy.fixture() resolves relative to the workspace's fixed fixturesFolder,
-    not per-spec. These are NOT screen-specific and NOT deleted afterward —
-    they're just kept current, overwritten fresh before every run so there's
-    a single source of truth (the QC repo) and zero risk of this workspace
-    silently drifting out of sync with it.
-
-    feature_content / script_content: the screen's self-contained pair,
-      already fetched/generated — pulled fresh from GitLab (or freshly
-      generated) every single call, never read from local disk.
-
-    fixtures: {filename: content} for any shared fixture files this screen's
-      script depends on (e.g. "validation-error-message.json"), already
-      fetched fresh from the QC repo by the caller. Written into
-      cypress-workspace/cypress/fixtures/ before the run.
-
-    slug: filesystem-safe screen identifier, used only to name this run's
-      folder at cypress/_runs/<slug>/ — never a real repo path.
-
-    Lifecycle, every run:
-      1. cypress/_runs/<slug>/ created (mkdir parents=True — this is the
-         ONLY per-run folder; package.json, cypress.config.js,
-         cypress.env.json, cypress/pageObject/, cypress/support/ are never
-         touched, read-modified, or recreated). cypress/fixtures/ is
-         refreshed in place if `fixtures` is given, but never deleted.
-      2. <slug>.feature and <slug>.js written into it.
-      3. Cypress runs against just that spec.
-      4. The ENTIRE cypress/_runs/<slug>/ folder is deleted in `finally`,
-         unconditionally — pass, fail, error, or cancellation. Nothing
-         pulled for a run is ever left behind.
+    Runs ONE screen. Yields:
+      ("log",    line, tone)              — every stdout line
+      ("exit",   returncode, None)        — final exit code (kept for backward
+                                             compat with existing handle_run
+                                             consumers)
+      ("result", run_summary_dict, None)  — parsed mochawesome + screenshot
+                                             paths. Emitted ONCE, immediately
+                                             after "exit", so handle_run can
+                                             stash it before the next
+                                             module-loop iteration overwrites
+                                             the mochawesome file.
     """
     _ensure_workspace()
     _ensure_npm_installed()
@@ -128,6 +243,7 @@ async def run_cypress(session: dict, feature_content: str, script_content: str, 
     spec_path = str(feature_file.relative_to(_WORKSPACE)).replace("\\", "/")
 
     out_queue: "queue.Queue" = queue.Queue()
+    started_at = datetime.utcnow().isoformat() + "Z"
 
     try:
         proc = subprocess.Popen(
@@ -153,6 +269,7 @@ async def run_cypress(session: dict, feature_content: str, script_content: str, 
     reader_thread.start()
 
     loop = asyncio.get_event_loop()
+    returncode: int | None = None
 
     try:
         while True:
@@ -160,8 +277,18 @@ async def run_cypress(session: dict, feature_content: str, script_content: str, 
             if kind == "log":
                 yield ("log", payload, _cypress_tone(payload))
             else:
-                yield ("exit", payload, None)
+                returncode = payload
+                yield ("exit", returncode, None)
                 break
+
+        # Read report JSON + copy screenshots BEFORE the next module-loop
+        # iteration overwrites the mochawesome file. This is the whole reason
+        # capture is inline in run_cypress rather than after all runs.
+        mocha = _read_latest_mochawesome()
+        screenshots = _stash_screenshots(slug)
+        summary = _summarize_run(mocha, returncode, slug, screenshots)
+        summary["started_at"] = started_at
+        yield ("result", summary, None)
 
     except asyncio.CancelledError:
         try:
@@ -173,4 +300,4 @@ async def run_cypress(session: dict, feature_content: str, script_content: str, 
     finally:
         session["process"] = None
         reader_thread.join(timeout=2)
-        shutil.rmtree(run_dir, ignore_errors=True)  # always — pass, fail, error, or cancel
+        shutil.rmtree(run_dir, ignore_errors=True)

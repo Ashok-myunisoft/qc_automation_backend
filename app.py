@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import logging
 import re
 import tempfile
@@ -22,6 +23,8 @@ from Agents.validate_agent import ValidateAgent
 from Agents.interrupt_agent import InterruptAgent
 from Agents.append_agent import AppendAgent
 from Agents.business_context_agent import BusinessContextAgent
+from service import report_builder
+from service.cypress_runner import clear_stash as clear_screenshot_stash
 
 logger = logging.getLogger(__name__)
 
@@ -664,10 +667,61 @@ async def handle_generate_decision(ws: WebSocket, session: dict, msg: dict):
 # ---------------------------------------------------------------------------
 # APPROVE
 # ---------------------------------------------------------------------------
-async def handle_approve(ws: WebSocket, session: dict):
+async def handle_approve(ws: WebSocket, session: dict, msg: dict | None = None):
+    """Approves and pushes to GitLab. If the UI sent edited content in
+    msg (Task C — inline edit before commit), that edited text replaces
+    the AI-generated content in the session BEFORE the push, so what's
+    pushed to GitLab is exactly what the human reviewed. Works for both
+    single-screen (msg.feature / msg.script) and module scope
+    (msg.edits = [{index, feature, script}, ...] for the selected
+    entries in session['screens'])."""
+    msg = msg or {}
+
+    # ---- Module scope: apply per-screen edits before pushing ----
+    if session.get("scope") == "module" and session.get("screens"):
+        for edit in msg.get("edits") or []:
+            i = edit.get("index")
+            if not isinstance(i, int) or i < 0 or i >= len(session["screens"]):
+                continue
+            if isinstance(edit.get("feature"), str):
+                session["screens"][i]["feature"] = edit["feature"]
+            if isinstance(edit.get("script"), str):
+                session["screens"][i]["script"] = edit["script"]
+
+        await send_status(ws, "running")
+        try:
+            gl = _gitlab_service()
+            for s in session["screens"]:
+                resolved = s["resolved"]
+                gl.create_or_update_file(
+                    resolved.feature_path, s["feature"],
+                    commit_message=f"QC: add/update feature file for {session.get('module')}/{resolved.slug}",
+                )
+                gl.create_or_update_file(
+                    resolved.script_path, s["script"],
+                    commit_message=f"QC: add/update cypress script for {session.get('module')}/{resolved.slug}",
+                )
+        except Exception as e:
+            await send_error(ws, f"gitlab push failed: {e}")
+            return
+
+        session["pushed"] = True
+        await send_log(ws, f"pushed {len(session['screens'])} screen(s) to gitlab.", "success")
+        await send_artifacts(ws, session)
+        await send_status(ws, "awaiting_review")
+        return
+
+    # ---- Single-screen scope ----
     if not session.get("feature") or not session.get("script") or not session.get("resolved"):
         await send_error(ws, "nothing to approve — generate something first.")
         return
+
+    edited_feature = msg.get("feature")
+    edited_script  = msg.get("script")
+    if isinstance(edited_feature, str):
+        session["feature"] = edited_feature
+    if isinstance(edited_script, str):
+        session["script"] = edited_script
 
     resolved = session["resolved"]
     await send_status(ws, "running")
@@ -726,6 +780,10 @@ async def handle_run(ws: WebSocket, session: dict):
             await send_error(ws, "approve the generated files before running.")
             return
 
+        # Fresh run — clear any prior run's stashed data before starting.
+        clear_screenshot_stash()
+        session["run_results"] = []
+
         await send_status(ws, "running")
         await send_log(ws, f"cypress: running {len(screens)} screen(s) in this module...", "secondary")
 
@@ -755,6 +813,8 @@ async def handle_run(ws: WebSocket, session: dict):
                         summary.append((label, passed, payload))
                         tone_ = "success" if passed else "danger"
                         await send_log(ws, f"[{label}] {'PASSED' if passed else 'FAILED'} (exit {payload})", tone_)
+                    elif kind == "result":
+                        session.setdefault("run_results", []).append(payload)
             except CypressRunError as e:
                 summary.append((label, False, None))
                 await send_log(ws, f"[{label}] run error: {e}", "danger")
@@ -784,6 +844,10 @@ async def handle_run(ws: WebSocket, session: dict):
     resolved = session["resolved"]
     slug     = resolved.slug
 
+    # Fresh run — clear any prior run's stashed data before starting.
+    clear_screenshot_stash()
+    session["run_results"] = []
+
     await send_status(ws, "running")
     await send_log(ws, "cypress: preparing workspace...", "secondary")
     await send_log(ws, "cypress: starting run...", "secondary")
@@ -804,6 +868,8 @@ async def handle_run(ws: WebSocket, session: dict):
                 passed = payload == 0
                 await send_status(ws, "done")
                 await ws.send_json({"type": "result", "passed": passed, "exit_code": payload})
+            elif kind == "result":
+                session.setdefault("run_results", []).append(payload)
     except CypressRunError as e:
         await send_error(ws, str(e))
     except asyncio.CancelledError:
@@ -815,9 +881,62 @@ async def handle_run(ws: WebSocket, session: dict):
 # INTERRUPT
 # ---------------------------------------------------------------------------
 async def handle_interrupt(ws: WebSocket, session: dict, msg: dict):
+    """Applies a plain-language change. Both single-screen and module
+    scope are supported (Task D — must work identically for both). For a
+    module-scope session the UI passes msg["screen_index"] to say which
+    of session['screens'] the change targets; without it we can't know
+    which screen the user meant."""
     note = (msg.get("note") or "").strip()
     if not note:
         return
+
+    # ---- Module scope ----
+    if session.get("scope") == "module" and session.get("screens"):
+        idx = msg.get("screen_index")
+        if not isinstance(idx, int) or idx < 0 or idx >= len(session["screens"]):
+            await send_error(ws, "select a screen to interrupt first.")
+            return
+
+        target = session["screens"][idx]
+        resolved = target["resolved"]
+        label = resolved.slug
+        await send_log(ws, f'[interrupt · {label}] applying: "{note}"', "accent")
+
+        try:
+            result = await interrupt_agent.apply_change(target["feature"], target["script"], note)
+        except Exception as e:
+            await send_error(ws, f"could not apply change: {e}")
+            return
+
+        if "error" in result:
+            await send_error(ws, f"could not apply that change — {result['error']}")
+            return
+
+        target["feature"] = result["feature_file"]
+        target["script"]  = result["script"]
+        await send_log(ws, f"[{label}] {result.get('summary', 'change applied')}", "secondary")
+
+        if session.get("pushed"):
+            try:
+                gl = _gitlab_service()
+                gl.create_or_update_file(
+                    resolved.feature_path, target["feature"],
+                    commit_message=f"QC: interrupt change — {session.get('module')}/{resolved.slug}",
+                )
+                gl.create_or_update_file(
+                    resolved.script_path, target["script"],
+                    commit_message=f"QC: interrupt change — {session.get('module')}/{resolved.slug}",
+                )
+                await send_log(ws, f"[{label}] change replaced in gitlab.", "success")
+            except Exception as e:
+                await send_error(ws, f"change applied locally, gitlab push failed: {e}")
+
+        await send_artifacts(ws, session)
+        next_phase = "awaiting_approval" if session.get("origin") == "generate" and not session.get("pushed") else "awaiting_review"
+        await send_status(ws, next_phase)
+        return
+
+    # ---- Single-screen scope ----
     if not session.get("feature") or not session.get("script"):
         await send_error(ws, "nothing to change yet — fetch or generate first.")
         return
@@ -860,6 +979,54 @@ async def handle_interrupt(ws: WebSocket, session: dict, msg: dict):
 
 
 # ---------------------------------------------------------------------------
+# REPORT (Task A) + SCREENSHOTS (Task B)
+# Task A builds a deterministic Excel workbook (Module/Screen/Scenario/
+# Test Case/Pass-Failed), Task B a self-contained screenshot HTML — both
+# from the run_results the runner stashed on the session (see
+# cypress_runner ("result", ...) events). No LLM anywhere in this path —
+# every number and status comes straight from mochawesome. See
+# service/report_builder.py.
+# ---------------------------------------------------------------------------
+async def handle_report(ws: WebSocket, session: dict):
+    """Task A — Excel report. Deterministic: every number comes straight
+    from mochawesome via cypress_runner's stashed run_results, no LLM
+    involved (see service/report_builder.py's module docstring). Sent as
+    base64 since it's binary — the frontend decodes it straight into a
+    file download, no inline preview (an .xlsx doesn't render usefully
+    in a browser iframe the way the screenshot HTML does)."""
+    run_results = session.get("run_results") or []
+    if not run_results:
+        await send_error(ws, "no run data yet — run something first.")
+        return
+
+    module = session.get("module") or ""
+    xlsx_bytes = report_builder.build_report_xlsx(module, run_results)
+    filename = f"qc-report-{module or 'run'}.xlsx".replace(" ", "_")
+    await ws.send_json({
+        "type":            "report",
+        "content_base64":  base64.b64encode(xlsx_bytes).decode("ascii"),
+        "filename":        filename,
+        "mime":            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    })
+
+
+async def handle_screenshots(ws: WebSocket, session: dict):
+    run_results = session.get("run_results") or []
+    if not run_results:
+        await send_error(ws, "no run data yet — run something first.")
+        return
+
+    module = session.get("module") or ""
+    html = report_builder.build_screenshots_html(module, run_results)
+    filename = f"qc-screenshots-{module or 'run'}.html".replace(" ", "_")
+    await ws.send_json({
+        "type":     "screenshots",
+        "html":     html,
+        "filename": filename,
+    })
+
+
+# ---------------------------------------------------------------------------
 # WebSocket entrypoint
 # ---------------------------------------------------------------------------
 @app.websocket("/ws/qc")
@@ -897,7 +1064,7 @@ async def qc_session(websocket: WebSocket):
                 session["current_task"] = asyncio.create_task(handle_generate_decision(websocket, session, msg))
 
             elif action == "approve":
-                session["current_task"] = asyncio.create_task(handle_approve(websocket, session))
+                session["current_task"] = asyncio.create_task(handle_approve(websocket, session, msg))
 
             elif action == "reject":
                 session["feature"] = None
@@ -906,11 +1073,19 @@ async def qc_session(websocket: WebSocket):
                 session["pushed"]  = False
                 session.pop("screens", None)
                 session.pop("pending_generate", None)
+                session.pop("run_results", None)
+                clear_screenshot_stash()
                 await send_log(websocket, "rejected — nothing pushed.", "muted")
                 await send_status(websocket, "idle")
 
             elif action == "run":
                 session["current_task"] = asyncio.create_task(handle_run(websocket, session))
+
+            elif action == "report":
+                session["current_task"] = asyncio.create_task(handle_report(websocket, session))
+
+            elif action == "screenshots":
+                session["current_task"] = asyncio.create_task(handle_screenshots(websocket, session))
 
             elif action == "terminate":
                 task = session.get("current_task")
@@ -932,6 +1107,8 @@ async def qc_session(websocket: WebSocket):
                 session["pushed"]  = False
                 session.pop("screens", None)
                 session.pop("pending_generate", None)
+                session.pop("run_results", None)
+                clear_screenshot_stash()
                 await send_log(
                     websocket,
                     "terminated — cancelled the in-progress run." if cancelled else "nothing in progress to terminate.",

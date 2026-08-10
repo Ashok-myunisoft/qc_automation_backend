@@ -1,29 +1,3 @@
-"""
-Read-only access to the real test DB, exposed as a small set of SAFE,
-schema-discovery-first functions — never raw SQL from the agent side.
-
-Why this shape, specifically:
-- Screen names don't reliably match table names (confirmed: "InstrumentMaster"
-  the screen tells you nothing certain about the real table). So instead of
-  hardcoding a screen->table map, these functions let an agent (or anyone)
-  DISCOVER the schema live: list/search tables, describe a table's columns
-  and foreign keys, then pull real sample values once a table is confirmed.
-- SQL-injection safety for the dynamic-identifier functions (describe_table,
-  get_sample_values) works like this: table/column names supplied by the
-  caller (which may ultimately come from an LLM) are never interpolated
-  directly into a query. They're first checked for literal existence against
-  INFORMATION_SCHEMA — only a name that already exists as a real table/column
-  in this DB can ever reach a query, and only after that check passes. An
-  LLM calling these tools can at most reference something it already
-  discovered via these same tools; it can't inject arbitrary SQL text.
-- This connects with SELECT-only credentials as a second, DB-level backstop
-  — even a mistake in this code can't write/alter/delete anything, because
-  the login itself isn't granted permission to.
-
-Env vars expected (add real values to .env — never commit them):
-  TESTDB_HOST, TESTDB_PORT (default 1433), TESTDB_NAME, TESTDB_USER, TESTDB_PASSWORD
-"""
-
 import os
 import logging
 from contextlib import contextmanager
