@@ -14,9 +14,9 @@ class ScriptGenerateAgent:
     actually uses."""
 
     def __init__(self):
-        self.client = OpenAIChatClient(
-            model=os.getenv("OPENAI_MODEL")
-        )
+       
+        model =  os.getenv("OPENAI_MODEL")
+        self.client = OpenAIChatClient(model=model)
 
         with open("prompts/script_generate_prompt.txt", "r", encoding="utf-8") as f:
             self.instructions = f.read()

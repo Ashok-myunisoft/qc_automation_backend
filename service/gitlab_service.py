@@ -1,4 +1,5 @@
 import base64
+import logging
 import os
 import time
 
@@ -7,7 +8,20 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+logger = logging.getLogger(__name__)
+
 TREE_CACHE_SECONDS = 45
+
+# repository_tree(recursive=True, all=True) isn't one API call for a repo of
+# any real size — python-gitlab walks it page by page under the hood, and
+# for the real source repo (7000+ files) that's several HTTP round-trips in
+# a row. Any single page hiccuping surfaces as a GitlabGetError even though
+# the repo/branch/token are all fine — a large recursive listing is
+# structurally more failure-prone than any other single call this class
+# makes. This retry absorbs exactly that kind of transient failure instead
+# of failing the whole Generate/Fetch over one bad page.
+TREE_FETCH_RETRIES = 3
+TREE_FETCH_BACKOFF_SECONDS = 2  # doubles each retry: 2s, 4s
 
 
 class GitLabService:
@@ -52,6 +66,31 @@ class GitLabService:
         scheme, rest = base_url.split("://", 1)
         return f"{scheme}://oauth2:{self._token}@{rest}"
 
+    def _fetch_tree_with_retry(self) -> list[dict]:
+        """See TREE_FETCH_RETRIES comment above for why this specific call
+        gets a retry and nothing else in this class does. Uses plain
+        time.sleep — this class is already called synchronously from inside
+        async handlers elsewhere in the app (blocking the event loop for
+        the duration of the underlying HTTP call regardless), so this
+        doesn't introduce a new blocking pattern, just extends an existing
+        one across up to TREE_FETCH_RETRIES attempts instead of one."""
+        last_error: Exception | None = None
+        for attempt in range(1, TREE_FETCH_RETRIES + 1):
+            try:
+                return self._project.repository_tree(
+                    recursive=True, all=True, ref=self._branch
+                )
+            except gitlab.exceptions.GitlabGetError as e:
+                last_error = e
+                if attempt < TREE_FETCH_RETRIES:
+                    wait = TREE_FETCH_BACKOFF_SECONDS * (2 ** (attempt - 1))
+                    logger.warning(
+                        "%s: repository_tree attempt %d/%d failed (%s) — retrying in %ss",
+                        self._env_prefix, attempt, TREE_FETCH_RETRIES, e, wait,
+                    )
+                    time.sleep(wait)
+        raise last_error
+
     def get_repo_tree(self, force_refresh: bool = False) -> list[str]:
         now = time.time()
         if (
@@ -61,9 +100,7 @@ class GitLabService:
         ):
             return self._tree_cache
 
-        items = self._project.repository_tree(
-            recursive=True, all=True, ref=self._branch
-        )
+        items = self._fetch_tree_with_retry()
         paths = [item["path"] for item in items if item["type"] == "blob"]
 
         self._tree_cache = paths

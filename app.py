@@ -14,6 +14,7 @@ from service.architecture_resolver import (
     build_new_path, ResolvedSource,
     resolve_existing_precise, resolve_module_screens_precise,
     resolve_source_screen_precise, resolve_source_module_screens_precise,
+    filter_tree_by_module,
 )
 from service.cypress_runner import run_cypress, CypressRunError
 from Agents.project_analyze_agent import ProjectAnalysisAgent
@@ -366,15 +367,17 @@ async def handle_generate(ws: WebSocket, session: dict, msg: dict):
     session.pop("pending_generate", None)
 
     await send_status(ws, "resolving")
-    await send_log(ws, "reading source repo structure...", "secondary")
 
-    try:
-        src      = _source_gitlab_service()
-        src_tree = src.get_repo_tree()
-    except Exception as e:
-        await send_error(ws, f"source gitlab connection failed: {e}")
-        return
-
+    # -----------------------------------------------------------------
+    # QC repo checked FIRST for both scopes — one lookup, no source-repo
+    # involvement. Failure here is NON-FATAL (matches the original design):
+    # log a muted warning and continue with out_tree=None, resolving the
+    # real path on approve instead. Source is only ever touched afterward:
+    # for module scope because discovering brand-new screens genuinely
+    # requires it; for single-screen scope only when nothing already
+    # exists in the QC repo, or later if Replace is chosen on a conflict.
+    # -----------------------------------------------------------------
+    await send_log(ws, "checking the QC repo for existing tests...", "secondary")
     out_tree = None
     out_gl   = None
     try:
@@ -383,10 +386,25 @@ async def handle_generate(ws: WebSocket, session: dict, msg: dict):
     except Exception as e:
         await send_log(ws, f"could not check output repo ({e}) — will resolve path on approve.", "muted")
 
+    # -----------------------------------------------------------------
+    # Whole module
+    # -----------------------------------------------------------------
     if scope == "module":
+        await send_log(ws, "reading source repo structure...", "secondary")
+        try:
+            src      = _source_gitlab_service()
+            src_tree = src.get_repo_tree()
+        except Exception as e:
+            await send_error(ws, f"source gitlab connection failed: {e}")
+            return
+
         await send_log(ws, f"scanned {len(src_tree)} source files — looking for every screen in {module}...", "secondary")
 
-        candidates = await resolve_source_module_screens_precise(src_tree, module)
+        # Cheap, no-LLM pre-filter before this ever reaches ArchitectureAgent's
+        # prompt — sending all 7000+ raw paths hit OpenAI's per-minute token
+        # limit outright in testing. See filter_tree_by_module's own docstring.
+        filtered_src_tree = filter_tree_by_module(src_tree, module)
+        candidates = await resolve_source_module_screens_precise(filtered_src_tree, module)
         if not candidates:
             await send_log(ws, f"no source screens found under module '{module}' in the source repo.", "danger")
             await send_status(ws, "not_found")
@@ -459,19 +477,11 @@ async def handle_generate(ws: WebSocket, session: dict, msg: dict):
         await send_status(ws, "awaiting_approval")
         return
 
-    await send_log(ws, f"scanned {len(src_tree)} source files — looking for {module} / {screen}...", "secondary")
-
-    resolved_source = await resolve_source_screen_precise(src_tree, module, screen)
-    if resolved_source is None:
-        await send_log(ws, f"no source files found for '{module} / {screen}' in the source repo.", "danger")
-        await send_status(ws, "not_found")
-        return
-
-    if resolved_source.ambiguous:
-        await send_log(ws, f"more than one close match ({resolved_source.resolved_by}) — picked {resolved_source.dir} (confidence {resolved_source.confidence}). Double-check.", "accent")
-    else:
-        await send_log(ws, f"matched source {resolved_source.dir} via {resolved_source.resolved_by} (confidence {resolved_source.confidence})", "success")
-
+    # -----------------------------------------------------------------
+    # Single screen — QC repo already checked above. If it's there, show
+    # the conflict now with zero source-repo involvement. Only fetch
+    # source if this is genuinely a new screen.
+    # -----------------------------------------------------------------
     resolved_output = None
     existed = False
     existing_feature = existing_script = None
@@ -481,7 +491,6 @@ async def handle_generate(ws: WebSocket, session: dict, msg: dict):
     if existed:
         session["pending_generate"] = {
             "module": module, "screen": screen, "scope": "screen", "user_request": user_request,
-            "resolved_source": resolved_source,
             "resolved_output": resolved_output,
             "existing_feature": existing_feature, "existing_script": existing_script,
         }
@@ -494,6 +503,31 @@ async def handle_generate(ws: WebSocket, session: dict, msg: dict):
         })
         await send_status(ws, "awaiting_conflict")
         return
+
+    # Nothing in the QC repo (or the QC-repo check itself failed) —
+    # genuinely new screen, or unresolvable without source either way.
+    # NOW, and only now, we need the source repo.
+    await send_log(ws, "reading source repo structure...", "secondary")
+    try:
+        src      = _source_gitlab_service()
+        src_tree = src.get_repo_tree()
+    except Exception as e:
+        await send_error(ws, f"source gitlab connection failed: {e}")
+        return
+
+    await send_log(ws, f"scanned {len(src_tree)} source files — looking for {module} / {screen}...", "secondary")
+
+    filtered_src_tree = filter_tree_by_module(src_tree, module)
+    resolved_source = await resolve_source_screen_precise(filtered_src_tree, module, screen)
+    if resolved_source is None:
+        await send_log(ws, f"no source files found for '{module} / {screen}' in the source repo.", "danger")
+        await send_status(ws, "not_found")
+        return
+
+    if resolved_source.ambiguous:
+        await send_log(ws, f"more than one close match ({resolved_source.resolved_by}) — picked {resolved_source.dir} (confidence {resolved_source.confidence}). Double-check.", "accent")
+    else:
+        await send_log(ws, f"matched source {resolved_source.dir} via {resolved_source.resolved_by} (confidence {resolved_source.confidence})", "success")
 
     user_request = user_request or f"Generate Cypress tests for the {screen} screen in the {module} module."
 
@@ -594,15 +628,33 @@ async def handle_generate_decision(ws: WebSocket, session: dict, msg: dict):
     validation      = None
 
     if decision == "replace":
+        # resolved_source is deliberately NOT pre-fetched at generate time
+        # anymore for single-screen scope — the QC repo is checked first
+        # and we return immediately on a conflict, before source is ever
+        # touched. Replace is the one path that actually needs it, so it's
+        # resolved here, lazily, the moment it's actually chosen.
         try:
-            src = _source_gitlab_service()
+            src      = _source_gitlab_service()
+            src_tree = src.get_repo_tree()
         except Exception as e:
             await send_error(ws, f"source gitlab connection failed: {e}")
             session.pop("pending_generate", None)
             return
 
+        await send_log(ws, f"scanned {len(src_tree)} source files — looking for {module} / {screen}...", "secondary")
+        filtered_src_tree = filter_tree_by_module(src_tree, module)
+        resolved_source = await resolve_source_screen_precise(filtered_src_tree, module, screen)
+        if resolved_source is None:
+            await send_error(ws, f"no source files found for '{module} / {screen}' in the source repo.")
+            session.pop("pending_generate", None)
+            return
+        if resolved_source.ambiguous:
+            await send_log(ws, f"more than one close match ({resolved_source.resolved_by}) — picked {resolved_source.dir} (confidence {resolved_source.confidence}). Double-check.", "accent")
+        else:
+            await send_log(ws, f"matched source {resolved_source.dir} via {resolved_source.resolved_by} (confidence {resolved_source.confidence})", "success")
+
         request = user_request or f"Generate Cypress tests for the {screen} screen in the {module} module."
-        outcome = await _generate_one_screen(ws, src, module, screen, pending["resolved_source"], request)
+        outcome = await _generate_one_screen(ws, src, module, screen, resolved_source, request)
         if outcome is None:
             await send_error(ws, "generation failed.")
             session.pop("pending_generate", None)

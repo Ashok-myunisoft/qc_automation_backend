@@ -76,20 +76,15 @@ For every page or form extract:
 - CRUD Operations
 - Business Actions
 
-Examples:
+For every business action (Save, Update, Delete, Submit, Approve, Reject,
+Release, Export, Import, Print, Copy, Cancel, or any other button-triggered
+action found in the source), extract it as an object, not a bare string:
 
-Save
-Update
-Delete
-Submit
-Approve
-Reject
-Release
-Export
-Import
-Print
-Copy
-Cancel
+- Action Name
+- data-cy
+- id
+- Preferred Locator (same priority order as FIELD ANALYSIS: data-cy, then
+  id, then name, then other stable selector)
 
 --------------------------------------------------
 FIELD ANALYSIS
@@ -166,6 +161,14 @@ For every table or grid extract:
 - Pagination
 - Sorting
 
+Row Actions and Toolbar Actions are each lists of objects, not bare
+strings — same shape as a business action:
+
+- Action Name
+- data-cy
+- id
+- Preferred Locator
+
 --------------------------------------------------
 DIALOG ANALYSIS
 --------------------------------------------------
@@ -178,6 +181,18 @@ Extract any dialogs explicitly found in the source:
 - Confirmation
 - Delete
 - Approval
+
+For each dialog found, extract:
+
+- Dialog Type (one of the categories above)
+- Trigger Action (the business action or row action that opens it, if identifiable)
+- Confirm Button — an object with data-cy, id, and Preferred Locator
+- Cancel Button — an object with data-cy, id, and Preferred Locator
+
+Only include a confirm/cancel button object if the source actually shows
+one for that dialog — use "Unknown" for any locator field you can't
+determine, per the RULES below. Do not invent a dialog that isn't present
+in the source just to have something to fill in here.
 
 --------------------------------------------------
 VALIDATION ANALYSIS
@@ -212,6 +227,10 @@ For every interactive element determine the preferred locator using this priorit
 4. other stable selector
 
 Do NOT generate XPath unless explicitly present.
+
+This priority applies uniformly to every locator field in this schema —
+form fields, business actions, table row/toolbar actions, and dialog
+buttons alike.
 
 --------------------------------------------------
 UNRESOLVED
@@ -261,7 +280,14 @@ OUTPUT JSON
           "previous_page": "",
           "next_page": "",
           "crud_supported": [],
-          "business_actions": [],
+          "business_actions": [
+            {
+              "action_name": "",
+              "data_cy": "",
+              "id": "",
+              "preferred_locator": ""
+            }
+          ],
           "forms": [
             {
               "form_name": "",
@@ -290,8 +316,49 @@ OUTPUT JSON
               ]
             }
           ],
-          "tables": [],
-          "dialogs": [],
+          "tables": [
+            {
+              "grid_name": "",
+              "columns": [],
+              "editable_columns": [],
+              "row_actions": [
+                {
+                  "action_name": "",
+                  "data_cy": "",
+                  "id": "",
+                  "preferred_locator": ""
+                }
+              ],
+              "toolbar_actions": [
+                {
+                  "action_name": "",
+                  "data_cy": "",
+                  "id": "",
+                  "preferred_locator": ""
+                }
+              ],
+              "search": false,
+              "filter": false,
+              "pagination": false,
+              "sorting": false
+            }
+          ],
+          "dialogs": [
+            {
+              "dialog_type": "",
+              "trigger_action": "",
+              "confirm_button": {
+                "data_cy": "",
+                "id": "",
+                "preferred_locator": ""
+              },
+              "cancel_button": {
+                "data_cy": "",
+                "id": "",
+                "preferred_locator": ""
+              }
+            }
+          ],
           "rest_apis": [],
           "important_components": [],
           "reusable_components": [],

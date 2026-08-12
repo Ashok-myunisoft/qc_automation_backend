@@ -9,7 +9,7 @@ load_dotenv()
 
 logger = logging.getLogger(__name__)
 
-_MAX_SAMPLE_LIMIT = 50
+_MAX_SAMPLE_LIMIT = 50  # hard ceiling regardless of what a caller asks for
 
 
 class DbServiceError(Exception):
@@ -75,19 +75,27 @@ def _column_exists(table_name: str, column_name: str) -> bool:
 def list_tables(keyword: str | None = None, limit: int = 50) -> list[str]:
     """Lists real table names, optionally filtered by a substring keyword
     (case-insensitive). Use this FIRST when you don't have a confident table
-    name yet — e.g. searching "instrument" for the InstrumentMaster screen."""
-    limit = min(limit, 200)
+    name yet — e.g. searching "instrument" for the InstrumentMaster screen.
+
+    BUGFIX: the row-limit is now inlined via an f-string, not Python's %
+    operator. The old code applied `% limit` (one value) to a string that
+    also contained a literal `%s` meant for pymssql's OWN separate
+    parameter-substitution mechanism — Python's % counts every placeholder
+    in the string and demanded two values, raising "not enough arguments
+    for format string" before any query ever reached the database. This
+    is safe: `limit` is always our own clamped int, never externally
+    supplied text, so there's no injection concern in inlining it directly."""
+    limit = min(int(limit), 200)
     if keyword:
         rows = _query(
-            "SELECT TOP (%d) TABLE_NAME FROM INFORMATION_SCHEMA.TABLES "
-            "WHERE TABLE_TYPE = 'BASE TABLE' AND TABLE_NAME LIKE %s ORDER BY TABLE_NAME"
-            % limit,
+            f"SELECT TOP ({limit}) TABLE_NAME FROM INFORMATION_SCHEMA.TABLES "
+            "WHERE TABLE_TYPE = 'BASE TABLE' AND TABLE_NAME LIKE %s ORDER BY TABLE_NAME",
             (f"%{keyword}%",),
         )
     else:
         rows = _query(
-            "SELECT TOP (%d) TABLE_NAME FROM INFORMATION_SCHEMA.TABLES "
-            "WHERE TABLE_TYPE = 'BASE TABLE' ORDER BY TABLE_NAME" % limit
+            f"SELECT TOP ({limit}) TABLE_NAME FROM INFORMATION_SCHEMA.TABLES "
+            "WHERE TABLE_TYPE = 'BASE TABLE' ORDER BY TABLE_NAME"
         )
     return [r["TABLE_NAME"] for r in rows]
 
@@ -96,11 +104,13 @@ def search_tables_by_column(column_keyword: str, limit: int = 50) -> list[dict]:
     """Searches COLUMN names (not table names) for a substring — this is the
     stronger signal when the table name itself is opaque/legacy, since a
     screen's form field names (e.g. "InstrumentCode") tend to survive table
-    renames better than the table name does. Returns [{table, column}, ...]."""
-    limit = min(limit, 200)
+    renames better than the table name does. Returns [{table, column}, ...].
+
+    Same %-operator bugfix as list_tables above — see that docstring."""
+    limit = min(int(limit), 200)
     rows = _query(
-        "SELECT TOP (%d) TABLE_NAME, COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS "
-        "WHERE COLUMN_NAME LIKE %s ORDER BY TABLE_NAME, COLUMN_NAME" % limit,
+        f"SELECT TOP ({limit}) TABLE_NAME, COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS "
+        "WHERE COLUMN_NAME LIKE %s ORDER BY TABLE_NAME, COLUMN_NAME",
         (f"%{column_keyword}%",),
     )
     return [{"table": r["TABLE_NAME"], "column": r["COLUMN_NAME"]} for r in rows]
@@ -123,6 +133,7 @@ def describe_table(table_name: str) -> dict:
         (table_name,),
     )
 
+    # FKs where this table is the child (references another table)
     outgoing = _query(
         """
         SELECT
@@ -139,6 +150,7 @@ def describe_table(table_name: str) -> dict:
         (table_name,),
     )
 
+    # FKs where this table is the parent (other tables reference it)
     incoming = _query(
         """
         SELECT
@@ -161,11 +173,11 @@ def describe_table(table_name: str) -> dict:
             {"name": c["COLUMN_NAME"], "type": c["DATA_TYPE"], "nullable": c["IS_NULLABLE"] == "YES"}
             for c in columns
         ],
-        "references": [
+        "references": [  # this table -> other tables (follow these for parent/lookup data)
             {"column": r["column_name"], "references_table": r["referenced_table"], "references_column": r["referenced_column"]}
             for r in outgoing
         ],
-        "referenced_by": [
+        "referenced_by": [  # other tables -> this table (this table is shared/lookup data for these)
             {"table": r["referencing_table"], "column": r["referencing_column"], "via_column": r["column_name"]}
             for r in incoming
         ],
@@ -185,6 +197,9 @@ def get_sample_values(table_name: str, column_name: str, limit: int = 10) -> lis
     if not _column_exists(table_name, column_name):
         raise DbServiceError(f"no such column: {column_name!r} on table {table_name!r}")
 
+    # table_name/column_name are validated above (real identifiers, no
+    # arbitrary text can reach this point) — safe to reference directly in
+    # the identifier position, which SQL doesn't allow parameterizing anyway.
     sql = (
         f"SELECT DISTINCT TOP ({limit}) [{column_name}] AS value "
         f"FROM [{table_name}] WHERE [{column_name}] IS NOT NULL"

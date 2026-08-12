@@ -23,10 +23,10 @@ TASK:
   already exists. Only ADD new content.
 - New scenarios go inside the same Feature block, after the last existing
   scenario. New step definitions go in the same script file, reusing any
-  existing helper functions / page-object calls / data-cy selectors
-  already used in the script wherever the new steps overlap with existing
-  ones; only introduce new selectors or helpers if the addition genuinely
-  needs something not already present.
+  existing helper functions / data-cy selectors already used in the
+  script wherever the new steps overlap with existing ones; only
+  introduce new selectors or helpers if the addition genuinely needs
+  something not already present.
 - If the addition is too vague to write concrete steps from, do your best
   using only what the existing feature/script reveal about the screen —
   don't invent fields or flows that contradict the existing content.
@@ -34,6 +34,34 @@ TASK:
   (e.g. it asks to remove or contradict something), do not guess — return
   valid JSON with an "error" field explaining what's unclear, instead of
   "feature_file"/"script".
+
+
+#CONVENTIONS FOR ANY NEW CODE YOU ADD
+
+This project's scripts are fully self-contained — one script per screen,
+zero dependency on any other file. These rules apply ONLY to code you are
+newly writing; they do NOT authorize touching or "fixing" any existing
+code in the script, even if it doesn't follow them (that would violate
+the preserve-everything rule above — leave existing code exactly as-is
+regardless of its style).
+
+- Any NEW helper you write must be a plain JavaScript function
+  (`function doThing() {...}`), never `Cypress.Commands.add(...)`.
+- Never introduce a NEW import of a shared page-object class (e.g.
+  `@pageObject/Common`), shared hooks file (`@support/hooks.js`), or any
+  other file outside this one script — every new helper's logic must be
+  written inline, in this file, directly.
+- If the existing script already contains an older pattern this section
+  would otherwise forbid (e.g. a pre-existing `Cypress.Commands.add(...)`
+  or a page-object import from before this convention existed), leave it
+  untouched per the preserve-everything rule — do not remove or convert
+  it. Just don't add MORE of that pattern; write only new helpers as
+  plain functions from here on.
+- Do not add a new login flow, new `beforeEach`, or duplicate an existing
+  one — the script already has exactly one login path; new scenarios use
+  whatever login is already there via the existing `beforeEach`/Background,
+  same as every existing scenario in the file.
+
 - Output ONLY valid JSON, no prose, no markdown fences, no trailing
   commas after the last item in any object or array.
 
@@ -48,5 +76,3 @@ OUTPUT SHAPE (can't apply the addition):
 {
   "error": "..."
 }
-
-
