@@ -4,7 +4,7 @@ import queue
 import shutil
 import subprocess
 import threading
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 _WORKSPACE = Path(__file__).resolve().parent.parent / "cypress-workspace"
@@ -31,10 +31,13 @@ def _ensure_workspace() -> None:
         raise CypressRunError(
             f"cypress-workspace/ not found at {_WORKSPACE}. "
             "It only needs: package.json, cypress.config.js, cypress.env.json, "
-            "patches/ (for the postinstall patch-package step), and the "
-            "cypress/pageObject/ + cypress/support/ folders — every screen's "
-            "own feature+script pair is pulled fresh from GitLab on each run, "
-            "no local features/stepDefinitions/fixtures tree needed."
+            "patches/ (for the postinstall patch-package step), and "
+            "cypress/support/e2e.js (Cypress's own mandatory boot file — required "
+            "regardless of project setup, unrelated to any shared step logic). "
+            "No commands.js, no shared step-definitions library, no page-object "
+            "folder, and no pre-existing fixtures tree are needed — every screen's "
+            "feature+script pair is fully self-contained and pulled fresh from "
+            "GitLab on each run."
         )
 
 
@@ -43,7 +46,7 @@ def _ensure_npm_installed() -> None:
     if not node_modules.exists():
         raise CypressRunError(
             "node_modules/ not found inside cypress-workspace/. "
-            "Run `npm install` once inside qc-backend/cypress-workspace/ and it will be ready."
+            "Run `npm install` once inside cypress-workspace/ and it will be ready."
         )
 
 
@@ -149,15 +152,21 @@ def _summarize_run(mocha: dict | None, exit_code: int, slug: str,
 
 def _stash_screenshots(slug: str) -> list[str]:
     """Copy every screenshot the just-finished run produced into the
-    persistent stash (keyed by slug), returning workspace-relative paths.
+    persistent stash, returning workspace-relative paths.
+
+    Current policy: keep only the latest run overall. Before writing the
+    new screenshots, clear the entire stash so a later screen run replaces
+    any earlier screen's screenshots.
+
     Returns [] if none exist. Deletes the source Cypress screenshot tree
     afterward so the next module iteration starts clean."""
     if not _SCREENSHOTS_DIR.exists():
         return []
 
+    if _STASH_DIR.exists():
+        shutil.rmtree(_STASH_DIR, ignore_errors=True)
+
     stash_target = _STASH_DIR / slug
-    if stash_target.exists():
-        shutil.rmtree(stash_target, ignore_errors=True)
     stash_target.mkdir(parents=True, exist_ok=True)
 
     stashed: list[str] = []
@@ -232,7 +241,7 @@ async def run_cypress(session: dict, feature_content: str, script_content: str, 
     spec_path = str(feature_file.relative_to(_WORKSPACE)).replace("\\", "/")
 
     out_queue: "queue.Queue" = queue.Queue()
-    started_at = datetime.utcnow().isoformat() + "Z"
+    started_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
     try:
         proc = subprocess.Popen(

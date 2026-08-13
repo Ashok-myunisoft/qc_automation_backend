@@ -135,11 +135,28 @@ takes priority over deriving a selector yourself:
 - If a step refers to a field/button name that appears in the supplied
   list, use that EXACT data-cy value in your selector — do not
   transform, guess, or reformat it.
+- The match does NOT need to be character-for-character identical. A
+  step's wording and the supplied list's key can differ slightly in
+  phrasing, word order, or an added/dropped word (e.g. a step saying
+  "the Get Print button" against a supplied key of "Print", or "GetPayslip"
+  against "Get Payslip") — if it's clearly referring to the SAME real
+  field/button, use the supplied real value. Only fall back to deriving
+  your own selector when the step is referring to something the list
+  genuinely doesn't cover at all, not merely phrased differently.
 - Only fall back to deriving a data-cy from the field/button's own name
   (as described in STRICT RULES below) for names that do NOT appear in
-  the supplied list.
+  the supplied list, even loosely.
 - If no list is supplied, or it's empty, derive every selector as usual
   — this is the normal case, not an error.
+- Whenever you DO derive a data-cy yourself (because nothing in the
+  supplied list applies), it must NEVER contain a space or any whitespace
+  — "Get Print" is a display label, not a valid attribute value; a real
+  data-cy is always one contiguous token (e.g. "GetPrint" or "get-print").
+  If you cannot confidently derive a real-looking single-token value from
+  the step's wording, use a text-based selector instead
+  (e.g. cy.contains('button', 'Get Print').click()) rather than inventing
+  a data-cy attribute value with a space in it — that attribute would
+  never exist in the real rendered page.
 
 
 #STRICT RULES

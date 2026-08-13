@@ -31,16 +31,15 @@ class ArchitectureAgent:
             return {"error": f"agent call failed: {e}"}
 
         try:
-            return json.loads(response.text)
+            result = json.loads(response.text)
         except json.JSONDecodeError:
             logger.warning("ArchitectureAgent returned invalid JSON: %s", response.text)
             return {"error": "agent returned invalid JSON"}
 
+        logger.info("ArchitectureAgent call succeeded")
+        return result
+
     async def resolve_screen(self, tree: list[str], module: str, screen: str, repo_kind: str) -> dict:
-        logger.info(
-            "ArchitectureAgent.resolve_screen called with module=%r screen=%r repo_kind=%r (%d tree entries)",
-            module, screen, repo_kind, len(tree),
-        )
         user_message = f"""
 repo_kind: {repo_kind}
 scope: screen
@@ -51,14 +50,9 @@ repo file paths:
 {chr(10).join(tree)}
 """
         result = await self._ask(user_message)
-        logger.info("ArchitectureAgent.resolve_screen raw result for module=%r screen=%r: %r", module, screen, result)
         return result
 
     async def resolve_module(self, tree: list[str], module: str, repo_kind: str) -> dict:
-        logger.info(
-            "ArchitectureAgent.resolve_module called with module=%r repo_kind=%r (%d tree entries)",
-            module, repo_kind, len(tree),
-        )
         user_message = f"""
 repo_kind: {repo_kind}
 scope: module
@@ -68,5 +62,4 @@ repo file paths:
 {chr(10).join(tree)}
 """
         result = await self._ask(user_message)
-        logger.info("ArchitectureAgent.resolve_module raw result for module=%r: %r", module, result)
         return result

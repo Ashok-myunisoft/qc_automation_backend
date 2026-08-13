@@ -1,6 +1,7 @@
 import asyncio
 import base64
 import logging
+import posixpath
 import re
 import tempfile
 from pathlib import Path
@@ -21,7 +22,6 @@ from Agents.project_analyze_agent import ProjectAnalysisAgent
 from Agents.test_case_agent import TestCaseAgent
 from Agents.script_generate_agent import ScriptGenerateAgent
 from Agents.validate_agent import ValidateAgent
-from Agents.interrupt_agent import InterruptAgent
 from Agents.append_agent import AppendAgent
 from Agents.business_context_agent import BusinessContextAgent
 from service import report_builder
@@ -35,7 +35,6 @@ project_analysis_agent = ProjectAnalysisAgent()
 test_case_agent        = TestCaseAgent()
 script_generate_agent  = ScriptGenerateAgent()
 validate_agent         = ValidateAgent()
-interrupt_agent        = InterruptAgent()
 append_agent           = AppendAgent()
 business_context_agent = BusinessContextAgent()
 
@@ -54,19 +53,116 @@ def _source_gitlab_service() -> GitLabService:
     return GitLabService(env_prefix="SOURCE_GITLAB")
 
 
-def _fetch_source_project_context(src: GitLabService, resolved: ResolvedSource) -> dict:
+_IMPORT_RE = re.compile(r"""from\s+['"]([^'"]+)['"]""")
+
+_MAX_IMPORT_DEPTH = 2
+_MAX_EXTRA_FILES = 40
+
+
+def _resolve_import_to_tree_path(import_path: str, current_dir: str, tree_set: set) -> str | None:
+    """Resolves a TS import specifier to a real file path in the repo tree.
+    Handles both styles seen in this codebase:
+      - relative ('./x', '../../lib/x') -> resolved against the importing
+        file's own directory
+      - bare, repo-root-relative specifiers (this project's Nx-style TS
+        path mapping, e.g. 'libs/gbdirectives/src/lib/gb-form-controls.module',
+        'features/gbdialogbox/gbdialogbox.component') -> tried directly
+        against the tree, since these already read like real repo paths
+    External packages (@angular/*, rxjs, etc.) simply won't match anything
+    in the tree and are silently skipped — no explicit allow/deny list
+    needed."""
+    bases = [posixpath.normpath(posixpath.join(current_dir, import_path))] if import_path.startswith(".") else [import_path]
+    for base in bases:
+        for suffix in ("", ".ts", "/index.ts"):
+            candidate = base + suffix
+            if candidate in tree_set:
+                return candidate
+    return None
+
+
+def _fetch_source_project_context(src: GitLabService, resolved: ResolvedSource,
+                                   source_tree: list[str] | None = None) -> dict:
     """Pulls every file in the resolved source-repo folder into a temp dir
     (preserving the folder's relative layout) and reuses ProjectReader as-is,
     so the agent pipeline's input shape is unchanged whether the source came
-    from an upload or a repo fetch."""
+    from an upload or a repo fetch.
+
+    If source_tree is given, ALSO follows local TS imports out of the
+    screen's own files into shared library components (this codebase keeps
+    reusable components like gb-picklist/gb-input in a separate libs/
+    folder, imported by the screen rather than defined in it) — up to
+    _MAX_IMPORT_DEPTH hops and _MAX_EXTRA_FILES total. Without this,
+    ProjectAnalysisAgent never sees where a field's real data-cy attribute
+    actually comes from when it's defined inside the LIBRARY component's
+    own template, not the screen's — confirmed to be why locators were
+    coming back empty/invented for library-backed fields.
+
+    IMPORTANT: callers MUST pass the FULL, unfiltered source tree here, not
+    the module-filtered one — library component files (gbcheckbox,
+    gbcombobox, gbinput, etc.) never contain the module or screen name in
+    their own path, so a module-name filter strips every one of them out
+    before this function ever gets a chance to look for them. This check
+    is free (pure Python set membership, no LLM involved), so there's no
+    cost to using the full tree here even though the filtered tree is
+    still correctly used for the separate ArchitectureAgent LLM call."""
     with tempfile.TemporaryDirectory() as temp_dir:
         target_dir = Path(temp_dir) / resolved.dir
         target_dir.mkdir(parents=True, exist_ok=True)
+
+        fetched: dict[str, str] = {}
         for filename in resolved.files:
-            content = src.fetch_file(f"{resolved.dir}/{filename}")
+            path = f"{resolved.dir}/{filename}"
+            content = src.fetch_file(path)
             if content is None:
                 continue
             (target_dir / filename).write_text(content, encoding="utf-8")
+            fetched[path] = content
+
+        if source_tree:
+            tree_set = set(source_tree)
+            extra_fetched = 0
+            frontier = list(fetched.items())
+            seen_paths = set(fetched.keys())
+
+            for _ in range(_MAX_IMPORT_DEPTH):
+                if extra_fetched >= _MAX_EXTRA_FILES or not frontier:
+                    break
+                next_frontier = []
+                for path, content in frontier:
+                    if not path.endswith(".ts"):
+                        continue
+                    current_dir = path.rsplit("/", 1)[0] if "/" in path else ""
+                    for import_path in _IMPORT_RE.findall(content):
+                        if extra_fetched >= _MAX_EXTRA_FILES:
+                            break
+                        resolved_ts = _resolve_import_to_tree_path(import_path, current_dir, tree_set)
+                        if not resolved_ts or resolved_ts in seen_paths:
+                            continue
+                        # Fetch the matched .ts, and its sibling .html template
+                        # if it's a component — that's where a data-cy
+                        # binding actually lives, not the .ts logic file.
+                        html_sibling = resolved_ts[:-3] + ".html" if resolved_ts.endswith(".ts") else None
+                        for candidate_path in (resolved_ts, html_sibling):
+                            if not candidate_path or candidate_path in seen_paths:
+                                continue
+                            candidate_content = src.fetch_file(candidate_path)
+                            if candidate_content is None:
+                                continue
+                            seen_paths.add(candidate_path)
+                            dest = Path(temp_dir) / candidate_path
+                            dest.parent.mkdir(parents=True, exist_ok=True)
+                            dest.write_text(candidate_content, encoding="utf-8")
+                            extra_fetched += 1
+                            if candidate_path.endswith(".ts"):
+                                next_frontier.append((candidate_path, candidate_content))
+                frontier = next_frontier
+
+            if extra_fetched:
+                logger.info(
+                    "pulled in %d additional library file(s) referenced by %s (up to depth %d)",
+                    extra_fetched, resolved.dir, _MAX_IMPORT_DEPTH,
+                )
+
         return reader.read_project(temp_dir)
 
 
@@ -97,29 +193,86 @@ def _extract_source_hints(project_context: dict, limit: int = 30) -> list[str]:
 
 def _build_locator_map(project_analysis: dict) -> dict[str, str]:
     """Distills the full project_analysis JSON (from ProjectAnalysisAgent)
-    down to a small field-name -> real, verified locator lookup — just
+    down to a small name -> real, verified locator lookup — just
     {name: data-cy value}, nothing else from that larger structure. Handed
     to ScriptGenerateAgent so it can use an already-confirmed selector
-    instead of guessing one from the field name that ended up quoted in
-    the Gherkin. Keyed by BOTH label and control_name, pointing at the
-    same locator value, since it is not guaranteed which of the two
-    TestCaseAgent actually quotes in a given step."""
+    instead of guessing one from the name that ended up quoted in the
+    Gherkin.
+
+    Walks FOUR sources within each page, all of which carry real
+    per-element locators in ProjectAnalysisAgent's schema:
+      - forms[].fields[]                          (field-level inputs)
+      - business_actions[]                        (Save/Delete/Print/etc. buttons)
+      - tables[].row_actions[] / toolbar_actions[] (grid row + toolbar buttons)
+      - dialogs[].confirm_button / cancel_button   (dialog action buttons)
+
+    Confirmed necessary for report/view screens (e.g. PaySlip) that have
+    grids and buttons but no input form fields at all — walking only
+    forms[].fields[] silently returns an empty map for those screens even
+    when ProjectAnalysisAgent found real locators for their buttons/grids.
+
+    Fields are keyed by BOTH label and control_name (not guaranteed which
+    one TestCaseAgent quotes in a given step); actions/buttons are keyed
+    by their action_name, since that's the only name Gherkin steps refer
+    to them by (e.g. 'I click the "Get Payslip" button')."""
     locator_map: dict[str, str] = {}
+
+    def _best_locator(obj: dict) -> str | None:
+        locator = (
+            obj.get("preferred_locator")
+            or obj.get("data_cy")
+            or obj.get("id")
+            or obj.get("name")
+        )
+        return locator if locator and locator != "Unknown" else None
+
     for module in project_analysis.get("modules", []) or []:
         for page in module.get("pages", []) or []:
+            # --- form fields ---
             for form in page.get("forms", []) or []:
                 for field in form.get("fields", []) or []:
-                    locator = (
-                        field.get("preferred_locator")
-                        or field.get("data_cy")
-                        or field.get("id")
-                        or field.get("name")
-                    )
-                    if not locator or locator == "Unknown":
+                    locator = _best_locator(field)
+                    if not locator:
                         continue
                     for key in (field.get("label"), field.get("control_name"), field.get("data_cy")):
                         if key and key != "Unknown":
                             locator_map[key] = locator
+
+            # --- page-level business actions (Save, Delete, Print, Get Payslip, ...) ---
+            for action in page.get("business_actions", []) or []:
+                if not isinstance(action, dict):
+                    continue  # tolerate older analyses that still emit bare strings
+                locator = _best_locator(action)
+                name = action.get("action_name")
+                if locator and name and name != "Unknown":
+                    locator_map[name] = locator
+
+            # --- table/grid row + toolbar actions ---
+            for table in page.get("tables", []) or []:
+                if not isinstance(table, dict):
+                    continue
+                for action in (table.get("row_actions") or []) + (table.get("toolbar_actions") or []):
+                    if not isinstance(action, dict):
+                        continue
+                    locator = _best_locator(action)
+                    name = action.get("action_name")
+                    if locator and name and name != "Unknown":
+                        locator_map[name] = locator
+
+            # --- dialog confirm/cancel buttons ---
+            for dialog in page.get("dialogs", []) or []:
+                if not isinstance(dialog, dict):
+                    continue
+                for button_key, fallback_name in (("confirm_button", "Confirm"), ("cancel_button", "Cancel")):
+                    button = dialog.get(button_key)
+                    if not isinstance(button, dict):
+                        continue
+                    locator = _best_locator(button)
+                    if locator:
+                        name = dialog.get("trigger_action") or dialog.get("dialog_type") or fallback_name
+                        locator_map.setdefault(f"{name} {fallback_name}", locator)
+                        locator_map.setdefault(fallback_name, locator)
+
     return locator_map
 
 
@@ -264,7 +417,7 @@ async def handle_fetch(ws: WebSocket, session: dict, msg: dict):
     session["pushed"]   = True
     session.pop("screens", None)
 
-    await send_log(ws, "fetched — review below, then Run (or Interrupt to change first).", "success")
+    await send_log(ws, "fetched — review below, then Run.", "success")
     await send_artifacts(ws, session)
     await send_status(ws, "awaiting_review")
 
@@ -301,14 +454,20 @@ async def _append_one_screen(existing_feature: str, existing_script: str,
 
 async def _generate_one_screen(ws: WebSocket, src: GitLabService, module: str,
                                 screen_name: str, resolved_source: ResolvedSource,
-                                user_request: str, label: str | None = None) -> dict | None:
+                                user_request: str, label: str | None = None,
+                                source_tree: list[str] | None = None) -> dict | None:
     """Runs the analysis -> test-case -> script -> validate pipeline for one
     resolved source screen. Returns {feature, script, validation} or None on
-    failure (caller decides whether that's fatal or skip-and-continue)."""
+    failure (caller decides whether that's fatal or skip-and-continue).
+    source_tree: the FULL, unfiltered source tree (not the module-filtered
+    one — see _fetch_source_project_context's docstring for why), passed
+    through so it can follow local imports into the shared libs/ folder.
+    Callers without a tree handy just omit it; behavior degrades
+    gracefully to screen-only."""
     tag = f"[{label}] " if label else ""
     try:
         await send_log(ws, f"{tag}fetching source files...", "secondary")
-        project_context = _fetch_source_project_context(src, resolved_source)
+        project_context = _fetch_source_project_context(src, resolved_source, source_tree)
 
         await send_log(ws, f"{tag}running project analysis agent...", "secondary")
         project_analysis = await project_analysis_agent.analyze(
@@ -368,15 +527,6 @@ async def handle_generate(ws: WebSocket, session: dict, msg: dict):
 
     await send_status(ws, "resolving")
 
-    # -----------------------------------------------------------------
-    # QC repo checked FIRST for both scopes — one lookup, no source-repo
-    # involvement. Failure here is NON-FATAL (matches the original design):
-    # log a muted warning and continue with out_tree=None, resolving the
-    # real path on approve instead. Source is only ever touched afterward:
-    # for module scope because discovering brand-new screens genuinely
-    # requires it; for single-screen scope only when nothing already
-    # exists in the QC repo, or later if Replace is chosen on a conflict.
-    # -----------------------------------------------------------------
     await send_log(ws, "checking the QC repo for existing tests...", "secondary")
     out_tree = None
     out_gl   = None
@@ -386,9 +536,6 @@ async def handle_generate(ws: WebSocket, session: dict, msg: dict):
     except Exception as e:
         await send_log(ws, f"could not check output repo ({e}) — will resolve path on approve.", "muted")
 
-    # -----------------------------------------------------------------
-    # Whole module
-    # -----------------------------------------------------------------
     if scope == "module":
         await send_log(ws, "reading source repo structure...", "secondary")
         try:
@@ -400,9 +547,6 @@ async def handle_generate(ws: WebSocket, session: dict, msg: dict):
 
         await send_log(ws, f"scanned {len(src_tree)} source files — looking for every screen in {module}...", "secondary")
 
-        # Cheap, no-LLM pre-filter before this ever reaches ArchitectureAgent's
-        # prompt — sending all 7000+ raw paths hit OpenAI's per-minute token
-        # limit outright in testing. See filter_tree_by_module's own docstring.
         filtered_src_tree = filter_tree_by_module(src_tree, module)
         candidates = await resolve_source_module_screens_precise(filtered_src_tree, module)
         if not candidates:
@@ -455,7 +599,7 @@ async def handle_generate(ws: WebSocket, session: dict, msg: dict):
         screens = []
         for screen_name, c in fresh_candidates:
             screen_request = user_request or f"Generate Cypress tests for the {screen_name} screen in the {module} module."
-            outcome = await _generate_one_screen(ws, src, module, screen_name, c, screen_request, label=screen_name)
+            outcome = await _generate_one_screen(ws, src, module, screen_name, c, screen_request, label=screen_name, source_tree=src_tree)
             if outcome is None:
                 continue
             resolved = build_new_path(module, screen_name)
@@ -477,11 +621,6 @@ async def handle_generate(ws: WebSocket, session: dict, msg: dict):
         await send_status(ws, "awaiting_approval")
         return
 
-    # -----------------------------------------------------------------
-    # Single screen — QC repo already checked above. If it's there, show
-    # the conflict now with zero source-repo involvement. Only fetch
-    # source if this is genuinely a new screen.
-    # -----------------------------------------------------------------
     resolved_output = None
     existed = False
     existing_feature = existing_script = None
@@ -504,9 +643,6 @@ async def handle_generate(ws: WebSocket, session: dict, msg: dict):
         await send_status(ws, "awaiting_conflict")
         return
 
-    # Nothing in the QC repo (or the QC-repo check itself failed) —
-    # genuinely new screen, or unresolvable without source either way.
-    # NOW, and only now, we need the source repo.
     await send_log(ws, "reading source repo structure...", "secondary")
     try:
         src      = _source_gitlab_service()
@@ -531,7 +667,7 @@ async def handle_generate(ws: WebSocket, session: dict, msg: dict):
 
     user_request = user_request or f"Generate Cypress tests for the {screen} screen in the {module} module."
 
-    outcome = await _generate_one_screen(ws, src, module, screen, resolved_source, user_request)
+    outcome = await _generate_one_screen(ws, src, module, screen, resolved_source, user_request, source_tree=src_tree)
     if outcome is None:
         await send_error(ws, "generation failed.")
         return
@@ -628,11 +764,6 @@ async def handle_generate_decision(ws: WebSocket, session: dict, msg: dict):
     validation      = None
 
     if decision == "replace":
-        # resolved_source is deliberately NOT pre-fetched at generate time
-        # anymore for single-screen scope — the QC repo is checked first
-        # and we return immediately on a conflict, before source is ever
-        # touched. Replace is the one path that actually needs it, so it's
-        # resolved here, lazily, the moment it's actually chosen.
         try:
             src      = _source_gitlab_service()
             src_tree = src.get_repo_tree()
@@ -654,7 +785,7 @@ async def handle_generate_decision(ws: WebSocket, session: dict, msg: dict):
             await send_log(ws, f"matched source {resolved_source.dir} via {resolved_source.resolved_by} (confidence {resolved_source.confidence})", "success")
 
         request = user_request or f"Generate Cypress tests for the {screen} screen in the {module} module."
-        outcome = await _generate_one_screen(ws, src, module, screen, resolved_source, request)
+        outcome = await _generate_one_screen(ws, src, module, screen, resolved_source, request, source_tree=src_tree)
         if outcome is None:
             await send_error(ws, "generation failed.")
             session.pop("pending_generate", None)
@@ -886,102 +1017,6 @@ async def handle_run(ws: WebSocket, session: dict):
         raise
 
 
-async def handle_interrupt(ws: WebSocket, session: dict, msg: dict):
-    """Applies a plain-language change. Both single-screen and module
-    scope are supported (Task D — must work identically for both). For a
-    module-scope session the UI passes msg["screen_index"] to say which
-    of session['screens'] the change targets; without it we can't know
-    which screen the user meant."""
-    note = (msg.get("note") or "").strip()
-    if not note:
-        return
-
-    if session.get("scope") == "module" and session.get("screens"):
-        idx = msg.get("screen_index")
-        if not isinstance(idx, int) or idx < 0 or idx >= len(session["screens"]):
-            await send_error(ws, "select a screen to interrupt first.")
-            return
-
-        target = session["screens"][idx]
-        resolved = target["resolved"]
-        label = resolved.slug
-        await send_log(ws, f'[interrupt · {label}] applying: "{note}"', "accent")
-
-        try:
-            result = await interrupt_agent.apply_change(target["feature"], target["script"], note)
-        except Exception as e:
-            await send_error(ws, f"could not apply change: {e}")
-            return
-
-        if "error" in result:
-            await send_error(ws, f"could not apply that change — {result['error']}")
-            return
-
-        target["feature"] = result["feature_file"]
-        target["script"]  = result["script"]
-        await send_log(ws, f"[{label}] {result.get('summary', 'change applied')}", "secondary")
-
-        if session.get("pushed"):
-            try:
-                gl = _gitlab_service()
-                gl.create_or_update_file(
-                    resolved.feature_path, target["feature"],
-                    commit_message=f"QC: interrupt change — {session.get('module')}/{resolved.slug}",
-                )
-                gl.create_or_update_file(
-                    resolved.script_path, target["script"],
-                    commit_message=f"QC: interrupt change — {session.get('module')}/{resolved.slug}",
-                )
-                await send_log(ws, f"[{label}] change replaced in gitlab.", "success")
-            except Exception as e:
-                await send_error(ws, f"change applied locally, gitlab push failed: {e}")
-
-        await send_artifacts(ws, session)
-        next_phase = "awaiting_approval" if session.get("origin") == "generate" and not session.get("pushed") else "awaiting_review"
-        await send_status(ws, next_phase)
-        return
-
-    if not session.get("feature") or not session.get("script"):
-        await send_error(ws, "nothing to change yet — fetch or generate first.")
-        return
-
-    await send_log(ws, f'[interrupt] applying: "{note}"', "accent")
-
-    try:
-        result = await interrupt_agent.apply_change(session["feature"], session["script"], note)
-    except Exception as e:
-        await send_error(ws, f"could not apply change: {e}")
-        return
-
-    if "error" in result:
-        await send_error(ws, f"could not apply that change — {result['error']}")
-        return
-
-    session["feature"] = result["feature_file"]
-    session["script"]  = result["script"]
-    await send_log(ws, result.get("summary", "change applied"), "secondary")
-
-    resolved = session.get("resolved")
-    if resolved and session.get("pushed"):
-        try:
-            gl = _gitlab_service()
-            gl.create_or_update_file(
-                resolved.feature_path, session["feature"],
-                commit_message=f"QC: interrupt change — {session.get('module')}/{session.get('screen')}",
-            )
-            gl.create_or_update_file(
-                resolved.script_path, session["script"],
-                commit_message=f"QC: interrupt change — {session.get('module')}/{session.get('screen')}",
-            )
-            await send_log(ws, "change replaced in gitlab.", "success")
-        except Exception as e:
-            await send_error(ws, f"change applied locally, gitlab push failed: {e}")
-
-    await send_artifacts(ws, session)
-    next_phase = "awaiting_approval" if session.get("origin") == "generate" and not session.get("pushed") else "awaiting_review"
-    await send_status(ws, next_phase)
-
-
 async def handle_report(ws: WebSocket, session: dict):
     """Task A — Excel report. Deterministic: every number comes straight
     from mochawesome via cypress_runner's stashed run_results, no LLM
@@ -1036,17 +1071,7 @@ async def qc_session(websocket: WebSocket):
             msg    = await websocket.receive_json()
             action = msg.get("action")
 
-            if action == "interrupt" and session.get("process") is not None:
-                try:
-                    session["process"].kill()
-                except ProcessLookupError:
-                    pass
-                session["current_task"] = asyncio.create_task(handle_interrupt(websocket, session, msg))
-
-            elif action == "interrupt":
-                session["current_task"] = asyncio.create_task(handle_interrupt(websocket, session, msg))
-
-            elif action == "fetch":
+            if action == "fetch":
                 session["current_task"] = asyncio.create_task(handle_fetch(websocket, session, msg))
 
             elif action == "generate":
