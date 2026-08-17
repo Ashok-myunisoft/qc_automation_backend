@@ -1,4 +1,4 @@
-import os
+﻿import os
 import logging
 from contextlib import contextmanager
 
@@ -18,7 +18,6 @@ class DbServiceError(Exception):
 
 def _config() -> dict:
     host     = os.getenv("TESTDB_HOST")
-    port     = os.getenv("TESTDB_PORT", "1433")
     database = os.getenv("TESTDB_NAME")
     user     = os.getenv("TESTDB_USER")
     password = os.getenv("TESTDB_PASSWORD")
@@ -30,14 +29,14 @@ def _config() -> dict:
     if missing:
         raise DbServiceError(f"missing env var(s): {', '.join(missing)} — set these in .env")
 
-    return {"host": host, "port": int(port), "database": database, "user": user, "password": password}
+    return {"host": host, "database": database, "user": user, "password": password}
 
 
 @contextmanager
 def _connection():
     cfg = _config()
     conn = pymssql.connect(
-        server=cfg["host"], port=cfg["port"], database=cfg["database"],
+        server=cfg["host"], database=cfg["database"],
         user=cfg["user"], password=cfg["password"],
         as_dict=True, login_timeout=10, timeout=30,
     )
@@ -52,7 +51,7 @@ def _query(sql: str, params: tuple = ()) -> list[dict]:
         cur = conn.cursor()
         cur.execute(sql, params)
         rows = list(cur.fetchall())
-        logger.info("db_service query executed: %s | params=%r | rows_returned=%d", sql, params, len(rows))
+        logger.info("db_service query executed: %s | rows_returned=%d", sql, len(rows))
         return rows
 
 
@@ -201,8 +200,8 @@ def get_sample_values(table_name: str, column_name: str, limit: int = 10) -> lis
     # arbitrary text can reach this point) — safe to reference directly in
     # the identifier position, which SQL doesn't allow parameterizing anyway.
     sql = (
-        f"SELECT DISTINCT TOP ({limit}) [{column_name}] AS value "
-        f"FROM [{table_name}] WHERE [{column_name}] IS NOT NULL"
+        f"SELECT DISTINCT TOP ({limit}) [{column_name}] AS value"
+        f" FROM [{table_name}] WHERE [{column_name}] IS NOT NULL"
     )
     rows = _query(sql)
     return [r["value"] for r in rows]

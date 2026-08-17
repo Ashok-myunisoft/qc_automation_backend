@@ -88,6 +88,27 @@ Use User Request only to prioritize scenarios.
 Generate only scenarios supported by the supplied project.
 Return ONLY valid Gherkin — no markdown, no explanations.
 
+
+#OUTPUT PURITY (CRITICAL — confirmed real failure, do not repeat)
+
+Your output must contain NOTHING but Feature/Background/Scenario/Examples
+text — nothing before the "Feature:" line, and nothing after the very
+last Examples table or scenario step.
+
+The Project Analysis JSON you receive contains data_cy, preferred_locator,
+and id values on fields and business actions. Those exist so YOU can use
+the correct field/action NAMES in your Gherkin steps — they are NOT
+something to expose in your output. Do not append a "Locators:" section,
+a summary, a note, or any reference list of data-cy/selector values after
+your scenarios, even though that data is sitting right there in your
+input and may seem helpful to include. Resolving a step's name to its
+real selector is a LATER agent's job (ScriptGenerateAgent), done from a
+separate locator map — it is not part of what you return here, ever, in
+any form. If you find yourself about to write anything that looks like a
+label followed by a backtick-quoted data-cy value, stop — that content
+does not belong in your output at all.
+
+
 #OUTPUT FORMAT
 
 Feature:

@@ -39,6 +39,46 @@ The project may contain:
 - Configuration files
 - Custom UI components (for example Gb components)
 
+The Project Source Code includes a "primary_dir" field naming the ONE
+folder that is the actual screen being tested. Everything else supplied
+alongside it is reference material ONLY — see the new PRIMARY SCREEN
+section below before doing anything else.
+
+--------------------------------------------------
+PRIMARY SCREEN vs. REFERENCE MATERIAL (CRITICAL)
+--------------------------------------------------
+
+The supplied source is NOT all one page. It contains two different kinds
+of content, and confusing them produces a wrong analysis:
+
+1. The files under "primary_dir" — this, and ONLY this, is the actual
+   screen/page you are analyzing. Every field, page_name, navigation_path,
+   business_action, table, and dialog you report must come from what this
+   screen ACTUALLY does.
+
+2. Every other file supplied (shared library components such as
+   gb-picklist, gb-checkbox, gb-dialog, or any other file outside
+   primary_dir) exists SOLELY so you can find the real data-cy/id/name
+   attribute a field or button actually uses when the primary screen's own
+   file only references the component (e.g. `<gb-picklist
+   controlName="DomainCode">`) without showing the rendered attribute
+   itself. Use these files ONLY to fill in accurate locator values for
+   fields/actions that genuinely belong to the primary screen.
+
+Do NOT do any of the following, even though the reference files' content
+may be substantial or look like a complete page of its own:
+- Do NOT treat a reference file's own page/component (e.g. a shared
+  dialog box's "Close" button) as if it were a page or field of the
+  screen you are analyzing, unless the primary screen's own file
+  genuinely uses that exact component for that exact purpose.
+- Do NOT let a reference file's content override, replace, or merge with
+  the primary screen's own page_name, navigation_path, or business logic.
+- Do NOT produce an analysis that is actually about a reference component
+  instead of the primary screen — if primary_dir's own files reveal very
+  little (a thin routing/report file, for instance), report what little
+  is genuinely there rather than substituting a more detailed reference
+  file's content as if it were the primary screen.
+
 --------------------------------------------------
 PROJECT ANALYSIS
 --------------------------------------------------

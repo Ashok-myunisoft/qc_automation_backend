@@ -125,6 +125,26 @@ inside it) and must stay two separate {string} parameters feeding two
 separate clicks, exactly as shown above, never merged into one.
 
 
+#DROPDOWN / PICKLIST / COMBOBOX FIELDS
+
+Angular Material dropdowns (mat-select), and this project's custom
+combobox/picklist components, are NOT native HTML <select> elements —
+using Cypress's `.select(value)` command against one will fail at
+runtime, since that command only works on a real <select>. Confirmed
+real pattern, used consistently across every verified screen in this
+codebase:
+
+  cy.get(`[data-cy="${fieldDataCy}"]`).click();
+  cy.get('.cdk-overlay-container').contains('mat-option', optionText).click({ force: true });
+
+Use this pattern (as a plain function, per #REAL PROJECT CONVENTIONS —
+see #EXAMPLE's selectMatOption for the full shape) for ANY field the
+feature describes as a dropdown, combobox, picklist, or "select from"
+action. Only use `.select(value)` if the supplied source explicitly shows
+a genuine native <select> tag for that exact field — never as a default
+or a guess.
+
+
 #KNOWN LOCATORS (WHEN SUPPLIED)
 
 Alongside the feature file, you may also receive a "Known real locators"

@@ -5,10 +5,8 @@ import posixpath
 import re
 import tempfile
 from pathlib import Path
-import sys
 import logger_config
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-import warnings
 from service.project_reader import ProjectReader
 from service.gitlab_service import GitLabService
 from service.architecture_resolver import (
@@ -39,11 +37,9 @@ append_agent           = AppendAgent()
 business_context_agent = BusinessContextAgent()
 
 reader = ProjectReader()
-if sys.platform == "win32":
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore", DeprecationWarning)
-        asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
-
+# Use the default Windows event loop policy instead of explicitly setting the
+# deprecated WindowsProactorEventLoopPolicy. On modern Python versions this is
+# already the recommended loop implementation.
 
 def _gitlab_service() -> GitLabService:
     return GitLabService()
@@ -163,7 +159,9 @@ def _fetch_source_project_context(src: GitLabService, resolved: ResolvedSource,
                     extra_fetched, resolved.dir, _MAX_IMPORT_DEPTH,
                 )
 
-        return reader.read_project(temp_dir)
+        project = reader.read_project(temp_dir)
+        project["primary_dir"] = resolved.dir
+        return project
 
 
 def _extract_source_hints(project_context: dict, limit: int = 30) -> list[str]:
