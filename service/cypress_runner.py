@@ -116,7 +116,42 @@ def clear_stash(slugs: list[str] | None=None) -> None:
 def screenshot_absolute_path(rel_path: str) -> Path:
     return _WORKSPACE / rel_path
 
-async def run_cypress(session: dict, feature_content: str, script_content: str, slug: str, fixtures: dict | None=None):
+def _build_env_overrides(test_env: dict | None) -> list[str]:
+    """Turns the frontend-supplied {baseUrl, dbName, userName, password}
+    into Cypress CLI flags that override cypress.config.js's baseUrl and
+    cypress.env.json's TestConnections.UILogin for this run only — nothing
+    is written back to either file. Cypress.env('TestConnections').UILogin
+    and Cypress.config('baseUrl') inside the generated script resolve
+    identically whether the value came from a file or a CLI flag, so no
+    generated script or prompt needs to change for this to work.
+
+    --config takes plain comma-separated key=value pairs (baseUrl has no
+    commas, so a single pair is safe as-is). --env accepts a single JSON
+    object as its whole argument and merges it into Cypress.env() at the
+    top level — passing {"TestConnections": {...}} here fully replaces
+    just that one top-level key, which is all UILogin-reading scripts
+    ever look at.
+
+    Returns [] if test_env is falsy — callers in app.py are expected to
+    have already refused to run without one (full-replace, no fallback),
+    but this stays defensive rather than crashing the run."""
+    if not test_env:
+        return []
+    base_url = test_env.get("baseUrl", "")
+    env_payload = json.dumps({
+        "TestConnections": {
+            "UILogin": {
+                "dbName":   test_env.get("dbName", ""),
+                "userName": test_env.get("userName", ""),
+                "password": test_env.get("password", ""),
+            }
+        }
+    })
+    return ["--config", f"baseUrl={base_url}", "--env", env_payload]
+
+
+async def run_cypress(session: dict, feature_content: str, script_content: str, slug: str,
+                       fixtures: dict | None=None, test_env: dict | None=None):
     _ensure_workspace()
     _ensure_npm_installed()
     if fixtures:
@@ -135,8 +170,9 @@ async def run_cypress(session: dict, feature_content: str, script_content: str, 
     spec_path = str(feature_file.relative_to(_WORKSPACE)).replace('\\', '/')
     out_queue: 'queue.Queue' = queue.Queue()
     started_at = datetime.utcnow().isoformat() + 'Z'
+    cmd = [_NPX, 'cypress', 'run', '--spec', spec_path] + _build_env_overrides(test_env)
     try:
-        proc = subprocess.Popen([_NPX, 'cypress', 'run', '--spec', spec_path], cwd=str(_WORKSPACE), stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding='utf-8', errors='replace', bufsize=1)
+        proc = subprocess.Popen(cmd, cwd=str(_WORKSPACE), stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding='utf-8', errors='replace', bufsize=1)
     except FileNotFoundError as e:
         shutil.rmtree(run_dir, ignore_errors=True)
         raise CypressRunError(f"couldn't launch npx ({e}) — is Node.js/npm installed and on PATH for the account running this backend?")

@@ -912,7 +912,48 @@ async def _fetch_shared_fixtures(ws: WebSocket) -> dict:
     return fixtures
 
 
+async def handle_set_env(ws: WebSocket, session: dict, msg: dict):
+    """Sets (or replaces) the test-target config used by Cypress runs —
+    baseUrl + DB name/username/password, sent from the frontend's env
+    popup. Can be called at any point in the session (before or after any
+    number of runs) — always a full replace of whatever was set before,
+    never merged with cypress.env.json's static TestConnections.UILogin.
+    All four fields are required; there is no partial/fallback state."""
+    base_url  = (msg.get("baseUrl")  or "").strip()
+    db_name   = (msg.get("dbName")   or "").strip()
+    user_name = (msg.get("userName") or "").strip()
+    password  = msg.get("password") or ""
+
+    missing = [name for name, val in (
+        ("baseUrl", base_url), ("dbName", db_name),
+        ("userName", user_name), ("password", password),
+    ) if not val]
+    if missing:
+        await send_error(ws, f"test environment config incomplete — missing: {', '.join(missing)}.")
+        return
+
+    session["test_env"] = {
+        "baseUrl": base_url, "dbName": db_name,
+        "userName": user_name, "password": password,
+    }
+    await send_log(ws, f"test environment set — {base_url} (db={db_name}, user={user_name}).", "success")
+    await ws.send_json({
+        "type":     "env_set",
+        "baseUrl":  base_url,
+        "dbName":   db_name,
+        "userName": user_name,
+        # password intentionally never echoed back
+    })
+
+
 async def handle_run(ws: WebSocket, session: dict):
+    if not session.get("test_env"):
+        await send_error(
+            ws,
+            "no test environment set — set baseUrl / db / username / password before running.",
+        )
+        return
+
     if session.get("scope") == "module" and session.get("screens"):
         screens = session["screens"]
 
@@ -944,6 +985,7 @@ async def handle_run(ws: WebSocket, session: dict):
                     s["script"],
                     slug,
                     fixtures=fixtures,
+                    test_env=session["test_env"],
                 ):
                     if kind == "log":
                         await send_log(ws, f"[{label}] {payload}", tone or "secondary")
@@ -999,6 +1041,7 @@ async def handle_run(ws: WebSocket, session: dict):
             session["script"],
             slug,
             fixtures=fixtures,
+            test_env=session["test_env"],
         ):
             if kind == "log":
                 await send_log(ws, payload, tone or "secondary")
@@ -1062,6 +1105,12 @@ async def qc_session(websocket: WebSocket):
         "feature": None, "script": None, "resolved": None,
         "pushed": False, "process": None, "pending_generate": None,
         "current_task": None,
+        # Test-target config (baseUrl / dbName / userName / password), set
+        # from the frontend's env popup via the "set_env" action. Session
+        # scoped — persists until changed, survives reject/terminate/reset,
+        # NOT tied to any single run. No fallback to cypress.env.json:
+        # run is refused until this is set (see handle_run's guard).
+        "test_env": None,
     }
 
     try:
@@ -1069,7 +1118,10 @@ async def qc_session(websocket: WebSocket):
             msg    = await websocket.receive_json()
             action = msg.get("action")
 
-            if action == "fetch":
+            if action == "set_env":
+                session["current_task"] = asyncio.create_task(handle_set_env(websocket, session, msg))
+
+            elif action == "fetch":
                 session["current_task"] = asyncio.create_task(handle_fetch(websocket, session, msg))
 
             elif action == "generate":
