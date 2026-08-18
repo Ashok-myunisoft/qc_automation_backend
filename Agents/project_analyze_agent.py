@@ -24,7 +24,7 @@ class ProjectAnalysisAgent:
 
     async def analyze(self, project_context: dict, user_request: str):
         user_message = f"""
-        project_context: {json.dumps(project_context, indent=2) }
+        project_context: {json.dumps(project_context)}
         user_request: {user_request}
         """
 
@@ -33,8 +33,4 @@ class ProjectAnalysisAgent:
         try:
             return json.loads(response.text)
         except json.JSONDecodeError:
-            return {"error": "Failed to parse response as JSON", "response": response.text}          
-        
-       
-       
-   
+            return {"error": "Failed to parse response as JSON", "response": response.text}

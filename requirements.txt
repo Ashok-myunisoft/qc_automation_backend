@@ -2,7 +2,7 @@ python-dotenv
 agent-framework==1.12.1
 fastapi
 uvicorn[standard]
-python-multipart==8.5.0     #0.0.20
+python-multipart==0.0.20
 websockets==16.1.1
 python-gitlab
 pymssql==2.3.13

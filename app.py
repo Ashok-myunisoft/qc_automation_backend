@@ -51,8 +51,17 @@ def _source_gitlab_service() -> GitLabService:
 
 _IMPORT_RE = re.compile(r"""from\s+['"]([^'"]+)['"]""")
 
-_MAX_IMPORT_DEPTH = 2
-_MAX_EXTRA_FILES = 40
+_MAX_IMPORT_DEPTH = 1
+_MAX_EXTRA_FILES = 15
+
+# Hard ceiling on total source_files content sent to ProjectAnalysisAgent,
+# in characters. This is the safety net for the case items 1-3 can't fully
+# prevent on their own (an unusually large screen folder or import graph) —
+# same "generous filter, but bail out before the LLM call blows up" pattern
+# already used by architecture_resolver.filter_tree_by_module for the path
+# list sent to ArchitectureAgent. Tune against the model's real context
+# window; this is deliberately conservative.
+_MAX_SOURCE_CHARS = 150_000
 
 
 def _resolve_import_to_tree_path(import_path: str, current_dir: str, tree_set: set) -> str | None:
@@ -101,12 +110,20 @@ def _fetch_source_project_context(src: GitLabService, resolved: ResolvedSource,
     is free (pure Python set membership, no LLM involved), so there's no
     cost to using the full tree here even though the filtered tree is
     still correctly used for the separate ArchitectureAgent LLM call."""
+    # Skip file types that never carry locator/business-logic signal and
+    # only add noise (and tokens) to project_context: unit test specs,
+    # stylesheets, and raw JSON config. Angular repos routinely keep these
+    # alongside .ts/.html in the same screen folder.
+    _SKIP_SUFFIXES = (".spec.ts", ".scss", ".css", ".json")
+
     with tempfile.TemporaryDirectory() as temp_dir:
         target_dir = Path(temp_dir) / resolved.dir
         target_dir.mkdir(parents=True, exist_ok=True)
 
         fetched: dict[str, str] = {}
         for filename in resolved.files:
+            if filename.endswith(_SKIP_SUFFIXES):
+                continue
             path = f"{resolved.dir}/{filename}"
             content = src.fetch_file(path)
             if content is None:
@@ -134,23 +151,42 @@ def _fetch_source_project_context(src: GitLabService, resolved: ResolvedSource,
                         resolved_ts = _resolve_import_to_tree_path(import_path, current_dir, tree_set)
                         if not resolved_ts or resolved_ts in seen_paths:
                             continue
-                        # Fetch the matched .ts, and its sibling .html template
-                        # if it's a component — that's where a data-cy
-                        # binding actually lives, not the .ts logic file.
+                        # Prefer ONLY the .html sibling for a component import
+                        # — that's where a data-cy binding actually lives,
+                        # not the .ts logic file. Fetching the .ts too (and
+                        # then following ITS imports) is what caused the
+                        # depth-2 cascade blowing past the model's context
+                        # window on screens with a large shared-lib surface.
+                        # Only fall back to the .ts itself if there's no
+                        # .html sibling (e.g. a service/module file, not a
+                        # component) — and even then we don't recurse into
+                        # it (see next_frontier below).
                         html_sibling = resolved_ts[:-3] + ".html" if resolved_ts.endswith(".ts") else None
-                        for candidate_path in (resolved_ts, html_sibling):
-                            if not candidate_path or candidate_path in seen_paths:
-                                continue
-                            candidate_content = src.fetch_file(candidate_path)
-                            if candidate_content is None:
-                                continue
-                            seen_paths.add(candidate_path)
-                            dest = Path(temp_dir) / candidate_path
-                            dest.parent.mkdir(parents=True, exist_ok=True)
-                            dest.write_text(candidate_content, encoding="utf-8")
-                            extra_fetched += 1
-                            if candidate_path.endswith(".ts"):
-                                next_frontier.append((candidate_path, candidate_content))
+
+                        fetched_html = False
+                        if html_sibling and html_sibling not in seen_paths:
+                            html_content = src.fetch_file(html_sibling)
+                            if html_content is not None:
+                                seen_paths.add(html_sibling)
+                                dest = Path(temp_dir) / html_sibling
+                                dest.parent.mkdir(parents=True, exist_ok=True)
+                                dest.write_text(html_content, encoding="utf-8")
+                                extra_fetched += 1
+                                fetched_html = True
+
+                        if not fetched_html and resolved_ts not in seen_paths:
+                            ts_content = src.fetch_file(resolved_ts)
+                            if ts_content is not None:
+                                seen_paths.add(resolved_ts)
+                                dest = Path(temp_dir) / resolved_ts
+                                dest.parent.mkdir(parents=True, exist_ok=True)
+                                dest.write_text(ts_content, encoding="utf-8")
+                                extra_fetched += 1
+                                # Only recurse into .ts files that had no
+                                # .html sibling (services/modules) — a
+                                # component's .ts logic isn't needed once
+                                # we already have its template.
+                                next_frontier.append((resolved_ts, ts_content))
                 frontier = next_frontier
 
             if extra_fetched:
@@ -162,6 +198,38 @@ def _fetch_source_project_context(src: GitLabService, resolved: ResolvedSource,
         project = reader.read_project(temp_dir)
         project["primary_dir"] = resolved.dir
         return project
+
+
+def _enforce_source_char_budget(project_context: dict, limit: int = _MAX_SOURCE_CHARS) -> dict:
+    """Hard safety net, run right before project_context is handed to
+    ProjectAnalysisAgent. Keeps files (in their existing order — screen's
+    own files first, then import-followed extras) until the running total
+    would exceed `limit`, then drops the rest and logs it. This is what
+    actually prevents a context_length_exceeded 400 from OpenAI on an
+    outlier screen (unusually large folder or import graph) — the fetch-time
+    filtering in _fetch_source_project_context reduces the average case but
+    can't bound the worst case on its own."""
+    files = project_context.get("source_files", []) or []
+    total = 0
+    kept = []
+    dropped = []
+    for f in files:
+        size = len(f.get("content", "") or "")
+        if kept and total + size > limit:
+            dropped.append(f.get("path", "?"))
+            continue
+        kept.append(f)
+        total += size
+
+    if dropped:
+        logger.warning(
+            "project_context source_files trimmed to stay under %d char budget "
+            "(%d file(s) dropped, %d kept, ~%d chars used): %s",
+            limit, len(dropped), len(kept), total, dropped,
+        )
+
+    project_context["source_files"] = kept
+    return project_context
 
 
 def _extract_source_hints(project_context: dict, limit: int = 30) -> list[str]:
@@ -466,6 +534,12 @@ async def _generate_one_screen(ws: WebSocket, src: GitLabService, module: str,
     try:
         await send_log(ws, f"{tag}fetching source files...", "secondary")
         project_context = _fetch_source_project_context(src, resolved_source, source_tree)
+        project_context = _enforce_source_char_budget(project_context)
+        await send_log(
+            ws,
+            f"{tag}using {len(project_context.get('source_files', []))} source file(s) for analysis...",
+            "secondary",
+        )
 
         await send_log(ws, f"{tag}running project analysis agent...", "secondary")
         project_analysis = await project_analysis_agent.analyze(
