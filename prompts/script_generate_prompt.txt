@@ -283,7 +283,7 @@ function clickCheckBox(value) {
 function loginSession() {
     cy.session('qc-login-session', () => {
         cy.visit(Cypress.config('baseUrl'), {
-            timeout: 10000,
+            timeout: 60000,
             failOnStatusCode: false,
         });
 
