@@ -87,7 +87,7 @@ scenarios in the feature for no benefit.
 
           cy.get('body').then($body => {
               if ($body.find('[data-cy="Database-Input"]').length === 0) {
-                  cy.get('.login-btn', { timeout: 5000 }).click();
+                  cy.get('.login-btn', { timeout: 20000 }).click();
               }
           });
 
@@ -289,7 +289,7 @@ function loginSession() {
 
         cy.get('body').then($body => {
             if ($body.find('[data-cy="Database-Input"]').length === 0) {
-                cy.get('.login-btn', { timeout: 5000 }).click();
+                cy.get('.login-btn', { timeout: 20000 }).click();
             }
         });
 
