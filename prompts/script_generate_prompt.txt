@@ -38,6 +38,18 @@ Do NOT explain the code. Do NOT use markdown fences. Return ONLY the raw
   except superficial styling (a nicer name in the Command Log), and this
   project's convention is plain functions throughout, with no exceptions —
   not for login, not for navigation, not for any other helper.
+- NEVER use a hardcoded `cy.wait(<ms>)` as a substitute for waiting on real
+  UI readiness. A fixed sleep is either too short (flaky) or wastefully
+  too long (every extra second is paid on every single scenario in the
+  file, since login/navigation runs per-test). Always wait on a concrete
+  signal instead — `.should('be.visible')`, `.should('not.be.disabled')`,
+  `.should('exist')`, or a network wait via `cy.intercept()`/`cy.wait('@alias')`
+  — targeting the actual element or request that indicates the UI is
+  ready for the next action. The only acceptable use of a numeric
+  `cy.wait()` is as a LAST-resort, short buffer (a few hundred ms) after
+  an already-asserted state, for a UI animation/transition with no
+  observable completion signal — never as the primary wait strategy for
+  page loads, navigation, or async data fetches.
 
 
 #LOGIN (MANDATORY, DEFAULT)
@@ -47,7 +59,18 @@ feature's Background will almost never mention it, by design, and that is
 never a signal to omit it. Every generated script must handle login itself,
 via an unconditional `beforeEach`, using this exact default flow (as a
 plain function, per #REAL PROJECT CONVENTIONS above) unless the EXCEPTION
-below applies:
+below applies.
+
+Login MUST be wrapped in `cy.session()` so the real login UI flow only
+executes ONCE per spec run, not once per scenario. `cy.session()` caches
+the resulting cookies/localStorage/sessionStorage under the given id and
+restores them instantly on every subsequent call in the same spec —
+skipping the entire multi-step UI login (database input, username,
+password, submit, wait-for-welcome-title) for every scenario after the
+first. This is REQUIRED, not optional — a script that repeats the full UI
+login flow in every `beforeEach` without `cy.session()` is considered
+incorrect output, since it multiplies total suite runtime by the number of
+scenarios in the feature for no benefit.
 
   const creds = Cypress.env('TestConnections').UILogin;
 
@@ -56,48 +79,68 @@ below applies:
   })
 
   function loginSession() {
+      cy.session('qc-login-session', () => {
+          cy.visit(Cypress.config('baseUrl'), {
+              timeout: 10000,
+              failOnStatusCode: false,
+          });
+
+          cy.get('body').then($body => {
+              if ($body.find('[data-cy="Database-Input"]').length === 0) {
+                  cy.get('.login-btn', { timeout: 5000 }).click();
+              }
+          });
+
+          cy.get('[data-cy="Database-Input"]', { timeout: 5000 })
+              .should('be.visible')
+              .type(creds.dbName);
+
+          cy.get('.btn-submit').click();
+
+          cy.get('[data-cy="Username-Input"]', { timeout: 5000 })
+              .should('be.visible')
+              .type(creds.userName);
+
+          cy.get('[data-cy="Password-Input"]', { timeout: 5000 })
+              .type(creds.password, { log: false });
+
+          cy.get('.signin-button').click();
+
+          cy.get('.welcome-title', { timeout: 5000 })
+              .should('be.visible');
+      }, {
+          validate() {
+              cy.visit(Cypress.config('baseUrl'), { failOnStatusCode: false });
+              cy.get('.welcome-title', { timeout: 5000 }).should('be.visible');
+          },
+          cacheAcrossSpecs: false,
+      });
+
       cy.visit(Cypress.config('baseUrl'), {
-          timeout: 120000,
+          timeout: 10000,
           failOnStatusCode: false,
       });
-
-      cy.get('body').then($body => {
-          if ($body.find('[data-cy="Database-Input"]').length === 0) {
-              cy.get('.login-btn', { timeout: 60000 }).click();
-          }
-      });
-
-      cy.get('[data-cy="Database-Input"]', { timeout: 30000 })
-          .should('be.visible')
-          .type(creds.dbName);
-
-      cy.get('.btn-submit').click();
-
-      cy.get('[data-cy="Username-Input"]', { timeout: 30000 })
-          .should('be.visible')
-          .type(creds.userName);
-
-      cy.get('[data-cy="Password-Input"]')
-          .type(creds.password, { log: false });
-
-      cy.get('.signin-button').click();
-
-      cy.get('.welcome-title', { timeout: 60000 })
-          .should('be.visible');
+      cy.get('.welcome-title', { timeout: 5000 }).should('be.visible');
   }
 
 This is REQUIRED in every script, no exceptions, unless the EXCEPTION
 below applies. Do not skip it just because the feature never asks for it
 in words — it never will, and that is expected, not a gap for you to leave.
+Do not drop the `cy.session()` wrapper, the `validate()` re-check, or the
+final `cy.visit()` + `.welcome-title` assertion after the session call —
+the visit-and-assert after `cy.session()` is what actually lands the test
+on the app screen with the restored session applied; `cy.session()` alone
+only restores browser storage, it does not navigate.
 
 EXCEPTION — explicit alternate login: if the feature's Background contains
 its own distinct login step (something like "Given I am logged in as
 <someone>", separate from the navigation step), implement THAT step
 instead, following the same real shape (visit, database/username/password,
-submit, wait for a real post-login element) as its own plain function with
-a clearly distinct name (e.g. `loginSessionE479()`), called from that step's
-handler. In this case do NOT also add the generic default `beforeEach`
-above — a script has exactly one login path, never both.
+submit, wait for a real post-login element), wrapped in `cy.session()` the
+same way as above, as its own plain function with a clearly distinct name
+(e.g. `loginSessionE479()`), called from that step's handler. In this case
+do NOT also add the generic default `beforeEach` above — a script has
+exactly one login path, never both.
 
 
 #NAVIGATION STEP
@@ -109,11 +152,16 @@ The feature's Background will always contain a step shaped like:
 (sometimes with an extra intermediate menu level: "<Module>" -> "<Menu>" ->
 "<Screen>"). Implement whichever arity actually appears in the feature you
 were given — write ONE Given/Then handler matching that exact number of
-{string} parameters, using the app's real module/menu-tile UI:
+{string} parameters, using the app's real module/menu-tile UI. Wait on the
+actual readiness of each element via `.should('be.visible')` /
+`.should('not.be.disabled')` before interacting with it — do NOT insert a
+fixed `cy.wait(<ms>)` before or between these steps; the `.should(...)`
+assertions already retry until the element is ready, which is both faster
+and more reliable than a flat sleep:
 
-  cy.get('[data-cy="ModuleList"] > .mat-icon').should('be.visible').dblclick()
-  cy.get(`[data-cy="${module}-Module"] > .card-image`).scrollIntoView().click()
-  cy.get(`[data-cy="${screen}-MenuData0"] > .menu-item`).scrollIntoView().click()
+  cy.get('[data-cy="ModuleList"] > .mat-icon').should('be.visible').and('not.be.disabled').dblclick()
+  cy.get(`[data-cy="${module}-Module"] > .card-image`).scrollIntoView().should('be.visible').click()
+  cy.get(`[data-cy="${screen}-MenuData0"] > .menu-item`).scrollIntoView().should('be.visible').click()
 
 (insert an intermediate menu-expand step between module and screen clicks
 if the feature's navigation step has 3 parameters instead of 2.)
@@ -193,6 +241,13 @@ takes priority over deriving a selector yourself:
 - Do NOT use `Cypress.Commands.add(...)` anywhere in the output — every
   helper (login, field entry, selection logic, anything else) must be a
   plain JavaScript function instead. See #REAL PROJECT CONVENTIONS above.
+- Do NOT use a hardcoded `cy.wait(<ms>)` as a page-load, navigation, or
+  async-data wait. See #REAL PROJECT CONVENTIONS above for the one narrow
+  exception (a short buffer after an already-asserted state, for a
+  transition with no observable completion signal).
+- Do NOT repeat the full UI login flow per scenario without `cy.session()`
+  — see #LOGIN above. This is treated the same as any other STRICT RULES
+  violation.
 - Do NOT leave any step from the input feature unimplemented.
 - Do NOT invent selectors for fields/buttons that aren't named in the
   feature. Check the Known Locators list FIRST — if the field/button is
@@ -226,34 +281,48 @@ function clickCheckBox(value) {
 }
 
 function loginSession() {
+    cy.session('qc-login-session', () => {
+        cy.visit(Cypress.config('baseUrl'), {
+            timeout: 10000,
+            failOnStatusCode: false,
+        });
+
+        cy.get('body').then($body => {
+            if ($body.find('[data-cy="Database-Input"]').length === 0) {
+                cy.get('.login-btn', { timeout: 5000 }).click();
+            }
+        });
+
+        cy.get('[data-cy="Database-Input"]', { timeout: 5000 })
+            .should('be.visible')
+            .type(creds.dbName);
+
+        cy.get('.btn-submit').click();
+
+        cy.get('[data-cy="Username-Input"]', { timeout: 5000 })
+            .should('be.visible')
+            .type(creds.userName);
+
+        cy.get('[data-cy="Password-Input"]', { timeout: 5000 })
+            .type(creds.password, { log: false });
+
+        cy.get('.signin-button').click();
+
+        cy.get('.welcome-title', { timeout: 5000 })
+            .should('be.visible');
+    }, {
+        validate() {
+            cy.visit(Cypress.config('baseUrl'), { failOnStatusCode: false });
+            cy.get('.welcome-title', { timeout: 5000 }).should('be.visible');
+        },
+        cacheAcrossSpecs: false,
+    });
+
     cy.visit(Cypress.config('baseUrl'), {
-        timeout: 120000,
+        timeout: 10000,
         failOnStatusCode: false,
     });
-
-    cy.get('body').then($body => {
-        if ($body.find('[data-cy="Database-Input"]').length === 0) {
-            cy.get('.login-btn', { timeout: 60000 }).click();
-        }
-    });
-
-    cy.get('[data-cy="Database-Input"]', { timeout: 30000 })
-        .should('be.visible')
-        .type(creds.dbName);
-
-    cy.get('.btn-submit').click();
-
-    cy.get('[data-cy="Username-Input"]', { timeout: 30000 })
-        .should('be.visible')
-        .type(creds.userName);
-
-    cy.get('[data-cy="Password-Input"]')
-        .type(creds.password, { log: false });
-
-    cy.get('.signin-button').click();
-
-    cy.get('.welcome-title', { timeout: 60000 })
-        .should('be.visible');
+    cy.get('.welcome-title', { timeout: 5000 }).should('be.visible');
 }
 
 function openNewDomainModalIfNeeded() {
@@ -295,7 +364,6 @@ function enterNameValue(value, field) {
 }
 
 Then("I navigate through the following path {string} -> {string}", (module, screen) => {
-    cy.wait(5000)
     cy.get('.theme > :nth-child(1)').should('be.visible').click()
     cy.get('[data-cy="ModuleList"] > .mat-icon').should('be.visible').and('not.be.disabled').dblclick()
     cy.get(`[data-cy="${module}-Module"] > .card-image`).scrollIntoView().should('be.visible').click()
@@ -303,9 +371,7 @@ Then("I navigate through the following path {string} -> {string}", (module, scre
 })
 
 Then("I navigate through the following path {string} -> {string} -> {string}", (module, menu, screen) => {
-    cy.wait(5000)
     cy.get('.theme > :nth-child(1)').should('be.visible').click()
-    cy.wait(5000)
     cy.get('[data-cy="ModuleList"] > .mat-icon').should('be.visible').and('not.be.disabled').dblclick()
     cy.get(`[data-cy="${module}-Module"] > .card-image`).scrollIntoView().should('be.visible').click()
     cy.get(`[data-cy="${menu}-MenuFolder0"]`).scrollIntoView().should('be.visible').click({ force: true })
