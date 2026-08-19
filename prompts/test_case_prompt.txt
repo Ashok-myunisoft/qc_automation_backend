@@ -67,10 +67,31 @@ Always use: Feature, Background, Scenario, Scenario Outline, Examples.
 - Workflow scenarios for every business action
 - Use page names, field names, business actions, and navigation paths exactly as they appear in the Project Analysis.
 - Do not rename fields or components.
-- The navigation step should always be phrased
-  `I navigate through the following path "<Module>" -> "<Screen>"` (or with
-  an intermediate menu level if the Project Analysis shows one) — keep this
-  exact phrasing consistent across every scenario in this feature.
+
+- NAVIGATION STEP ARITY — determined by the Project Analysis, not fixed:
+  Check what the Project Analysis actually shows for this screen's location
+  in the app hierarchy, and phrase the navigation step to match EXACTLY —
+  never default to one shape regardless of the real data:
+
+    * Module -> Screen directly (no intermediate menu/submenu level shown
+      in the Project Analysis):
+        I navigate through the following path "<Module>" -> "<Screen>"
+
+    * Module -> Menu/Submenu -> Screen (the Project Analysis shows an
+      intermediate menu, folder, or submenu level between the module and
+      the screen — this is common, not an edge case; do not collapse it
+      down to a 2-level path just because that's the more familiar shape):
+        I navigate through the following path "<Module>" -> "<Menu>" -> "<Screen>"
+
+  Use whichever arity the Project Analysis actually shows for THIS screen
+  — 2 parts or 3 parts — and never pad a real 2-level path to 3, and never
+  collapse a real 3-level path down to 2. Keep that same arity and exact
+  phrasing consistent across every scenario in the one feature file you're
+  generating, since ScriptGenerateAgent (the next agent in the pipeline)
+  implements exactly one navigation step handler per feature, matching
+  whichever arity your Background step uses — a feature that mixes both
+  shapes, or uses the wrong one for what the Project Analysis actually
+  shows, will fail at that step.
 
 
 #TEST DATA RULES
@@ -119,6 +140,18 @@ Examples
 
 #EXAMPLE
 
+The two examples below (Skill Domain) are illustrative of SHAPE ONLY —
+how a 2-level vs. a 3-level navigation path is phrased. They are not
+specific to Skill Domain and do not mean any particular screen should use
+one shape over the other. For the actual screen you are generating a
+feature for, always look at THAT screen's own Project Analysis to decide
+which shape applies — some screens sit directly under a module (2-level),
+others sit under an intermediate menu/submenu (3-level), and this varies
+screen by screen, not by a fixed rule tied to any one example.
+
+
+#EXAMPLE — 2-level navigation (Module -> Screen, no intermediate menu shown)
+
 
 Feature: Skill Domain Management
   As a Skill Management user
@@ -140,6 +173,40 @@ Feature: Skill Domain Management
       | SD001      |            | Name Required     |
 
 Scenario: Create Skill DomainFinance
+
+When I enter "SD001" in the "DomainCode" field
+
+And I enter "Technology" in the "DomainName" field
+
+And I click the Save button
+
+Then I should see "Details Saved Successfully"
+
+
+#EXAMPLE — 3-level navigation (Module -> Menu/Submenu -> Screen, when the
+Project Analysis shows that intermediate level for this screen)
+
+
+Feature: Skill Domain Management
+  As a Skill Management user
+  I want to maintain Skill Domains
+  So that Skill Groups can be categorized.
+
+  Background:
+    And I navigate through the following path "Skill Management" -> "Skill Taxonomy" -> "Skill Domain"
+
+  Scenario Outline: Validate required fields
+    When I enter "<DomainCode>" in the "DomainCode" field
+    And I enter "<DomainName>" in the "DomainName" field
+    And I click the Save button
+    Then I should see "<ValidationMessage>"
+
+    Examples:
+      | DomainCode | DomainName | ValidationMessage |
+      |            |            | Code Required     |
+      | SD001      |            | Name Required     |
+
+Scenario: Create Skill Domain
 
 When I enter "SD001" in the "DomainCode" field
 
