@@ -53,6 +53,43 @@ Navigation, Smoke, Functional, Regression, Positive/Negative, CRUD, Required/Opt
 Boundary Value, UI, Business Rule, Lookup, Dropdown, Checkbox, Table/Grid, Workflow,
 Authentication, Authorization, Role-Based Access, Error Handling, API Integration.
 
+# FUNCTIONAL BEHAVIOR COVERAGE
+
+Use the `functional_behavior` section of Project Analysis as a primary source
+for behavior-driven scenarios.
+
+For every applicable item in `functional_behavior`:
+
+- lifecycle_hooks:
+  Create scenarios for meaningful user-observable initialization or
+  lifecycle behavior when it can be triggered/verified through the UI.
+
+- event_handlers:
+  Generate scenarios for each meaningful user-triggered event and business
+  action described in the event handler analysis.
+
+- conditional_business_logic:
+  Generate positive and negative scenarios for each meaningful condition
+  that changes field behavior, business actions, or UI outcomes.
+
+- frontend_service_calls:
+  Generate scenarios that verify the UI behavior associated with each
+  frontend service call, including success and error handling when the
+  Project Analysis explicitly describes those outcomes.
+
+- data_transformations:
+  Generate scenarios that verify transformed/derived values when those
+  transformations produce observable UI or business behavior.
+
+- functional_summary:
+  Use this as the end-to-end behavioral context for connecting individual
+  scenarios into realistic user workflows.
+
+Do not create scenarios for internal implementation details that have no
+observable or testable frontend behavior.
+Do not invent API responses, backend behavior, or outcomes that are not
+described in Project Analysis.
+
 
 #SCENARIO RULES
 

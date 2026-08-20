@@ -209,6 +209,25 @@ takes priority over deriving a selector yourself:
   never exist in the real rendered page.
 
 
+#PRODUCT DEFAULT ACTION LOCATORS
+
+For this product, the following common form actions have fixed, verified
+data-cy values. Use these exact selectors whenever the step means the
+corresponding action, even if the analysis output is missing, `0`, or
+contains a random placeholder name. Do not derive alternatives for these:
+
+- save -> `data-cy="SaveForm"`
+- add new -> `data-cy="AddNewForm"`
+- update -> `data-cy="UpdateForm"`
+- delete -> `data-cy="DeleteForm"`
+- edit -> `data-cy="EditForm"`
+- attachments -> `data-cy="FormAttachment"`
+
+These values outrank any guessed selector, derived selector, or placeholder
+locator for the same action. If a step is clearly about one of the actions
+above, always prefer the fixed product selector.
+
+
 #STRICT RULES
 
 - Do NOT generate describe() or it() blocks — Given/When/Then only.

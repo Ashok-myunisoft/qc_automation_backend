@@ -52,6 +52,16 @@ Known real locators (VERIFIED from the actual source code — use these
 EXACT data-cy values for any field/button named below that appears in
 this list, instead of deriving your own):
 {locator_block}
+
+Product default action locators (use these exact data-cy values whenever
+the step clearly refers to the matching action, even if analysis output is
+missing, `0`, or a placeholder):
+- save -> data-cy="SaveForm"
+- add new -> data-cy="AddNewForm"
+- update -> data-cy="UpdateForm"
+- delete -> data-cy="DeleteForm"
+- edit -> data-cy="EditForm"
+- attachments -> data-cy="FormAttachment"
 """
         response = await self.agent.run(user_message)
         return response.text
