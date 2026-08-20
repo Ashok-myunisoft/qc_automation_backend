@@ -6,7 +6,7 @@ services:
     env_file:
       - .env
     ports:
-      - "8000:8000"
+      - "8053:8053"
     # Cypress/Chrome can exceed Docker's default shared-memory allocation.
     shm_size: 2gb
     # Reaps browser subprocesses launched by Cypress.
