@@ -1,0 +1,34 @@
+# Version control and local configuration/secrets
+.git
+.gitignore
+.env
+.env.*
+!.env.example
+
+# Python build/runtime by-products
+__pycache__/
+*.py[cod]
+*.so
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+
+# Node dependencies and logs
+**/node_modules/
+**/npm-debug.log*
+**/yarn-debug.log*
+**/yarn-error.log*
+
+# Cypress generates these while the API is running
+cypress-workspace/cypress/_runs/
+cypress-workspace/cypress/_stash/
+cypress-workspace/cypress/screenshots/
+cypress-workspace/cypress/videos/
+cypress-workspace/cypress/reports/
+
+# Editor and OS files
+.DS_Store
+.idea/
+.vscode/

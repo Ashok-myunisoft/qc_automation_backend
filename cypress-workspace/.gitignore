@@ -1,4 +1,6 @@
 node_modules
+_runs
+_stash
 reports
 mochawesome-reports
 screenshots
