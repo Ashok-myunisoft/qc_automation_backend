@@ -228,6 +228,46 @@ locator for the same action. If a step is clearly about one of the actions
 above, always prefer the fixed product selector.
 
 
+#TEST DATA CLEANUP (REQUIRED WHENEVER THE FEATURE CREATES RECORDS)
+
+Feature files in this project now commonly carry many Scenario Outline
+rows (see the upstream TestCaseAgent's scenario-depth requirement) —
+often 10+ Create/Save scenarios in a single file, each writing a real
+record into the ERP test database via a code/identifier field (e.g.
+DomainCode values like "SD-001", "SD-002", ... across many Examples
+rows). Run this file enough times — including unattended overnight runs
+— and those codes collide with leftover records from a previous run,
+causing spurious failures that have nothing to do with the screen itself.
+
+Whenever the feature file's Examples tables contain a code/identifier
+field used to create or identify a record (the same kind of field a row
+action, edit, or delete step would later reference by that value), you
+MUST generate a cleanup step using this pattern, generalized from the
+literal codes actually present in this specific feature file
+— not the illustrative example's codes, and not invented ones:
+
+1. Collect every distinct code/identifier value that appears across the
+   feature's Examples tables for that field (do not guess additional
+   codes beyond what the feature actually uses).
+2. Write a plain-function helper (per #REAL PROJECT CONVENTIONS) that,
+   for each collected code, checks if a record with that code already
+   exists in the relevant grid/table, and if so, deletes it via the
+   screen's real delete row action and confirms any resulting dialog —
+   mirroring the same row-action and dialog-confirmation patterns you're
+   already implementing elsewhere in this same file for that screen.
+3. Call this cleanup helper from a step invoked at the start of the
+   feature's execution (either as the first step of the Background, if
+   the feature's own Background already has such a step, or via a
+   scenario-scoped call at the beginning of the first scenario that
+   creates data) — so leftover records from a prior run are removed
+   before this run's Create scenarios execute, not after.
+
+Do NOT build this cleanup logic if the feature file's scenarios don't
+actually create identifiable records (e.g. a pure read-only/report
+screen, or a screen with no code/identifier-style field) — this section
+only applies when there is real leftover-data risk to guard against.
+
+
 #STRICT RULES
 
 - Do NOT generate describe() or it() blocks — Given/When/Then only.
@@ -254,9 +294,15 @@ above, always prefer the fixed product selector.
   list should you derive the data-cy value from the field/button name
   given in the step's own {string} parameter or the step's literal
   wording.
+- Do NOT skip #TEST DATA CLEANUP when the feature's Examples tables
+  contain code/identifier values for created records — see that section
+  for exactly when it applies and how to build it.
 
 
-#EXAMPLE (illustrative shape only)
+#EXAMPLE (illustrative shape only — including a generalized cleanup
+helper following #TEST DATA CLEANUP above; the actual TEST_CODES list
+you generate must reflect the real codes in the feature you were given,
+not this sample's codes)
 
 import { Given, When, Then } from "@badeball/cypress-cucumber-preprocessor";
 const creds = Cypress.env('TestConnections').UILogin;
