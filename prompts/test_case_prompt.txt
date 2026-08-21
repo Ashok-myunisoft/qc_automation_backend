@@ -53,6 +53,41 @@ Navigation, Smoke, Functional, Regression, Positive/Negative, CRUD, Required/Opt
 Boundary Value, UI, Business Rule, Lookup, Dropdown, Checkbox, Table/Grid, Workflow,
 Authentication, Authorization, Role-Based Access, Error Handling, API Integration.
 
+#SCENARIO DEPTH (CRITICAL — TARGET 15 TO 50 SCENARIOS PER FEATURE)
+
+Generate as many DISTINCT, genuine scenarios as the Project Analysis JSON
+actually supports for this screen — typically 15 to 50 scenarios per
+feature file. This is a floor to reach through real coverage, not a
+number to pad toward with repetitive scenarios.
+
+Reach this depth by exhausting the real signal already present in Project
+Analysis, not by inventing behavior:
+
+- Every field's validations (required, length, regex, format) → both a
+  positive and a negative scenario, per field, where the Project Analysis
+  reports that validation.
+- Every entry in conditional_business_logic → its own scenario per
+  branch (the condition true, and the condition false, when both are
+  observable).
+- Every dialog → both its confirm path and its cancel path as separate
+  scenarios, where the Project Analysis reports both buttons.
+- Every loop → add-row, remove-row, and (if is_bounded) the max-rows
+  boundary case, as separate scenarios.
+- Every screen_section with activation_required=true → a scenario
+  confirming fields inside it are only interactable after activation.
+- Every business_action → at least one workflow scenario, plus a
+  negative/error-path scenario if Project Analysis describes one.
+- Every event_handler with a meaningful "conditions" branch → its own
+  scenario per branch.
+
+HARD RULE: no two scenarios may exercise the same field/action/condition
+combination in the same way. If a scenario would be a near-duplicate of
+one already written (same field, same validation, same outcome), do not
+write it — find the next genuinely distinct case instead, or stop if the
+Project Analysis has been fully exhausted. A feature file with 12 truly
+distinct scenarios is correct if that is all the screen supports; do not
+stretch past what Project Analysis actually justifies.
+
 # FUNCTIONAL BEHAVIOR COVERAGE
 
 Use the `functional_behavior` section of Project Analysis as a primary source
@@ -104,6 +139,18 @@ Always use: Feature, Background, Scenario, Scenario Outline, Examples.
 - Workflow scenarios for every business action
 - Use page names, field names, business actions, and navigation paths exactly as they appear in the Project Analysis.
 - Do not rename fields or components.
+
+EXAMPLES TABLE LABELING (preferred, not forced): when a Scenario Outline
+has an Examples table, add a labeled first column (e.g. "Condition")
+giving each row a short, plain-language description of what that row
+specifically tests — so the feature file is self-explanatory by reading
+down that column alone, without needing to interpret the data values.
+
+Use this whenever a table has more than one row, since that's exactly
+when rows need distinguishing. It's fine to omit the label column only
+when a table is trivially self-describing on its own (e.g. a single-row
+Examples table for one straightforward Create scenario) — don't force a
+label column onto something that doesn't need one just to satisfy a rule.
 
 - NAVIGATION STEP ARITY — determined by the Project Analysis, not fixed:
   Check what the Project Analysis actually shows for this screen's location
@@ -178,13 +225,18 @@ Examples
 #EXAMPLE
 
 The two examples below (Skill Domain) are illustrative of SHAPE ONLY —
-how a 2-level vs. a 3-level navigation path is phrased. They are not
-specific to Skill Domain and do not mean any particular screen should use
-one shape over the other. For the actual screen you are generating a
-feature for, always look at THAT screen's own Project Analysis to decide
-which shape applies — some screens sit directly under a module (2-level),
-others sit under an intermediate menu/submenu (3-level), and this varies
-screen by screen, not by a fixed rule tied to any one example.
+how a 2-level vs. a 3-level navigation path is phrased, and how an
+Examples table's Condition column labels each row. They are not specific
+to Skill Domain and do not mean any particular screen should use one
+shape over the other, or should stop at only two scenarios — a real
+feature file should carry the full 15-to-50-scenario depth described in
+#SCENARIO DEPTH above; these examples are trimmed short purely to show
+the pattern clearly. For the actual screen you are generating a feature
+for, always look at THAT screen's own Project Analysis to decide which
+navigation shape applies — some screens sit directly under a module
+(2-level), others sit under an intermediate menu/submenu (3-level), and
+this varies screen by screen, not by a fixed rule tied to any one
+example.
 
 
 #EXAMPLE — 2-level navigation (Module -> Screen, no intermediate menu shown)
@@ -205,19 +257,20 @@ Feature: Skill Domain Management
     Then I should see "<ValidationMessage>"
 
     Examples:
-      | DomainCode | DomainName | ValidationMessage |
-      |            |            | Code Required     |
-      | SD001      |            | Name Required     |
+      | Condition      | DomainCode | DomainName | ValidationMessage |
+      | Missing code   |            |            | Code Required     |
+      | Missing name   | SD001      |            | Name Required     |
 
-Scenario: Create Skill DomainFinance
+  Scenario Outline: Create Skill Domain
+    When I enter "<DomainCode>" in the "DomainCode" field
+    And I enter "<DomainName>" in the "DomainName" field
+    And I click the Save button
+    Then I should see "Details Saved Successfully"
 
-When I enter "SD001" in the "DomainCode" field
-
-And I enter "Technology" in the "DomainName" field
-
-And I click the Save button
-
-Then I should see "Details Saved Successfully"
+    Examples:
+      | Condition         | DomainCode | DomainName |
+      | Technology domain  | SD001      | Technology |
+      | Safety domain       | SD002      | Safety     |
 
 
 #EXAMPLE — 3-level navigation (Module -> Menu/Submenu -> Screen, when the
@@ -239,16 +292,17 @@ Feature: Skill Domain Management
     Then I should see "<ValidationMessage>"
 
     Examples:
-      | DomainCode | DomainName | ValidationMessage |
-      |            |            | Code Required     |
-      | SD001      |            | Name Required     |
+      | Condition      | DomainCode | DomainName | ValidationMessage |
+      | Missing code   |            |            | Code Required     |
+      | Missing name   | SD001      |            | Name Required     |
 
-Scenario: Create Skill Domain
+  Scenario Outline: Create Skill Domain
+    When I enter "<DomainCode>" in the "DomainCode" field
+    And I enter "<DomainName>" in the "DomainName" field
+    And I click the Save button
+    Then I should see "Details Saved Successfully"
 
-When I enter "SD001" in the "DomainCode" field
-
-And I enter "Technology" in the "DomainName" field
-
-And I click the Save button
-
-Then I should see "Details Saved Successfully"
+    Examples:
+      | Condition         | DomainCode | DomainName |
+      | Technology domain  | SD001      | Technology |
+      | Safety domain       | SD002      | Safety     |
