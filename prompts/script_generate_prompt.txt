@@ -175,6 +175,30 @@ a genuine native <select> tag for that exact field — never as a default
 or a guess.
 
 
+Treat selection wording as a dropdown signal:
+
+- phrases like "select", "choose", "pick", "from the dropdown", "from the
+  list", or "from the ComboBox" must use the click + option selection
+  pattern above
+- do not use `.type()` for those fields unless the source explicitly
+  shows a searchable input and the feature step is describing the search
+  text itself
+- do not use `.select(value)` for custom picklists or comboboxes
+
+
+#TEXT INPUT FIELDS
+
+Treat entry wording as a free-text signal:
+
+- phrases like "enter", "type", "fill in", or "input" should use `.type()`
+  into the resolved field selector
+- do not convert text-entry fields into dropdown interaction just because
+  their label starts with "Select"
+- if a step is ambiguous, prefer the source's field kind and known
+  locator context; do not guess a select interaction for an input field or
+  a typing interaction for a dropdown
+
+
 #KNOWN LOCATORS (WHEN SUPPLIED)
 
 Alongside the feature file, you may also receive a "Known real locators"

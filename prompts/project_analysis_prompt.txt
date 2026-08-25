@@ -470,6 +470,18 @@ exactly the failure this schema exists to prevent, so double-check
 Component Kind against the actual tag/selector used in the primary
 screen's template before finalizing it.
 
+Use the placeholder text only as a secondary hint when the component tag
+is still ambiguous:
+
+- placeholders that begin with or contain `select` indicate a dropdown,
+  picklist, combobox, or select-style field
+- placeholders that begin with or contain `enter`, `type`, or `input`
+  indicate a free-text input
+- if the placeholder and component tag conflict, the actual component tag
+  wins
+- if the placeholder is ambiguous, leave the field classification based
+  on the actual source tag or component wrapper only
+
 `hidden` vs. `visibility_condition` — these are two different things and
 both must be considered:
 - `hidden`: a simple boolean for the STATIC case — true only if the field

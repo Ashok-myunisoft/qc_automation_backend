@@ -1,11 +1,15 @@
 import json
+import logging
 from pathlib import Path
 import os
 from agent_framework import Agent
 from agent_framework.openai import OpenAIChatClient
 from dotenv import load_dotenv
 
+
 load_dotenv()
+
+logger = logging.getLogger(__name__)
 
 class ProjectAnalysisAgent:
     def __init__(self):
@@ -29,6 +33,7 @@ class ProjectAnalysisAgent:
         """
 
         response = await self.agent.run(user_message)
+        logger.info("ProjectAnalysisAgent raw response=%s", response.text)
 
         try:
             return json.loads(response.text)

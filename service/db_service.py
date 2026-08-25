@@ -1,6 +1,7 @@
 ﻿import os
 import logging
 from contextlib import contextmanager
+from urllib.parse import unquote, urlparse
 
 import pymssql
 from dotenv import load_dotenv
@@ -17,9 +18,38 @@ class DbServiceError(Exception):
 
 
 def _config() -> dict:
-    host     = os.getenv("TESTDB_HOST")
+    db_url = os.getenv("DATABASE_URL")
+    if db_url:
+        parsed = urlparse(db_url)
+        host = parsed.hostname
+        database = parsed.path.lstrip("/") or None
+        user = parsed.username
+        password = parsed.password
+        port = parsed.port or 1433
+
+        missing = [name for name, val in [
+            ("DATABASE_URL.host", host),
+            ("DATABASE_URL.path", database),
+            ("DATABASE_URL.username", user),
+            ("DATABASE_URL.password", password),
+        ] if not val]
+        if missing:
+            raise DbServiceError(
+                "invalid DATABASE_URL — missing "
+                f"{', '.join(missing)}"
+            )
+
+        return {
+            "host": host,
+            "database": database,
+            "user": unquote(user),
+            "password": unquote(password),
+            "port": port,
+        }
+
+    host = os.getenv("TESTDB_HOST")
     database = os.getenv("TESTDB_NAME")
-    user     = os.getenv("TESTDB_USER")
+    user = os.getenv("TESTDB_USER")
     password = os.getenv("TESTDB_PASSWORD")
 
     missing = [name for name, val in [
@@ -27,16 +57,19 @@ def _config() -> dict:
         ("TESTDB_USER", user), ("TESTDB_PASSWORD", password),
     ] if not val]
     if missing:
-        raise DbServiceError(f"missing env var(s): {', '.join(missing)} — set these in .env")
+        raise DbServiceError(
+            "missing env var(s): "
+            f"{', '.join(missing)} — set DATABASE_URL or these legacy vars in .env"
+        )
 
-    return {"host": host, "database": database, "user": user, "password": password}
+    return {"host": host, "database": database, "user": user, "password": password, "port": 1433}
 
 
 @contextmanager
 def _connection():
     cfg = _config()
     conn = pymssql.connect(
-        server=cfg["host"], database=cfg["database"],
+        server=cfg["host"], database=cfg["database"], port=cfg["port"],
         user=cfg["user"], password=cfg["password"],
         as_dict=True, login_timeout=10, timeout=30,
     )

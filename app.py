@@ -540,11 +540,19 @@ async def _generate_one_screen(ws: WebSocket, src: GitLabService, module: str,
             f"{tag}using {len(project_context.get('source_files', []))} source file(s) for analysis...",
             "secondary",
         )
+        logger.info(
+            "%sanalysis input primary_dir=%s source_files=%d sample=%s",
+            tag,
+            project_context.get("primary_dir"),
+            len(project_context.get("source_files", [])),
+            [f.get("path") for f in project_context.get("source_files", [])[:5]],
+        )
 
         await send_log(ws, f"{tag}running project analysis agent...", "secondary")
         project_analysis = await project_analysis_agent.analyze(
             project_context=project_context, user_request=user_request,
         )
+        logger.info("%sanalysis output=%s", tag, project_analysis)
 
         source_hints = _extract_source_hints(project_context)
         await send_log(ws, f"{tag}looking up real test data ({len(source_hints)} hint(s) from source)...", "secondary")

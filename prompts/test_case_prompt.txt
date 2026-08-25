@@ -44,6 +44,17 @@ never mixing that with "I fill in the {string} field with {string}" for
 the same action) so the generated script doesn't end up with near-duplicate
 step definitions for the same real action.
 
+Match the action wording to the field type shown in Project Analysis:
+
+- dropdowns, picklists, comboboxes, and select-style fields use wording
+  like "select" or "choose"
+- free-text inputs, textareas, and fields whose placeholders indicate
+  entry use wording like "enter" or "type"
+- do not describe dropdown-style fields as if the user types into them
+- do not describe free-text fields as if the user selects from them
+- if the field classification is ambiguous, follow the component kind
+  from Project Analysis rather than guessing from the label alone
+
 
 #SCENARIO COVERAGE
 
