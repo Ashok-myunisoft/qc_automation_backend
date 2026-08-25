@@ -23,8 +23,8 @@ jobs:
 
       - name: Build Docker image
         run: |
-          docker build -t YOUR_DOCKERHUB_USERNAME/YOUR_IMAGE_NAME:latest .
+          docker build -t YOUR_DOCKER_USERNAME/YOUR_IMAGE_NAME:latest .
 
       - name: Push Docker image
         run: |
-          docker push YOUR_DOCKERHUB_USERNAME/YOUR_IMAGE_NAME:latest
+          docker push YOUR_DOCKER_USERNAME/YOUR_IMAGE_NAME:latest
