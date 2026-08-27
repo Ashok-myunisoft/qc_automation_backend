@@ -1,6 +1,8 @@
 import asyncio
 import json
+import os
 import queue
+import re
 import shutil
 import subprocess
 import threading
@@ -13,19 +15,34 @@ _SCREENSHOTS_DIR = _WORKSPACE / 'cypress' / 'screenshots'
 _STASH_DIR = _WORKSPACE / 'cypress' / '_stash'
 TABLE_CHARS = set('┌┐└┘├┤┬┴┼─│═╞╡╥╨╫')
 _NPX = shutil.which('npx') or 'npx'
-
+ 
+# Cypress/Node decide whether to emit ANSI color codes based on whether
+# they detect a color-capable TTY on their end — this can vary by
+# environment (confirmed: same command produced clean text on one machine,
+# raw \x1b[...m escape sequences on another server) regardless of the fact
+# that neither actually reaches a real terminal here; the output is piped
+# through this subprocess, queued, and sent to the frontend over a
+# WebSocket, which has no ANSI renderer. FORCE_COLOR/NO_COLOR below try to
+# stop Cypress from emitting them in the first place; this regex is the
+# defensive backstop that strips them from whatever text arrives anyway,
+# so a change in Cypress/Node/terminal-detection behavior on some future
+# environment can't reintroduce the same garbled-log symptom. Coloring in
+# the UI already comes from _cypress_tone()'s tone below, not from these
+# codes, so stripping them loses nothing.
+_ANSI_RE = re.compile(r'\x1b\[[0-9;]*m')
+ 
 class CypressRunError(Exception):
     pass
-
+ 
 def _ensure_workspace() -> None:
     if not _WORKSPACE.exists():
         raise CypressRunError(f"cypress-workspace/ not found at {_WORKSPACE}. It only needs: package.json, cypress.config.js, cypress.env.json, patches/ (for the postinstall patch-package step), and the cypress/pageObject/ + cypress/support/ folders — every screen's own feature+script pair is pulled fresh from GitLab on each run, no local features/stepDefinitions/fixtures tree needed.")
-
+ 
 def _ensure_npm_installed() -> None:
     node_modules = _WORKSPACE / 'node_modules'
     if not node_modules.exists():
         raise CypressRunError('node_modules/ not found inside cypress-workspace/. Run `npm install` once inside qc-backend/cypress-workspace/ and it will be ready.')
-
+ 
 def _cypress_tone(line: str) -> str:
     s = line.strip()
     if any((c in line for c in TABLE_CHARS)):
@@ -35,17 +52,17 @@ def _cypress_tone(line: str) -> str:
     if s.startswith(('✗', '×')) or 'failing' in line.lower() or 'error' in line.lower():
         return 'danger'
     return 'secondary'
-
+ 
 def _stream_process(proc: subprocess.Popen, out_queue: 'queue.Queue'):
     try:
         for raw_line in proc.stdout:
-            line = raw_line.rstrip()
+            line = _ANSI_RE.sub('', raw_line.rstrip())
             if line:
                 out_queue.put(('log', line))
     finally:
         returncode = proc.wait()
         out_queue.put(('__exit__', returncode))
-
+ 
 def _walk_mocha_suites(suites: list, out: list) -> None:
     for suite in suites or []:
         tests = suite.get('tests') or []
@@ -58,7 +75,7 @@ def _walk_mocha_suites(suites: list, out: list) -> None:
                 scenarios.append({'name': t.get('title') or '(untitled scenario)', 'state': t.get('state') or ('passed' if t.get('pass') else 'failed'), 'duration': t.get('duration') or 0, 'err_message': err_message, 'err_stack': err_stack})
             out.append({'suite_name': suite.get('title') or '(untitled suite)', 'scenarios': scenarios})
         _walk_mocha_suites(suite.get('suites') or [], out)
-
+ 
 def _read_latest_mochawesome() -> dict | None:
     if not _REPORTS_DIR.exists():
         return None
@@ -69,7 +86,7 @@ def _read_latest_mochawesome() -> dict | None:
         return json.loads(candidates[0].read_text(encoding='utf-8'))
     except (OSError, json.JSONDecodeError):
         return None
-
+ 
 def _summarize_run(mocha: dict | None, exit_code: int, slug: str, stash_screenshots: list[str]) -> dict:
     result = {'slug': slug, 'exit_code': exit_code, 'passed': exit_code == 0, 'duration': 0, 'stats': {'passes': 0, 'failures': 0, 'pending': 0, 'tests': 0}, 'suites': [], 'screenshots': stash_screenshots}
     if not mocha:
@@ -82,7 +99,7 @@ def _summarize_run(mocha: dict | None, exit_code: int, slug: str, stash_screensh
         _walk_mocha_suites(r.get('suites') or [], flat)
     result['suites'] = flat
     return result
-
+ 
 def _stash_screenshots(slug: str) -> list[str]:
     if not _SCREENSHOTS_DIR.exists():
         return []
@@ -102,7 +119,7 @@ def _stash_screenshots(slug: str) -> list[str]:
             continue
     shutil.rmtree(_SCREENSHOTS_DIR, ignore_errors=True)
     return stashed
-
+ 
 def clear_stash(slugs: list[str] | None=None) -> None:
     if not _STASH_DIR.exists():
         return
@@ -112,10 +129,10 @@ def clear_stash(slugs: list[str] | None=None) -> None:
     for slug in slugs:
         target = _STASH_DIR / slug
         shutil.rmtree(target, ignore_errors=True)
-
+ 
 def screenshot_absolute_path(rel_path: str) -> Path:
     return _WORKSPACE / rel_path
-
+ 
 def _build_env_overrides(test_env: dict | None) -> list[str]:
     """Turns the frontend-supplied {baseUrl, dbName, userName, password}
     into Cypress CLI flags that override cypress.config.js's baseUrl and
@@ -124,14 +141,14 @@ def _build_env_overrides(test_env: dict | None) -> list[str]:
     and Cypress.config('baseUrl') inside the generated script resolve
     identically whether the value came from a file or a CLI flag, so no
     generated script or prompt needs to change for this to work.
-
+ 
     --config takes plain comma-separated key=value pairs (baseUrl has no
     commas, so a single pair is safe as-is). --env accepts a single JSON
     object as its whole argument and merges it into Cypress.env() at the
     top level — passing {"TestConnections": {...}} here fully replaces
     just that one top-level key, which is all UILogin-reading scripts
     ever look at.
-
+ 
     Returns [] if test_env is falsy — callers in app.py are expected to
     have already refused to run without one (full-replace, no fallback),
     but this stays defensive rather than crashing the run."""
@@ -148,8 +165,8 @@ def _build_env_overrides(test_env: dict | None) -> list[str]:
         }
     })
     return ["--config", f"baseUrl={base_url}", "--env", env_payload]
-
-
+ 
+ 
 async def run_cypress(session: dict, feature_content: str, script_content: str, slug: str,
                        fixtures: dict | None=None, test_env: dict | None=None):
     _ensure_workspace()
@@ -171,8 +188,12 @@ async def run_cypress(session: dict, feature_content: str, script_content: str, 
     out_queue: 'queue.Queue' = queue.Queue()
     started_at = datetime.utcnow().isoformat() + 'Z'
     cmd = [_NPX, 'cypress', 'run', '--spec', spec_path] + _build_env_overrides(test_env)
+    # Ask Cypress/Node not to emit ANSI color codes at all — belt-and-braces
+    # with the _ANSI_RE stripping in _stream_process above, since which
+    # environment variable(s) an underlying tool actually respects can vary.
+    proc_env = {**os.environ, 'FORCE_COLOR': '0', 'NO_COLOR': '1'}
     try:
-        proc = subprocess.Popen(cmd, cwd=str(_WORKSPACE), stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding='utf-8', errors='replace', bufsize=1)
+        proc = subprocess.Popen(cmd, cwd=str(_WORKSPACE), stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding='utf-8', errors='replace', bufsize=1, env=proc_env)
     except FileNotFoundError as e:
         shutil.rmtree(run_dir, ignore_errors=True)
         raise CypressRunError(f"couldn't launch npx ({e}) — is Node.js/npm installed and on PATH for the account running this backend?")
