@@ -19,50 +19,37 @@ class DbServiceError(Exception):
 
 def _config() -> dict:
     db_url = os.getenv("DATABASE_URL")
-    if db_url:
-        parsed = urlparse(db_url)
-        host = parsed.hostname
-        database = parsed.path.lstrip("/") or None
-        user = parsed.username
-        password = parsed.password
-        port = parsed.port or 1433
+    if not db_url:
+        raise DbServiceError(
+            "missing env var: DATABASE_URL — set a single MSSQL URL in .env"
+        )
 
-        missing = [name for name, val in [
-            ("DATABASE_URL.host", host),
-            ("DATABASE_URL.path", database),
-            ("DATABASE_URL.username", user),
-            ("DATABASE_URL.password", password),
-        ] if not val]
-        if missing:
-            raise DbServiceError(
-                "invalid DATABASE_URL — missing "
-                f"{', '.join(missing)}"
-            )
-
-        return {
-            "host": host,
-            "database": database,
-            "user": unquote(user),
-            "password": unquote(password),
-            "port": port,
-        }
-
-    host = os.getenv("TESTDB_HOST")
-    database = os.getenv("TESTDB_NAME")
-    user = os.getenv("TESTDB_USER")
-    password = os.getenv("TESTDB_PASSWORD")
+    parsed = urlparse(db_url)
+    host = parsed.hostname
+    database = parsed.path.lstrip("/") or None
+    user = parsed.username
+    password = parsed.password
+    port = parsed.port or 1433
 
     missing = [name for name, val in [
-        ("TESTDB_HOST", host), ("TESTDB_NAME", database),
-        ("TESTDB_USER", user), ("TESTDB_PASSWORD", password),
+        ("DATABASE_URL.host", host),
+        ("DATABASE_URL.path", database),
+        ("DATABASE_URL.username", user),
+        ("DATABASE_URL.password", password),
     ] if not val]
     if missing:
         raise DbServiceError(
-            "missing env var(s): "
-            f"{', '.join(missing)} — set DATABASE_URL or these legacy vars in .env"
+            "invalid DATABASE_URL — missing "
+            f"{', '.join(missing)}"
         )
 
-    return {"host": host, "database": database, "user": user, "password": password, "port": 1433}
+    return {
+        "host": host,
+        "database": database,
+        "user": unquote(user),
+        "password": unquote(password),
+        "port": port,
+    }
 
 
 @contextmanager

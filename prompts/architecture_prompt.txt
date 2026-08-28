@@ -29,17 +29,67 @@ Two repo kinds, two different jobs:
 
 2. repo_kind = "source"
    Every real screen folder here is a loose bag of real Angular source
-   files (typically a `<slug>.component.ts` and `<slug>.component.html`,
-   sometimes with siblings like `.spec.ts` or `.scss`). There is no fixed
-   pairing to find — you only need to identify the correct FOLDER. Do not
-   invent a feature_path or script_path for this repo_kind.
+   files. There is no fixed pairing to find — you only need to identify
+   the correct FOLDER. Do not invent a feature_path or script_path for
+   this repo_kind.
    - A folder only counts as a real candidate if it actually contains
      files directly inside it (not just subfolders).
+
+   Component folder vs. supporting folders — this distinction is critical:
+   A screen's real, primary folder is the one containing its
+   `<slug>.component.html` and `<slug>.component.ts` pair (sometimes with
+   siblings like `.spec.ts` or `.scss`). This component pair is where the
+   actual UI markup, fields, and form controls live — it is the only
+   folder that can answer questions about what's on the screen.
+
+   Several OTHER folders may also contain a file whose name loosely
+   matches the module/screen (because they support that screen without
+   being its own UI), for example:
+   - a `.service.ts` file in a `service/` folder (API calls, business
+     logic — no UI markup)
+   - a `.model.ts` file (data shape only)
+   - a shared/reusable component folder used by many different screens
+     (dialogs, form-viewers, action bars, picklist libraries, etc.)
+
+   These are real files and may genuinely be relevant as supporting
+   material, but NONE of them is the screen's own folder, and none of
+   them should ever be returned as `dir` for a "screen" scope resolution.
+   A `.service.ts`/`.model.ts` file matching the screen name by filename
+   alone is a false signal, not a resolution — it looks related but does
+   not contain what the requester actually needs (the UI/form definition).
+
+   Resolution priority for repo_kind = "source":
+   1. First, look for a folder that itself contains a `.component.html`
+      and `.component.ts` pair whose name matches the screen (fuzzy match
+      applies, same as always — kebab-case, PascalCase, etc.).
+   2. If more than one such component-pair folder plausibly matches, pick
+      the closest by module + screen match, and mark `ambiguous: true`.
+   3. Only if NO folder anywhere in the given tree contains a matching
+      `.component.html`/`.component.ts` pair should you consider a
+      looser match (e.g. a `.service.ts`-only folder) — and in that case
+      you must still return it only if you are reporting the true best
+      available folder, with a low confidence (below 0.6) and
+      `ambiguous: true`, so the caller knows this is a fallback, not a
+      confirmed component folder. Do not report a `.service.ts`/`.model.ts`
+      -only folder at high confidence just because its filename matches.
+   4. If nothing above meets even that bar, return
+      {"error": "<short reason>"} instead of guessing — per the general
+      rule below, a wrong or misleading guess is worse than admitting
+      failure, since the caller has a deterministic fallback matcher.
+
+   Example: if the tree contains both
+     "projects/sales/master/service/targetmaster.service.ts"
+   and
+     "projects/sales/master/component/target-master/targetmaster.component.ts"
+     "projects/sales/master/component/target-master/targetmaster.component.html"
+   for screen "TargetMaster", the correct `dir` is
+   "projects/sales/master/component/target-master" — NOT the service
+   folder, even though "targetmaster" appears in both.
 
 Matching rules (apply to both repo kinds):
 - Do NOT assume a fixed folder depth or a fixed naming convention. Real
   repos vary — some have deep paths like
-  "features/Regression-Testing/<Module>/<Screen>/...", others are as flat
+  "Regression-Testing/<Module>/<Screen>/...", others are as flat
   as "<Module>/<Screen>/...". Match based on the module and screen name
   actually appearing in the path, not an exact template.
 - Match module and screen names fuzzily and semantically. The same screen

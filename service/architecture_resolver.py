@@ -20,8 +20,12 @@ _MODULE_STOPWORDS = {"module", "the", "and"}
 # If present, real-repo test trees keep UI regression screens under this
 # prefix, separate from API_Tests/Smoke-Testing trees that reuse the same
 # module names. Auto-detected — repos without this prefix (e.g. a flat
-# dummy/demo repo) are scanned in full instead.
-REGRESSION_TESTING_PREFIX = "cypress/src/features/Regression-Testing/"
+# dummy/demo repo) are scanned in full instead. The new canonical layout
+# uses Regression-Testing/ as the primary root; the older nested
+# cypress/src/features/Regression-Testing/ path is still tolerated as a
+# fallback during transition.
+REGRESSION_TESTING_PREFIX = "Regression-Testing/"
+LEGACY_REGRESSION_TESTING_PREFIX = "cypress/src/features/Regression-Testing/"
 
 
 def _normalize(text: str) -> str:
@@ -44,7 +48,11 @@ def _similarity(a: str, b: str) -> float:
 
 def _searchable_tree(tree: list[str]) -> list[str]:
     scoped = [p for p in tree if p.startswith(REGRESSION_TESTING_PREFIX)]
-    return scoped if scoped else tree
+    if scoped:
+        return scoped
+
+    legacy_scoped = [p for p in tree if p.startswith(LEGACY_REGRESSION_TESTING_PREFIX)]
+    return legacy_scoped if legacy_scoped else tree
 
 
 # ---------------------------------------------------------------------------
@@ -53,8 +61,8 @@ def _searchable_tree(tree: list[str]) -> list[str]:
 # one script file (.js or .cy.js) — self-contained, no dependency on any
 # other screen's file. e.g.:
 #
-#   cypress/src/features/Regression-Testing/ESS_Module/PaySlip/PaySlip.feature
-#   cypress/src/features/Regression-Testing/ESS_Module/PaySlip/PaySlip.js
+#   Regression-Testing/ESS_Module/PaySlip/PaySlip.feature
+#   Regression-Testing/ESS_Module/PaySlip/PaySlip.js
 #
 #   -- or, in a flatter demo/dummy repo --
 #
@@ -268,7 +276,7 @@ def build_new_path(module: str, screen: str) -> ResolvedFeature:
     folder with its own self-contained feature + script."""
     module_folder = f"{_pascal(module)}_Module"
     screen_name = _pascal(screen)
-    directory = f"cypress/src/features/Regression-Testing/{module_folder}/{screen_name}"
+    directory = f"Regression-Testing/{module_folder}/{screen_name}"
 
     return ResolvedFeature(
         dir=directory,

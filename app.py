@@ -79,9 +79,11 @@ def _fetch_source_project_context(src: GitLabService, resolved: ResolvedSource,
             path = f"{resolved.dir}/{filename}"
             content = src.fetch_file(path)
             if content is None:
+                logger.warning("primary dir fetch failed (404 or missing): %s", path)
                 continue
             (target_dir / filename).write_text(content, encoding="utf-8")
             fetched[path] = content
+        logger.info("primary dir %s: resolved.files=%s, successfully fetched=%d", resolved.dir, resolved.files, len(fetched))    
 
         if source_tree:
             tree_set = set(source_tree)
