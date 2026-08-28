@@ -3,6 +3,8 @@ import base64
 import logging
 import posixpath
 import re
+import tempfile
+from pathlib import Path
 import logger_config
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from service.gitlab_service import GitLabService
@@ -38,7 +40,9 @@ business_context_agent = BusinessContextAgent()
 # below), and its "target" ignore entry silently dropped this repo's real
 # targetmaster screen folder. source_files is now built directly from the
 # in-memory `fetched` dict instead.
-
+# Use the default Windows event loop policy instead of explicitly setting the
+# deprecated WindowsProactorEventLoopPolicy. On modern Python versions this is
+# already the recommended loop implementation.
 
 def _gitlab_service() -> GitLabService:
     return GitLabService()
@@ -394,16 +398,12 @@ async def send_artifacts(ws: WebSocket, session: dict, validation: dict | None =
         await ws.send_json({
             "type":   "artifacts",
             "scope":  "module",
-            "module": session.get("module"),
             "screens": [
                 {
                     "name":         s["resolved"].dir,
                     "feature_file": s["feature"],
                     "script":       s["script"],
                     "resolved_path": s["resolved"].feature_path,
-                    "module":       s.get("module", session.get("module")),
-                    "moduleIndex":  s.get("moduleIndex"),
-                    "approved":     bool(s.get("pushed")),
                 }
                 for s in screens
             ],
@@ -425,99 +425,6 @@ async def send_artifacts(ws: WebSocket, session: dict, validation: dict | None =
         "ambiguous":     resolved.ambiguous    if resolved else False,
         "exists":        bool(session.get("pushed")),
     })
-
-
-# ----------------------------------------------------------------------
-# Populates the frontend's Module/Screen dropdowns. Reads the QC output
-# repo's real current folder structure (Regression-Testing/{Module}_Module/
-# {Screen}/...) live on every call — no hardcoded list, no state carried
-# from a previous session — so newly-pushed modules/screens (including
-# ones landed by the overnight batch runner) show up without a frontend
-# rebuild or redeploy.
-# ----------------------------------------------------------------------
-async def handle_list_repo_structure(ws: WebSocket, session: dict):
-    try:
-        gl = _gitlab_service()
-        module_map = gl.get_module_screen_map()
-    except Exception as e:
-        await send_error(ws, f"could not read repo structure: {e}")
-        return
-
-    await ws.send_json({
-        "type":    "repo_structure",
-        "modules": module_map,
-    })
-
-
-# ----------------------------------------------------------------------
-# Whole-module FETCH across a QUEUE of modules — reads existing files for
-# every module in one shot. No conflicts are possible on a fetch (it only
-# reads), so this can run straight through with no discovery/confirm step
-# and produce one merged screen list.
-# ----------------------------------------------------------------------
-async def handle_fetch_module_queue(ws: WebSocket, session: dict, msg: dict):
-    modules = [m.strip() for m in (msg.get("modules") or []) if m.strip()]
-    if not modules:
-        await send_error(ws, "at least one module is required.")
-        return
-
-    session["module"], session["scope"] = modules[0], "module"
-    session["origin"] = "fetch"
-
-    await send_status(ws, "resolving")
-
-    try:
-        gl   = _gitlab_service()
-        tree = gl.get_repo_tree()
-    except Exception as e:
-        await send_error(ws, f"gitlab connection failed: {e}")
-        return
-
-    all_screens = []
-    module_batches: dict[str, list] = {}
-
-    for module in modules:
-        await send_log(ws, f"[{module}] scanning for screens...", "secondary")
-        candidates = await resolve_module_screens_precise(tree, module)
-        if not candidates:
-            await send_log(ws, f"[{module}] no screens found — skipping.", "danger")
-            continue
-
-        module_screens = []
-        for c in candidates:
-            try:
-                feature_content = gl.fetch_file(c.feature_path)
-                script_content  = gl.fetch_file(c.script_path)
-            except Exception as e:
-                await send_log(ws, f"[{module}] [{c.dir}] gitlab fetch failed: {e} — skipping.", "danger")
-                continue
-            if feature_content is None or script_content is None:
-                await send_log(ws, f"[{module}] [{c.dir}] couldn't read both files — skipping.", "danger")
-                continue
-            entry = {"resolved": c, "feature": feature_content, "script": script_content,
-                     "module": module, "moduleIndex": len(module_screens), "pushed": True}
-            module_screens.append(entry)
-
-        if module_screens:
-            module_batches[module] = module_screens
-            all_screens.extend(module_screens)
-            await send_log(ws, f"[{module}] fetched {len(module_screens)} screen(s).", "success")
-
-    if not all_screens:
-        await send_log(ws, "no screens found across the queued modules.", "danger")
-        await send_status(ws, "not_found")
-        return
-
-    session["screens"] = all_screens
-    session["module_batches"] = module_batches
-    session["pushed"] = True
-    session.pop("feature", None)
-    session.pop("script", None)
-    session.pop("resolved", None)
-
-    await send_log(ws, f"fetched {len(all_screens)} screen(s) across {len(module_batches)} module(s) — review below, then Run.", "success")
-    await send_artifacts(ws, session)
-    await send_status(ws, "awaiting_review")
 
 
 async def handle_fetch(ws: WebSocket, session: dict, msg: dict):
@@ -543,6 +450,47 @@ async def handle_fetch(ws: WebSocket, session: dict, msg: dict):
         tree = gl.get_repo_tree()
     except Exception as e:
         await send_error(ws, f"gitlab connection failed: {e}")
+        return
+
+    if scope == "module":
+        await send_log(ws, f"scanned {len(tree)} files — looking for every screen in {module}...", "secondary")
+
+        candidates = await resolve_module_screens_precise(tree, module)
+        if not candidates:
+            await send_log(ws, f"no screens found under module '{module}'.", "danger")
+            await send_status(ws, "not_found")
+            return
+
+        await send_log(ws, f"found {len(candidates)} screen(s) in {module}: " +
+                       ", ".join(c.dir for c in candidates), "success")
+
+        screens = []
+        for c in candidates:
+            try:
+                feature_content = gl.fetch_file(c.feature_path)
+                script_content  = gl.fetch_file(c.script_path)
+            except Exception as e:
+                await send_log(ws, f"[{c.dir}] gitlab fetch failed: {e} — skipping.", "danger")
+                continue
+            if feature_content is None or script_content is None:
+                await send_log(ws, f"[{c.dir}] couldn't read both files — skipping.", "danger")
+                continue
+            screens.append({"resolved": c, "feature": feature_content, "script": script_content})
+
+        if not screens:
+            await send_log(ws, "matched screen folders but couldn't read any files.", "danger")
+            await send_status(ws, "not_found")
+            return
+
+        session["screens"] = screens
+        session["pushed"]  = True
+        session.pop("feature", None)
+        session.pop("script", None)
+        session.pop("resolved", None)
+
+        await send_log(ws, "fetched — review each screen below, then Run to execute all of them.", "success")
+        await send_artifacts(ws, session)
+        await send_status(ws, "awaiting_review")
         return
 
     await send_log(ws, f"scanned {len(tree)} files — looking for {module} / {screen}...", "secondary")
@@ -681,9 +629,6 @@ async def _generate_one_screen(ws: WebSocket, src: GitLabService, module: str,
 
 
 async def handle_generate(ws: WebSocket, session: dict, msg: dict):
-    """Single-screen generate — UNCHANGED. The conflict popup
-    (Replace/Append/Cancel) still applies here, since this is a single,
-    supervised, foreground action a person is actively watching."""
     module       = (msg.get("module")  or "").strip()
     screen       = (msg.get("screen")  or "").strip()
     scope        = (msg.get("scope")   or "screen").strip()
@@ -692,11 +637,11 @@ async def handle_generate(ws: WebSocket, session: dict, msg: dict):
     if not module:
         await send_error(ws, "module is required.")
         return
-    if not screen:
+    if scope == "screen" and not screen:
         await send_error(ws, "module and screen are required.")
         return
 
-    session["module"], session["screen"], session["scope"] = module, screen, "screen"
+    session["module"], session["screen"], session["scope"] = module, screen, scope
     session["origin"] = "generate"
     session["pushed"] = False
     session.pop("pending_generate", None)
@@ -711,6 +656,91 @@ async def handle_generate(ws: WebSocket, session: dict, msg: dict):
         out_tree = out_gl.get_repo_tree()
     except Exception as e:
         await send_log(ws, f"could not check output repo ({e}) — will resolve path on approve.", "muted")
+
+    if scope == "module":
+        await send_log(ws, "reading source repo structure...", "secondary")
+        try:
+            src      = _source_gitlab_service()
+            src_tree = src.get_repo_tree()
+        except Exception as e:
+            await send_error(ws, f"source gitlab connection failed: {e}")
+            return
+
+        await send_log(ws, f"scanned {len(src_tree)} source files — looking for every screen in {module}...", "secondary")
+
+        filtered_src_tree = filter_tree_by_module(src_tree, module)
+        candidates = await resolve_source_module_screens_precise(filtered_src_tree, module)
+        if not candidates:
+            await send_log(ws, f"no source screens found under module '{module}' in the source repo.", "danger")
+            await send_status(ws, "not_found")
+            return
+
+        await send_log(ws, f"found {len(candidates)} screen(s) in {module}: " +
+                       ", ".join(c.dir for c in candidates), "success")
+
+        conflicts = {}
+        fresh_candidates = []
+
+        for c in candidates:
+            screen_name = c.dir.rsplit("/", 1)[-1]
+            if out_tree is not None:
+                resolved, existed, ef, es = await _check_output_existing(out_gl, out_tree, module, screen_name)
+            else:
+                resolved, existed, ef, es = build_new_path(module, screen_name), False, None, None
+            if existed:
+                conflicts[screen_name] = {
+                    "resolved": resolved, "existing_feature": ef, "existing_script": es, "source": c,
+                }
+            else:
+                fresh_candidates.append((screen_name, c))
+
+        if conflicts:
+            session["pending_generate"] = {
+                "module": module, "scope": "module", "user_request": user_request,
+                "conflicts": conflicts, "fresh": fresh_candidates,
+            }
+            await send_log(
+                ws,
+                f"{len(conflicts)} of {len(candidates)} screen(s) already have tests in the QC repo — "
+                f"choose Replace or Append before continuing.",
+                "accent",
+            )
+            await ws.send_json({
+                "type": "conflict",
+                "scope": "module",
+                "conflicts": [
+                    {"name": name, "existing_feature": c["existing_feature"], "existing_script": c["existing_script"]}
+                    for name, c in conflicts.items()
+                ],
+                "new_count": len(fresh_candidates),
+            })
+            await send_status(ws, "awaiting_conflict")
+            return
+
+        screens = []
+        for screen_name, c in fresh_candidates:
+            screen_request = user_request or f"Generate Cypress tests for the {screen_name} screen in the {module} module."
+            outcome = await _generate_one_screen(ws, src, module, screen_name, c, screen_request, label=screen_name, source_tree=src_tree)
+            if outcome is None:
+                continue
+            resolved = build_new_path(module, screen_name)
+            await send_log(ws, f"[{screen_name}] new screen — will create at {resolved.dir} on approve.", "secondary")
+            screens.append({"resolved": resolved, "feature": outcome["feature"], "script": outcome["script"]})
+
+        if not screens:
+            await send_log(ws, "found source screens but generation failed for all of them.", "danger")
+            await send_status(ws, "not_found")
+            return
+
+        session["screens"] = screens
+        session.pop("feature", None)
+        session.pop("script", None)
+        session.pop("resolved", None)
+
+        await send_log(ws, "generated — review each screen below, then Approve to push all of them.", "success")
+        await send_artifacts(ws, session)
+        await send_status(ws, "awaiting_approval")
+        return
 
     resolved_output = None
     existed = False
@@ -777,7 +807,6 @@ async def handle_generate(ws: WebSocket, session: dict, msg: dict):
 
 
 async def handle_generate_decision(ws: WebSocket, session: dict, msg: dict):
-    """Only reachable from the single-screen conflict popup now."""
     pending = session.get("pending_generate")
     if not pending:
         await send_error(ws, "nothing waiting on a replace/append decision.")
@@ -795,11 +824,65 @@ async def handle_generate_decision(ws: WebSocket, session: dict, msg: dict):
 
     module       = pending["module"]
     user_request = pending["user_request"]
+
+    await send_status(ws, "resolving")
+
+    if pending["scope"] == "module":
+        try:
+            src = _source_gitlab_service()
+        except Exception as e:
+            await send_error(ws, f"source gitlab connection failed: {e}")
+            session.pop("pending_generate", None)
+            return
+
+        screens = []
+
+        for screen_name, c in pending["fresh"]:
+            screen_request = user_request or f"Generate Cypress tests for the {screen_name} screen in the {module} module."
+            outcome = await _generate_one_screen(ws, src, module, screen_name, c, screen_request, label=screen_name)
+            if outcome is None:
+                continue
+            resolved = build_new_path(module, screen_name)
+            await send_log(ws, f"[{screen_name}] new screen — will create at {resolved.dir} on approve.", "secondary")
+            screens.append({"resolved": resolved, "feature": outcome["feature"], "script": outcome["script"]})
+
+        for screen_name, c in pending["conflicts"].items():
+            if decision == "replace":
+                screen_request = user_request or f"Generate Cypress tests for the {screen_name} screen in the {module} module."
+                outcome = await _generate_one_screen(ws, src, module, screen_name, c["source"], screen_request, label=screen_name)
+                if outcome is None:
+                    continue
+                await send_log(ws, f"[{screen_name}] will replace existing tests at {c['resolved'].dir} on approve.", "secondary")
+                screens.append({"resolved": c["resolved"], "feature": outcome["feature"], "script": outcome["script"]})
+            else:
+                await send_log(ws, f"[{screen_name}] appending to existing tests...", "secondary")
+                result = await _append_one_screen(c["existing_feature"], c["existing_script"], append_request, label=screen_name)
+                if not result or "error" in result:
+                    await send_log(ws, f"[{screen_name}] append failed — {result.get('error') if result else 'unknown error'}", "danger")
+                    continue
+                await send_log(ws, f"[{screen_name}] {result.get('summary', 'appended')}", "success")
+                screens.append({"resolved": c["resolved"], "feature": result["feature_file"], "script": result["script"]})
+
+        session.pop("pending_generate", None)
+
+        if not screens:
+            await send_log(ws, "no screens could be generated or appended.", "danger")
+            await send_status(ws, "not_found")
+            return
+
+        session["screens"] = screens
+        session.pop("feature", None)
+        session.pop("script", None)
+        session.pop("resolved", None)
+
+        await send_log(ws, "ready — review each screen below, then Approve to push all of them.", "success")
+        await send_artifacts(ws, session)
+        await send_status(ws, "awaiting_approval")
+        return
+
     screen          = pending["screen"]
     resolved_output = pending["resolved_output"]
     validation      = None
-
-    await send_status(ws, "resolving")
 
     if decision == "replace":
         try:
@@ -852,287 +935,47 @@ async def handle_generate_decision(ws: WebSocket, session: dict, msg: dict):
     await send_status(ws, "awaiting_approval")
 
 
-# ----------------------------------------------------------------------
-# Whole-module GENERATE — unattended two-step flow.
-#
-# Step 1: "discover" resolves every screen across every queued module and
-#   checks the QC repo for which ones already have tests. Nothing is
-#   generated yet — this is a fast, read-only pass so the person can see
-#   what a sweep is about to do before committing to it.
-#
-# Step 2: "start_sweep" runs the actual generation for everything found
-#   in step 1, straight through with no per-screen or per-module pause:
-#   existing screens are auto-replaced (no Replace/Append/Cancel prompt),
-#   new screens are generated fresh. Ends in ONE merged screen list
-#   across every module, ready for per-screen Approve & Push.
-# ----------------------------------------------------------------------
-async def handle_discover(ws: WebSocket, session: dict, msg: dict):
-    modules = [m.strip() for m in (msg.get("modules") or []) if m.strip()]
-    user_request = (msg.get("request") or "").strip()
-
-    if not modules:
-        await send_error(ws, "at least one module is required.")
-        return
-
-    session["scope"] = "module"
-    session["origin"] = "generate"
-    session["pushed"] = False
-    session.pop("pending_generate", None)
-    session.pop("screens", None)
-    session.pop("module_batches", None)
-
-    await send_status(ws, "resolving")
-
-    await send_log(ws, "checking the QC repo for existing tests...", "secondary")
-    out_tree = None
-    out_gl   = None
-    try:
-        out_gl   = _gitlab_service()
-        out_tree = out_gl.get_repo_tree()
-    except Exception as e:
-        await send_log(ws, f"could not check output repo ({e}) — every screen will be treated as new.", "muted")
-
-    try:
-        src      = _source_gitlab_service()
-        src_tree = src.get_repo_tree()
-    except Exception as e:
-        await send_error(ws, f"source gitlab connection failed: {e}")
-        return
-
-    per_module = {}
-    summary_modules = []
-    grand_total = grand_new = grand_existing = 0
-
-    for module in modules:
-        await send_log(ws, f"[{module}] scanning source repo for screens...", "secondary")
-        filtered_src_tree = filter_tree_by_module(src_tree, module)
-        candidates = await resolve_source_module_screens_precise(filtered_src_tree, module)
-        if not candidates:
-            await send_log(ws, f"[{module}] no source screens found — skipping.", "danger")
-            summary_modules.append({"module": module, "total": 0, "new": 0, "existing": 0, "screens": []})
-            continue
-
-        fresh = []
-        conflicts = {}
-        screen_summaries = []
-        for c in candidates:
-            screen_name = c.dir.rsplit("/", 1)[-1]
-            if out_tree is not None:
-                resolved, existed, ef, es = await _check_output_existing(out_gl, out_tree, module, screen_name)
-            else:
-                resolved, existed, ef, es = build_new_path(module, screen_name), False, None, None
-            screen_summaries.append({"name": screen_name, "existing": existed})
-            if existed:
-                conflicts[screen_name] = {"resolved": resolved, "existing_feature": ef, "existing_script": es, "source": c}
-            else:
-                fresh.append((screen_name, c))
-
-        per_module[module] = {"fresh": fresh, "conflicts": conflicts, "candidates": candidates}
-        new_count = len(fresh)
-        existing_count = len(conflicts)
-        summary_modules.append({
-            "module": module, "total": new_count + existing_count,
-            "new": new_count, "existing": existing_count, "screens": screen_summaries,
-        })
-        grand_total += new_count + existing_count
-        grand_new += new_count
-        grand_existing += existing_count
-        await send_log(
-            ws,
-            f"[{module}] {new_count + existing_count} screen(s) — {new_count} new, {existing_count} existing.",
-            "success",
-        )
-
-    if grand_total == 0:
-        await send_log(ws, "no screens found across the queued modules.", "danger")
-        await send_status(ws, "not_found")
-        return
-
-    session["pending_sweep"] = {"modules": modules, "user_request": user_request, "per_module": per_module}
-
-    await ws.send_json({
-        "type": "discovery",
-        "modules": summary_modules,
-        "grand": {"total": grand_total, "new": grand_new, "existing": grand_existing},
-    })
-    await send_status(ws, "awaiting_sweep_confirm")
-
-
-async def handle_start_sweep(ws: WebSocket, session: dict, msg: dict):
-    """Runs the unattended sweep. `decision` controls what happens to
-    screens that already have existing tests (mdata["conflicts"]):
-      - "replace" (default): regenerate from source and overwrite, same
-        as before.
-      - "append": apply ONE instruction (append_request) to every
-        conflicting screen's existing feature/script via the append
-        agent — the same instruction is reused across all of them,
-        since there's no one there to type a per-screen note overnight.
-    New screens (mdata["fresh"]) are always generated fresh either way.
-    Still fully unattended: no per-screen or per-module pause regardless
-    of decision."""
-    pending = session.get("pending_sweep")
-    if not pending:
-        await send_error(ws, "nothing queued for a sweep — run Discover first.")
-        return
-
-    decision       = (msg.get("decision") or "replace").strip().lower()
-    append_request = (msg.get("append_request") or "").strip()
-    if decision not in ("replace", "append"):
-        await send_error(ws, "decision must be 'replace' or 'append'.")
-        return
-    if decision == "append" and not append_request:
-        await send_error(ws, "describe what should be added to the existing screens.")
-        return
-
-    modules      = pending["modules"]
-    user_request = pending["user_request"]
-    per_module   = pending["per_module"]
-
-    if decision == "append":
-        total_fresh = sum(len(per_module.get(m, {}).get("fresh", [])) for m in modules)
-        if total_fresh > 0:
-            await send_error(
-                ws,
-                f"{total_fresh} screen(s) in this sweep are new and have no existing tests to "
-                f"append to — use Replace instead, or re-run Discover after narrowing the queue "
-                f"to modules where every screen already has tests.",
-            )
-            return
-
-    session.pop("pending_sweep", None)
-    await send_status(ws, "running")
-
-    try:
-        src = _source_gitlab_service()
-    except Exception as e:
-        await send_error(ws, f"source gitlab connection failed: {e}")
-        return
-
-    all_screens: list = []
-    module_batches: dict[str, list] = {}
-
-    for module in modules:
-        mdata = per_module.get(module)
-        if not mdata:
-            continue
-
-        module_screens = []
-
-        for screen_name, c in mdata["fresh"]:
-            screen_request = user_request or f"Generate Cypress tests for the {screen_name} screen in the {module} module."
-            outcome = await _generate_one_screen(ws, src, module, screen_name, c, screen_request, label=f"{module}/{screen_name}")
-            if outcome is None:
-                continue
-            resolved = build_new_path(module, screen_name)
-            await send_log(ws, f"[{module}/{screen_name}] new — will create at {resolved.dir}.", "secondary")
-            module_screens.append({
-                "resolved": resolved, "feature": outcome["feature"], "script": outcome["script"],
-                "module": module, "moduleIndex": len(module_screens), "pushed": False,
-            })
-
-        for screen_name, c in mdata["conflicts"].items():
-            if decision == "replace":
-                screen_request = user_request or f"Generate Cypress tests for the {screen_name} screen in the {module} module."
-                outcome = await _generate_one_screen(ws, src, module, screen_name, c["source"], screen_request, label=f"{module}/{screen_name}")
-                if outcome is None:
-                    continue
-                await send_log(ws, f"[{module}/{screen_name}] existing tests found — auto-replacing at {c['resolved'].dir}.", "secondary")
-                module_screens.append({
-                    "resolved": c["resolved"], "feature": outcome["feature"], "script": outcome["script"],
-                    "module": module, "moduleIndex": len(module_screens), "pushed": False,
-                })
-            else:
-                await send_log(ws, f"[{module}/{screen_name}] appending to existing tests...", "secondary")
-                result = await _append_one_screen(c["existing_feature"], c["existing_script"], append_request, label=f"{module}/{screen_name}")
-                if not result or "error" in result:
-                    await send_log(ws, f"[{module}/{screen_name}] append failed — {result.get('error') if result else 'unknown error'} — skipping.", "danger")
-                    continue
-                await send_log(ws, f"[{module}/{screen_name}] {result.get('summary', 'appended')}", "success")
-                module_screens.append({
-                    "resolved": c["resolved"], "feature": result["feature_file"], "script": result["script"],
-                    "module": module, "moduleIndex": len(module_screens), "pushed": False,
-                })
-
-        if module_screens:
-            module_batches[module] = module_screens
-            all_screens.extend(module_screens)
-            await send_log(ws, f"[{module}] {len(module_screens)} screen(s) ready.", "success")
-        else:
-            await send_log(ws, f"[{module}] no screens could be generated.", "danger")
-
-    if not all_screens:
-        await send_log(ws, "sweep finished — nothing could be generated across the queued modules.", "danger")
-        await send_status(ws, "not_found")
-        return
-
-    session["screens"] = all_screens
-    session["module_batches"] = module_batches
-    session.pop("feature", None)
-    session.pop("script", None)
-    session.pop("resolved", None)
-
-    await send_log(
-        ws,
-        f"sweep complete — {len(all_screens)} screen(s) across {len(module_batches)} module(s). "
-        f"Review each below and Approve & Push individually.",
-        "success",
-    )
-    await send_artifacts(ws, session)
-    await send_status(ws, "awaiting_approval")
-
-
 async def handle_approve(ws: WebSocket, session: dict, msg: dict | None = None):
-    """Approves and pushes to GitLab.
-
-    Module scope is now PER SCREEN: msg.module + msg.index identify
-    exactly one screen inside session["module_batches"][module] (or
-    session["screens"] if module_batches isn't populated, e.g. the older
-    single-batch fetch path). Only that one screen is pushed; the rest of
-    the merged list is untouched and stays available for its own
-    Approve & Push later. This replaces the old whole-module-at-once push.
-    """
+    """Approves and pushes to GitLab. If the UI sent edited content in
+    msg (Task C — inline edit before commit), that edited text replaces
+    the AI-generated content in the session BEFORE the push, so what's
+    pushed to GitLab is exactly what the human reviewed. Works for both
+    single-screen (msg.feature / msg.script) and module scope
+    (msg.edits = [{index, feature, script}, ...] for the selected
+    entries in session['screens'])."""
     msg = msg or {}
 
-    if session.get("scope") == "module" and (session.get("screens") or session.get("module_batches")):
-        target_module = msg.get("module") or session.get("module")
-        batches = session.get("module_batches") or {}
-        screens_list = batches.get(target_module) if target_module in batches else session.get("screens")
+    if session.get("scope") == "module" and session.get("screens"):
+        for edit in msg.get("edits") or []:
+            i = edit.get("index")
+            if not isinstance(i, int) or i < 0 or i >= len(session["screens"]):
+                continue
+            if isinstance(edit.get("feature"), str):
+                session["screens"][i]["feature"] = edit["feature"]
+            if isinstance(edit.get("script"), str):
+                session["screens"][i]["script"] = edit["script"]
 
-        if not screens_list:
-            await send_error(ws, f"no fetched/generated screens found for module '{target_module}'.")
-            return
-
-        index = msg.get("index")
-        if not isinstance(index, int) or index < 0 or index >= len(screens_list):
-            await send_error(ws, "no screen selected to approve — pick one from the list first.")
-            return
-
-        entry = screens_list[index]
-        if isinstance(msg.get("feature"), str):
-            entry["feature"] = msg["feature"]
-        if isinstance(msg.get("script"), str):
-            entry["script"] = msg["script"]
-
-        resolved = entry["resolved"]
         await send_status(ws, "running")
         try:
             gl = _gitlab_service()
-            gl.create_or_update_file(
-                resolved.feature_path, entry["feature"],
-                commit_message=f"QC: add/update feature file for {target_module}/{resolved.slug}",
-            )
-            gl.create_or_update_file(
-                resolved.script_path, entry["script"],
-                commit_message=f"QC: add/update cypress script for {target_module}/{resolved.slug}",
-            )
+            for s in session["screens"]:
+                resolved = s["resolved"]
+                gl.create_or_update_file(
+                    resolved.feature_path, s["feature"],
+                    commit_message=f"QC: add/update feature file for {session.get('module')}/{resolved.slug}",
+                )
+                gl.create_or_update_file(
+                    resolved.script_path, s["script"],
+                    commit_message=f"QC: add/update cypress script for {session.get('module')}/{resolved.slug}",
+                )
         except Exception as e:
             await send_error(ws, f"gitlab push failed: {e}")
             return
 
-        entry["pushed"] = True
-        await send_log(ws, f"pushed {target_module}/{resolved.slug} to gitlab.", "success")
+        session["pushed"] = True
+        await send_log(ws, f"pushed {len(session['screens'])} screen(s) to gitlab.", "success")
         await send_artifacts(ws, session)
-        await send_status(ws, "awaiting_approval" if any(not s.get("pushed") for s in screens_list) else "awaiting_review")
+        await send_status(ws, "awaiting_review")
         return
 
     if not session.get("feature") or not session.get("script") or not session.get("resolved"):
@@ -1167,98 +1010,6 @@ async def handle_approve(ws: WebSocket, session: dict, msg: dict | None = None):
     await send_log(ws, f"pushed to gitlab at {resolved.dir}", "success")
     await send_artifacts(ws, session)
     await send_status(ws, "awaiting_review")
-
-
-async def handle_approve_all(ws: WebSocket, session: dict, msg: dict | None = None):
-    """Bulk counterpart to handle_approve — pushes EVERY not-yet-pushed
-    screen across every module in the merged sweep list, one after
-    another, using whatever content is currently in each entry (any
-    inline edits already saved via a prior single-screen edit are
-    included since they're written straight into the entry, same as the
-    per-screen approve path). Only meaningful in module scope."""
-    if session.get("scope") != "module" or not session.get("screens"):
-        await send_error(ws, "nothing to approve — generate or fetch a module first.")
-        return
-
-    screens_list = session["screens"]
-    pending = [s for s in screens_list if not s.get("pushed")]
-    if not pending:
-        await send_error(ws, "everything has already been pushed.")
-        return
-
-    await send_status(ws, "running")
-    try:
-        gl = _gitlab_service()
-    except Exception as e:
-        await send_error(ws, f"gitlab connection failed: {e}")
-        return
-
-    pushed_count = 0
-    for entry in pending:
-        resolved = entry["resolved"]
-        module   = entry.get("module") or session.get("module")
-        try:
-            gl.create_or_update_file(
-                resolved.feature_path, entry["feature"],
-                commit_message=f"QC: add/update feature file for {module}/{resolved.slug}",
-            )
-            gl.create_or_update_file(
-                resolved.script_path, entry["script"],
-                commit_message=f"QC: add/update cypress script for {module}/{resolved.slug}",
-            )
-        except Exception as e:
-            await send_log(ws, f"[{module}/{resolved.slug}] push failed: {e} — skipping.", "danger")
-            continue
-        entry["pushed"] = True
-        pushed_count += 1
-        await send_log(ws, f"[{module}/{resolved.slug}] pushed.", "success")
-
-    await send_log(ws, f"pushed {pushed_count}/{len(pending)} screen(s) to gitlab.", "success")
-    await send_artifacts(ws, session)
-    await send_status(ws, "awaiting_approval" if any(not s.get("pushed") for s in screens_list) else "awaiting_review")
-
-
-async def handle_reject_screen(ws: WebSocket, session: dict, msg: dict):
-    """Drops ONE screen from the merged sweep list — msg.module +
-    msg.index identify it the same way handle_approve does. The rest of
-    the list, and their pushed/unpushed state, is untouched. If that was
-    the last screen left, the session falls back to idle/not_found the
-    same way an empty sweep result would."""
-    if session.get("scope") != "module" or not session.get("screens"):
-        await send_error(ws, "nothing to reject.")
-        return
-
-    target_module = msg.get("module") or session.get("module")
-    batches = session.get("module_batches") or {}
-    screens_list = batches.get(target_module) if target_module in batches else session.get("screens")
-    index = msg.get("index")
-
-    if not screens_list or not isinstance(index, int) or index < 0 or index >= len(screens_list):
-        await send_error(ws, "no screen selected to reject.")
-        return
-
-    removed = screens_list.pop(index)
-    # Re-number moduleIndex for the remaining entries in this module's
-    # batch so future approve/reject-by-index calls still line up.
-    for i, s in enumerate(screens_list):
-        s["moduleIndex"] = i
-
-    # session["screens"] is the flat merged view across all modules —
-    # remove the same object from there too if it's a different list.
-    flat = session.get("screens")
-    if flat is not None and flat is not screens_list and removed in flat:
-        flat.remove(removed)
-
-    if not session.get("screens"):
-        await send_log(ws, "rejected — no screens left in the list.", "muted")
-        session.pop("screens", None)
-        session.pop("module_batches", None)
-        await send_status(ws, "not_found")
-        return
-
-    await send_log(ws, f"rejected {target_module}/{removed['resolved'].slug} — removed from the list.", "muted")
-    await send_artifacts(ws, session)
-    await send_status(ws, "awaiting_approval" if any(not s.get("pushed") for s in session["screens"]) else "awaiting_review")
 
 
 async def _fetch_shared_fixtures(ws: WebSocket) -> dict:
@@ -1329,15 +1080,15 @@ async def handle_run(ws: WebSocket, session: dict):
     if session.get("scope") == "module" and session.get("screens"):
         screens = session["screens"]
 
-        if session.get("origin") == "generate" and not all(s.get("pushed") for s in screens):
-            await send_error(ws, "approve & push every screen before running.")
+        if session.get("origin") == "generate" and not session.get("pushed"):
+            await send_error(ws, "approve the generated files before running.")
             return
 
         clear_screenshot_stash()
         session["run_results"] = []
 
         await send_status(ws, "running")
-        await send_log(ws, f"cypress: running {len(screens)} screen(s) across the merged list...", "secondary")
+        await send_log(ws, f"cypress: running {len(screens)} screen(s) in this module...", "secondary")
 
         fixtures = await _fetch_shared_fixtures(ws)
 
@@ -1345,7 +1096,7 @@ async def handle_run(ws: WebSocket, session: dict):
         for i, s in enumerate(screens, start=1):
             resolved = s["resolved"]
             slug     = resolved.slug
-            label    = f"{s.get('module', '')}/{resolved.dir}" if s.get("module") else resolved.dir
+            label    = resolved.dir
 
             await send_log(ws, f"[{i}/{len(screens)}] {label} — preparing workspace...", "secondary")
             await send_log(ws, f"[{i}/{len(screens)}] {label} — starting run...", "secondary")
@@ -1476,8 +1227,12 @@ async def qc_session(websocket: WebSocket):
         "module": None, "screen": None, "origin": None,
         "feature": None, "script": None, "resolved": None,
         "pushed": False, "process": None, "pending_generate": None,
-        "pending_sweep": None,
         "current_task": None,
+        # Test-target config (baseUrl / dbName / userName / password), set
+        # from the frontend's env popup via the "set_env" action. Session
+        # scoped — persists until changed, survives reject/terminate/reset,
+        # NOT tied to any single run. No fallback to cypress.env.json:
+        # run is refused until this is set (see handle_run's guard).
         "test_env": None,
     }
 
@@ -1486,26 +1241,14 @@ async def qc_session(websocket: WebSocket):
             msg    = await websocket.receive_json()
             action = msg.get("action")
 
-            if action == "list_repo_structure":
-                session["current_task"] = asyncio.create_task(handle_list_repo_structure(websocket, session))
-
-            elif action == "set_env":
+            if action == "set_env":
                 session["current_task"] = asyncio.create_task(handle_set_env(websocket, session, msg))
 
             elif action == "fetch":
                 session["current_task"] = asyncio.create_task(handle_fetch(websocket, session, msg))
 
-            elif action == "fetch_module_queue":
-                session["current_task"] = asyncio.create_task(handle_fetch_module_queue(websocket, session, msg))
-
             elif action == "generate":
                 session["current_task"] = asyncio.create_task(handle_generate(websocket, session, msg))
-
-            elif action == "discover":
-                session["current_task"] = asyncio.create_task(handle_discover(websocket, session, msg))
-
-            elif action == "start_sweep":
-                session["current_task"] = asyncio.create_task(handle_start_sweep(websocket, session, msg))
 
             elif action == "generate_decision":
                 session["current_task"] = asyncio.create_task(handle_generate_decision(websocket, session, msg))
@@ -1513,21 +1256,13 @@ async def qc_session(websocket: WebSocket):
             elif action == "approve":
                 session["current_task"] = asyncio.create_task(handle_approve(websocket, session, msg))
 
-            elif action == "approve_all":
-                session["current_task"] = asyncio.create_task(handle_approve_all(websocket, session, msg))
-
-            elif action == "reject_screen":
-                session["current_task"] = asyncio.create_task(handle_reject_screen(websocket, session, msg))
-
             elif action == "reject":
                 session["feature"] = None
                 session["script"]  = None
                 session["resolved"] = None
                 session["pushed"]  = False
                 session.pop("screens", None)
-                session.pop("module_batches", None)
                 session.pop("pending_generate", None)
-                session.pop("pending_sweep", None)
                 session.pop("run_results", None)
                 clear_screenshot_stash()
                 await send_log(websocket, "rejected — nothing pushed.", "muted")
@@ -1561,9 +1296,7 @@ async def qc_session(websocket: WebSocket):
                 session["resolved"] = None
                 session["pushed"]  = False
                 session.pop("screens", None)
-                session.pop("module_batches", None)
                 session.pop("pending_generate", None)
-                session.pop("pending_sweep", None)
                 session.pop("run_results", None)
                 clear_screenshot_stash()
                 await send_log(

@@ -107,45 +107,6 @@ class GitLabService:
         self._tree_cache_at = now
         return paths
 
-    def get_module_screen_map(self, force_refresh: bool = True) -> dict[str, list[str]]:
-        """Live module -> [screen, ...] map, derived from the QC repo's real
-        folder structure: Regression-Testing/{Module}_Module/{Screen}/...
-
-        Module names are returned WITHOUT the "_Module" suffix (e.g.
-        "SkillManagement", not "SkillManagement_Module") to match what
-        architecture_resolver's `_pascal(module) + "_Module"` already
-        expects as input elsewhere in this app — so a name picked from
-        this map can be passed straight into the existing fetch/generate
-        flow unchanged.
-
-        Screens are every distinct folder found directly under a module
-        folder, regardless of whether that screen folder currently has a
-        complete .feature + .js pair — an in-progress/partial folder is
-        still a real screen someone is working on and should be pickable.
-
-        force_refresh defaults to True (bypassing get_repo_tree's 45s TTL
-        cache) since this powers a live dropdown that's meant to reflect
-        the repo's current state at the moment it's opened, not whatever
-        happened to be cached from an earlier, unrelated call."""
-        tree = self.get_repo_tree(force_refresh=force_refresh)
-
-        modules: dict[str, set[str]] = {}
-        for path in tree:
-            parts = path.split("/")
-            # Regression-Testing / {Module}_Module / {Screen} / ...
-            if len(parts) < 3 or not parts[1].endswith("_Module"):
-                continue
-            module_name = parts[1][: -len("_Module")]
-            screen_name = parts[2]
-            if not module_name or not screen_name:
-                continue
-            modules.setdefault(module_name, set()).add(screen_name)
-
-        return {
-            module: sorted(screens)
-            for module, screens in sorted(modules.items())
-        }
-
     def fetch_file(self, path: str) -> str | None:
         try:
             f = self._project.files.get(file_path=path, ref=self._branch)
