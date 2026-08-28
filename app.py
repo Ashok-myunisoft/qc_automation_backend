@@ -3,11 +3,8 @@ import base64
 import logging
 import posixpath
 import re
-import tempfile
-from pathlib import Path
 import logger_config
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from service.project_reader import ProjectReader
 from service.gitlab_service import GitLabService
 from service.architecture_resolver import (
     build_new_path, ResolvedSource,
@@ -36,7 +33,11 @@ validate_agent         = ValidateAgent()
 append_agent           = AppendAgent()
 business_context_agent = BusinessContextAgent()
 
-reader = ProjectReader()
+# ProjectReader removed: it re-walked a temp dir with its own generic
+# IGNORE_DIRS filtering (redundant with the file selection already done
+# below), and its "target" ignore entry silently dropped this repo's real
+# targetmaster screen folder. source_files is now built directly from the
+# in-memory `fetched` dict instead.
 
 
 def _gitlab_service() -> GitLabService:
@@ -51,10 +52,35 @@ _IMPORT_RE = re.compile(r"""from\s+['"]([^'"]+)['"]""")
 
 _MAX_IMPORT_DEPTH = 1
 _MAX_EXTRA_FILES = 15
+
+# Hard ceiling on total source_files content sent to ProjectAnalysisAgent,
+# in characters. This is the safety net for the case items 1-3 can't fully
+# prevent on their own (an unusually large screen folder or import graph) —
+# same "generous filter, but bail out before the LLM call blows up" pattern
+# already used by architecture_resolver.filter_tree_by_module for the path
+# list sent to ArchitectureAgent. Tune against the model's real context
+# window; this is deliberately conservative.
 _MAX_SOURCE_CHARS = 150_000
+
+# Extensions ProjectAnalysisAgent actually gets value from. Kept in sync
+# with what ProjectReader used to accept for source_files (SOURCE_EXTENSIONS
+# minus the ones _fetch_source_project_context already excludes via
+# _SKIP_SUFFIXES below, e.g. .spec.ts/.scss/.css/.json).
+_ANALYSIS_EXTENSIONS = {".ts", ".js", ".tsx", ".jsx", ".html", ".xml", ".yaml", ".yml", ".cs", ".java", ".py"}
 
 
 def _resolve_import_to_tree_path(import_path: str, current_dir: str, tree_set: set) -> str | None:
+    """Resolves a TS import specifier to a real file path in the repo tree.
+    Handles both styles seen in this codebase:
+      - relative ('./x', '../../lib/x') -> resolved against the importing
+        file's own directory
+      - bare, repo-root-relative specifiers (this project's Nx-style TS
+        path mapping, e.g. 'libs/gbdirectives/src/lib/gb-form-controls.module',
+        'features/gbdialogbox/gbdialogbox.component') -> tried directly
+        against the tree, since these already read like real repo paths
+    External packages (@angular/*, rxjs, etc.) simply won't match anything
+    in the tree and are silently skipped — no explicit allow/deny list
+    needed."""
     bases = [posixpath.normpath(posixpath.join(current_dir, import_path))] if import_path.startswith(".") else [import_path]
     for base in bases:
         for suffix in ("", ".ts", "/index.ts"):
@@ -66,81 +92,160 @@ def _resolve_import_to_tree_path(import_path: str, current_dir: str, tree_set: s
 
 def _fetch_source_project_context(src: GitLabService, resolved: ResolvedSource,
                                    source_tree: list[str] | None = None) -> dict:
+    """Pulls every file in the resolved source-repo folder, plus (if
+    source_tree is given) shared library files it imports up to
+    _MAX_IMPORT_DEPTH hops / _MAX_EXTRA_FILES total, and returns a
+    project_context dict shaped exactly like ProjectReader used to
+    produce — {"folder_structure", "source_files", "primary_dir", ...} —
+    but built directly from the files fetched here, in memory, with no
+    disk write/re-read step in between.
+
+    Previously this wrote every fetched file to a temp dir and called
+    ProjectReader.read_project(temp_dir), which re-walked that temp dir
+    and re-applied its OWN separate, generic ignore/extension filtering —
+    redundant with the deliberate file selection already done here, and
+    actively harmful: ProjectReader's IGNORE_DIRS contained "target" (a
+    Java/Maven build-output convention) which silently deleted this
+    repo's real 'target' screen folder (targetmaster) from every
+    analysis run, since path-segment matching doesn't distinguish a
+    build-output dir from a real folder that happens to share the name.
+    Building source_files directly from `fetched` removes that entire
+    redundant, bug-prone pass.
+
+    If source_tree is given, ALSO follows local TS imports out of the
+    screen's own files into shared library components (this codebase keeps
+    reusable components like gb-picklist/gb-input in a separate libs/
+    folder, imported by the screen rather than defined in it) — up to
+    _MAX_IMPORT_DEPTH hops and _MAX_EXTRA_FILES total. Without this,
+    ProjectAnalysisAgent never sees where a field's real data-cy attribute
+    actually comes from when it's defined inside the LIBRARY component's
+    own template, not the screen's — confirmed to be why locators were
+    coming back empty/invented for library-backed fields.
+
+    IMPORTANT: callers MUST pass the FULL, unfiltered source tree here, not
+    the module-filtered one — library component files (gbcheckbox,
+    gbcombobox, gbinput, etc.) never contain the module or screen name in
+    their own path, so a module-name filter strips every one of them out
+    before this function ever gets a chance to look for them. This check
+    is free (pure Python set membership, no LLM involved), so there's no
+    cost to using the full tree here even though the filtered tree is
+    still correctly used for the separate ArchitectureAgent LLM call."""
+    # Skip file types that never carry locator/business-logic signal and
+    # only add noise (and tokens) to project_context: unit test specs,
+    # stylesheets, and raw JSON config. Angular repos routinely keep these
+    # alongside .ts/.html in the same screen folder.
     _SKIP_SUFFIXES = (".spec.ts", ".scss", ".css", ".json")
 
-    with tempfile.TemporaryDirectory() as temp_dir:
-        target_dir = Path(temp_dir) / resolved.dir
-        target_dir.mkdir(parents=True, exist_ok=True)
+    fetched: dict[str, str] = {}
 
-        fetched: dict[str, str] = {}
-        for filename in resolved.files:
-            if filename.endswith(_SKIP_SUFFIXES):
-                continue
-            path = f"{resolved.dir}/{filename}"
-            content = src.fetch_file(path)
-            if content is None:
-                logger.warning("primary dir fetch failed (404 or missing): %s", path)
-                continue
-            (target_dir / filename).write_text(content, encoding="utf-8")
-            fetched[path] = content
-        logger.info("primary dir %s: resolved.files=%s, successfully fetched=%d", resolved.dir, resolved.files, len(fetched))    
+    for filename in resolved.files:
+        if filename.endswith(_SKIP_SUFFIXES):
+            continue
+        path = f"{resolved.dir}/{filename}"
+        content = src.fetch_file(path)
+        if content is None:
+            logger.warning(
+                "primary dir fetch returned None (404 or missing) for path=%r (branch=%r, env_prefix=%r)",
+                path, src.branch, src._env_prefix,
+            )
+            continue
+        fetched[path] = content
 
-        if source_tree:
-            tree_set = set(source_tree)
-            extra_fetched = 0
-            frontier = list(fetched.items())
-            seen_paths = set(fetched.keys())
+    logger.info(
+        "primary dir %s: resolved.files=%d file(s) listed, %d successfully fetched: %s",
+        resolved.dir, len(resolved.files or []), len(fetched), list(fetched.keys()),
+    )
 
-            for _ in range(_MAX_IMPORT_DEPTH):
-                if extra_fetched >= _MAX_EXTRA_FILES or not frontier:
-                    break
-                next_frontier = []
-                for path, content in frontier:
-                    if not path.endswith(".ts"):
+    if source_tree:
+        tree_set = set(source_tree)
+        extra_fetched = 0
+        frontier = list(fetched.items())
+        seen_paths = set(fetched.keys())
+
+        for _ in range(_MAX_IMPORT_DEPTH):
+            if extra_fetched >= _MAX_EXTRA_FILES or not frontier:
+                break
+            next_frontier = []
+            for path, content in frontier:
+                if not path.endswith(".ts"):
+                    continue
+                current_dir = path.rsplit("/", 1)[0] if "/" in path else ""
+                for import_path in _IMPORT_RE.findall(content):
+                    if extra_fetched >= _MAX_EXTRA_FILES:
+                        break
+                    resolved_ts = _resolve_import_to_tree_path(import_path, current_dir, tree_set)
+                    if not resolved_ts or resolved_ts in seen_paths:
                         continue
-                    current_dir = path.rsplit("/", 1)[0] if "/" in path else ""
-                    for import_path in _IMPORT_RE.findall(content):
-                        if extra_fetched >= _MAX_EXTRA_FILES:
-                            break
-                        resolved_ts = _resolve_import_to_tree_path(import_path, current_dir, tree_set)
-                        if not resolved_ts or resolved_ts in seen_paths:
-                            continue
-                        html_sibling = resolved_ts[:-3] + ".html" if resolved_ts.endswith(".ts") else None
+                    # Prefer ONLY the .html sibling for a component import
+                    # — that's where a data-cy binding actually lives,
+                    # not the .ts logic file. Fetching the .ts too (and
+                    # then following ITS imports) is what caused the
+                    # depth-2 cascade blowing past the model's context
+                    # window on screens with a large shared-lib surface.
+                    # Only fall back to the .ts itself if there's no
+                    # .html sibling (e.g. a service/module file, not a
+                    # component) — and even then we don't recurse into
+                    # it (see next_frontier below).
+                    html_sibling = resolved_ts[:-3] + ".html" if resolved_ts.endswith(".ts") else None
 
-                        fetched_html = False
-                        if html_sibling and html_sibling not in seen_paths:
-                            html_content = src.fetch_file(html_sibling)
-                            if html_content is not None:
-                                seen_paths.add(html_sibling)
-                                dest = Path(temp_dir) / html_sibling
-                                dest.parent.mkdir(parents=True, exist_ok=True)
-                                dest.write_text(html_content, encoding="utf-8")
-                                extra_fetched += 1
-                                fetched_html = True
+                    fetched_html = False
+                    if html_sibling and html_sibling not in seen_paths:
+                        html_content = src.fetch_file(html_sibling)
+                        if html_content is not None:
+                            seen_paths.add(html_sibling)
+                            fetched[html_sibling] = html_content
+                            extra_fetched += 1
+                            fetched_html = True
 
-                        if not fetched_html and resolved_ts not in seen_paths:
-                            ts_content = src.fetch_file(resolved_ts)
-                            if ts_content is not None:
-                                seen_paths.add(resolved_ts)
-                                dest = Path(temp_dir) / resolved_ts
-                                dest.parent.mkdir(parents=True, exist_ok=True)
-                                dest.write_text(ts_content, encoding="utf-8")
-                                extra_fetched += 1
-                                next_frontier.append((resolved_ts, ts_content))
-                frontier = next_frontier
+                    if not fetched_html and resolved_ts not in seen_paths:
+                        ts_content = src.fetch_file(resolved_ts)
+                        if ts_content is not None:
+                            seen_paths.add(resolved_ts)
+                            fetched[resolved_ts] = ts_content
+                            extra_fetched += 1
+                            # Only recurse into .ts files that had no
+                            # .html sibling (services/modules) — a
+                            # component's .ts logic isn't needed once
+                            # we already have its template.
+                            next_frontier.append((resolved_ts, ts_content))
+            frontier = next_frontier
 
-            if extra_fetched:
-                logger.info(
-                    "pulled in %d additional library file(s) referenced by %s (up to depth %d)",
-                    extra_fetched, resolved.dir, _MAX_IMPORT_DEPTH,
-                )
+        if extra_fetched:
+            logger.info(
+                "pulled in %d additional library file(s) referenced by %s (up to depth %d)",
+                extra_fetched, resolved.dir, _MAX_IMPORT_DEPTH,
+            )
 
-        project = reader.read_project(temp_dir)
-        project["primary_dir"] = resolved.dir
-        return project
+    # Build project_context directly from `fetched`, in insertion order —
+    # screen's own files first (inserted above), then import-followed
+    # extras — matching the ordering _enforce_source_char_budget expects
+    # ("screen's own files first, then import-followed extras").
+    source_files = []
+    for path, content in fetched.items():
+        suffix = "." + path.rsplit(".", 1)[-1].lower() if "." in path.rsplit("/", 1)[-1] else ""
+        if suffix not in _ANALYSIS_EXTENSIONS:
+            continue
+        source_files.append({"path": path, "language": suffix, "content": content})
+
+    return {
+        "folder_structure": list(fetched.keys()),
+        "package_json": "",
+        "requirements_txt": "",
+        "readme": "",
+        "source_files": source_files,
+        "primary_dir": resolved.dir,
+    }
 
 
 def _enforce_source_char_budget(project_context: dict, limit: int = _MAX_SOURCE_CHARS) -> dict:
+    """Hard safety net, run right before project_context is handed to
+    ProjectAnalysisAgent. Keeps files (in their existing order — screen's
+    own files first, then import-followed extras) until the running total
+    would exceed `limit`, then drops the rest and logs it. This is what
+    actually prevents a context_length_exceeded 400 from OpenAI on an
+    outlier screen (unusually large folder or import graph) — the fetch-time
+    filtering in _fetch_source_project_context reduces the average case but
+    can't bound the worst case on its own."""
     files = project_context.get("source_files", []) or []
     total = 0
     kept = []
@@ -165,6 +270,12 @@ def _enforce_source_char_budget(project_context: dict, limit: int = _MAX_SOURCE_
 
 
 def _extract_source_hints(project_context: dict, limit: int = 30) -> list[str]:
+    """Pulls candidate identifiers out of the already-fetched Angular source
+    for BusinessContextAgent to start from — API route fragments and form
+    field names tend to survive table/column renames better than a screen's
+    display name does (see prompts/business_context_prompt.txt). This is a
+    best-effort regex scan, not a real TS/HTML parser — good enough as a
+    starting signal, not treated as ground truth by the agent itself."""
     route_re = re.compile(r"""['"`]/api/([A-Za-z0-9_/-]+)['"`]""")
     field_re = re.compile(r"""(?:formControlName|data-cy|\[data-cy\])\s*=\s*['"]([A-Za-z0-9_]+)['"]""")
 
@@ -184,6 +295,29 @@ def _extract_source_hints(project_context: dict, limit: int = 30) -> list[str]:
 
 
 def _build_locator_map(project_analysis: dict) -> dict[str, str]:
+    """Distills the full project_analysis JSON (from ProjectAnalysisAgent)
+    down to a small name -> real, verified locator lookup — just
+    {name: data-cy value}, nothing else from that larger structure. Handed
+    to ScriptGenerateAgent so it can use an already-confirmed selector
+    instead of guessing one from the name that ended up quoted in the
+    Gherkin.
+
+    Walks FOUR sources within each page, all of which carry real
+    per-element locators in ProjectAnalysisAgent's schema:
+      - forms[].fields[]                          (field-level inputs)
+      - business_actions[]                        (Save/Delete/Print/etc. buttons)
+      - tables[].row_actions[] / toolbar_actions[] (grid row + toolbar buttons)
+      - dialogs[].confirm_button / cancel_button   (dialog action buttons)
+
+    Confirmed necessary for report/view screens (e.g. PaySlip) that have
+    grids and buttons but no input form fields at all — walking only
+    forms[].fields[] silently returns an empty map for those screens even
+    when ProjectAnalysisAgent found real locators for their buttons/grids.
+
+    Fields are keyed by BOTH label and control_name (not guaranteed which
+    one TestCaseAgent quotes in a given step); actions/buttons are keyed
+    by their action_name, since that's the only name Gherkin steps refer
+    to them by (e.g. 'I click the "Get Payslip" button')."""
     locator_map: dict[str, str] = {}
 
     def _best_locator(obj: dict) -> str | None:
@@ -197,6 +331,7 @@ def _build_locator_map(project_analysis: dict) -> dict[str, str]:
 
     for module in project_analysis.get("modules", []) or []:
         for page in module.get("pages", []) or []:
+            # --- form fields ---
             for form in page.get("forms", []) or []:
                 for field in form.get("fields", []) or []:
                     locator = _best_locator(field)
@@ -206,14 +341,16 @@ def _build_locator_map(project_analysis: dict) -> dict[str, str]:
                         if key and key != "Unknown":
                             locator_map[key] = locator
 
+            # --- page-level business actions (Save, Delete, Print, Get Payslip, ...) ---
             for action in page.get("business_actions", []) or []:
                 if not isinstance(action, dict):
-                    continue
+                    continue  # tolerate older analyses that still emit bare strings
                 locator = _best_locator(action)
                 name = action.get("action_name")
                 if locator and name and name != "Unknown":
                     locator_map[name] = locator
 
+            # --- table/grid row + toolbar actions ---
             for table in page.get("tables", []) or []:
                 if not isinstance(table, dict):
                     continue
@@ -225,6 +362,7 @@ def _build_locator_map(project_analysis: dict) -> dict[str, str]:
                     if locator and name and name != "Unknown":
                         locator_map[name] = locator
 
+            # --- dialog confirm/cancel buttons ---
             for dialog in page.get("dialogs", []) or []:
                 if not isinstance(dialog, dict):
                     continue
@@ -286,6 +424,28 @@ async def send_artifacts(ws: WebSocket, session: dict, validation: dict | None =
         "confidence":    resolved.confidence   if resolved else None,
         "ambiguous":     resolved.ambiguous    if resolved else False,
         "exists":        bool(session.get("pushed")),
+    })
+
+
+# ----------------------------------------------------------------------
+# Populates the frontend's Module/Screen dropdowns. Reads the QC output
+# repo's real current folder structure (Regression-Testing/{Module}_Module/
+# {Screen}/...) live on every call — no hardcoded list, no state carried
+# from a previous session — so newly-pushed modules/screens (including
+# ones landed by the overnight batch runner) show up without a frontend
+# rebuild or redeploy.
+# ----------------------------------------------------------------------
+async def handle_list_repo_structure(ws: WebSocket, session: dict):
+    try:
+        gl = _gitlab_service()
+        module_map = gl.get_module_screen_map()
+    except Exception as e:
+        await send_error(ws, f"could not read repo structure: {e}")
+        return
+
+    await ws.send_json({
+        "type":    "repo_structure",
+        "modules": module_map,
     })
 
 
@@ -422,6 +582,10 @@ async def handle_fetch(ws: WebSocket, session: dict, msg: dict):
 
 
 async def _check_output_existing(out_gl: GitLabService, out_tree, module: str, screen_name: str):
+    """Returns (resolved, existed, existing_feature, existing_script).
+    existing_feature/script are None whenever existed is False — including
+    the case where a matching folder was found but its files couldn't be
+    read, since that shouldn't block the generate pipeline."""
     resolved = await resolve_existing_precise(out_tree, module, screen_name) if out_tree is not None else None
     if resolved is None:
         return build_new_path(module, screen_name), False, None, None
@@ -437,6 +601,8 @@ async def _check_output_existing(out_gl: GitLabService, out_tree, module: str, s
 
 async def _append_one_screen(existing_feature: str, existing_script: str,
                               append_request: str, label: str | None = None) -> dict | None:
+    """Runs the append agent against one screen's existing feature/script.
+    Returns {feature, script, summary} on success, or {"error": ...}."""
     try:
         result = await append_agent.apply_append(existing_feature, existing_script, append_request)
     except Exception as e:
@@ -449,6 +615,14 @@ async def _generate_one_screen(ws: WebSocket, src: GitLabService, module: str,
                                 screen_name: str, resolved_source: ResolvedSource,
                                 user_request: str, label: str | None = None,
                                 source_tree: list[str] | None = None) -> dict | None:
+    """Runs the analysis -> test-case -> script -> validate pipeline for one
+    resolved source screen. Returns {feature, script, validation} or None on
+    failure (caller decides whether that's fatal or skip-and-continue).
+    source_tree: the FULL, unfiltered source tree (not the module-filtered
+    one — see _fetch_source_project_context's docstring for why), passed
+    through so it can follow local imports into the shared libs/ folder.
+    Callers without a tree handy just omit it; behavior degrades
+    gracefully to screen-only."""
     tag = f"[{label}] " if label else ""
     try:
         await send_log(ws, f"{tag}fetching source files...", "secondary")
@@ -1088,6 +1262,12 @@ async def handle_reject_screen(ws: WebSocket, session: dict, msg: dict):
 
 
 async def _fetch_shared_fixtures(ws: WebSocket) -> dict:
+    """Fetches shared fixture files that live in the QC repo (not the
+    cypress-workspace) — currently just fixtures/validation-error-message.json,
+    used by VerifyFormValidationMessage across many screens. Always fetched
+    fresh so the QC repo stays the single source of truth for these — a
+    fetch failure is logged but doesn't block the run, since not every
+    screen actually needs it."""
     fixtures = {}
     try:
         out_gl = _gitlab_service()
@@ -1105,6 +1285,12 @@ async def _fetch_shared_fixtures(ws: WebSocket) -> dict:
 
 
 async def handle_set_env(ws: WebSocket, session: dict, msg: dict):
+    """Sets (or replaces) the test-target config used by Cypress runs —
+    baseUrl + DB name/username/password, sent from the frontend's env
+    popup. Can be called at any point in the session (before or after any
+    number of runs) — always a full replace of whatever was set before,
+    never merged with cypress.env.json's static TestConnections.UILogin.
+    All four fields are required; there is no partial/fallback state."""
     base_url  = (msg.get("baseUrl")  or "").strip()
     db_name   = (msg.get("dbName")   or "").strip()
     user_name = (msg.get("userName") or "").strip()
@@ -1128,6 +1314,7 @@ async def handle_set_env(ws: WebSocket, session: dict, msg: dict):
         "baseUrl":  base_url,
         "dbName":   db_name,
         "userName": user_name,
+        # password intentionally never echoed back
     })
 
 
@@ -1244,6 +1431,12 @@ async def handle_run(ws: WebSocket, session: dict):
 
 
 async def handle_report(ws: WebSocket, session: dict):
+    """Task A — Excel report. Deterministic: every number comes straight
+    from mochawesome via cypress_runner's stashed run_results, no LLM
+    involved (see service/report_builder.py's module docstring). Sent as
+    base64 since it's binary — the frontend decodes it straight into a
+    file download, no inline preview (an .xlsx doesn't render usefully
+    in a browser iframe the way the screenshot HTML does)."""
     run_results = session.get("run_results") or []
     if not run_results:
         await send_error(ws, "no run data yet — run something first.")
@@ -1293,7 +1486,10 @@ async def qc_session(websocket: WebSocket):
             msg    = await websocket.receive_json()
             action = msg.get("action")
 
-            if action == "set_env":
+            if action == "list_repo_structure":
+                session["current_task"] = asyncio.create_task(handle_list_repo_structure(websocket, session))
+
+            elif action == "set_env":
                 session["current_task"] = asyncio.create_task(handle_set_env(websocket, session, msg))
 
             elif action == "fetch":
