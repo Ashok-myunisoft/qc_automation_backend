@@ -23,7 +23,7 @@ Enumerate by scanning the template and TS source for all of the following:
 Composite components: a component that renders more than one visible control (for example a date-range picker rendering two inputs, or a picklist rendering a trigger plus an internal list) counts as ONE element unless its internal parts are independently form-bound — meaning each part has its own `formControlName`, `ngModel`, or equivalent binding. If the internal parts are independently bound, report each bound part as its own element. If they are not independently bound (the composite exposes a single control value), report it as one element.
 
 Rule
-The number of field objects, plus loop entries, plus screen_section entries, must cover every distinct interactive element found in Step 0 — every enumerated element must be traceable to at least one object in the output. Never silently drop an element because its locator could not be resolved. If a locator cannot be resolved, the object must still exist and only locator-related sub-fields may fall back to "Unknown".
+The number of field objects, plus loop entries, plus screen_section entries, must cover every distinct interactive element found in Step 0 — every enumerated element must be traceable to at least one object in the output. Never silently drop an element because its locator could not be resolved. If a locator cannot be resolved, the object must still exist and only locator-related sub-fields may fall back to "Unknown". There is no upper limit on how many field objects this may require — a large multi-tab form with hundreds of real controls requires hundreds of field objects, one each, in full. Running out of space is never a reason to summarize, comment out, or drop remaining fields; see "Never truncate output" later in this document for the exact failure this causes.
 
 STEP 1 - Identity vs locator
 
@@ -117,29 +117,25 @@ If labels are rendered through i18n pipes or translation keys:
 
 Apply this to field labels, buttons, dialogs, tabs, steps, and any other user-facing text.
 
-Navigation rules
+Navigation rules — MANDATORY TWO-STEP ALGORITHM
 
-Determine the actual `navigation_entry_type` before building `navigation_path`:
-- `menu`: reached through the menu tree
-- `modal_trigger`: opened as a popup or dialog from another screen
-- `embedded`: permanently rendered inside another screen
-- `unknown`: when the source does not show enough to decide
+`navigation_path` must never be left empty. Every screen has SOME location in the app hierarchy, and you must always report one. Follow these two steps, in order, for every single screen with no exception:
 
-For menu navigation, report the actual hop count shown by the source. Do not assume a fixed 2-hop or 3-hop path.
+STEP A — Look for real navigation evidence in the supplied source: a menu component, a routing config, breadcrumb markup, or any data-cy-bearing navigation element. If you find real evidence, build `navigation_path` from it and set `navigation_entry_type` to `menu`, `modal_trigger`, or `embedded` as appropriate. Report the actual hop count the source shows — do not assume a fixed 2-hop or 3-hop path. For each hop report `hop_label`, `hop_type` (module, menu_folder, or menu_leaf), `data_cy`, `id`, `preferred_locator`.
 
-For each hop, report:
-- `hop_label`
-- `hop_type`: module, menu_folder, or menu_leaf
-- `data_cy`
-- `id`
-- `preferred_locator`
+STEP B — If, and only if, Step A finds nothing (this is common — most screens have no dedicated navigation/menu file of their own), you MUST build a fallback `navigation_path` using `navigation_hint` from `project_context`. This is not optional, and an empty `navigation_path` is never an acceptable substitute for it. `navigation_hint` is a pre-computed, already-correct array of segment strings (e.g. `["inventory", "itemmenu", "itemmaster"]`) — the repository root and organizational folder levels have already been removed. Do not re-derive or re-filter it yourself; do not drop, reorder, or add segments; do not fall back to parsing `primary_dir` directly for this. To build the fallback:
+1. Treat each string in `navigation_hint`, in order, as one hop: the first is the module, the last is the screen, anything in between is a menu/submenu hop.
+2. Report each hop with a `hop_label` equal to that exact segment string and a `hop_type` of `module` (first segment), `menu_leaf` (last segment), or `menu_folder` (any segment in between). Set `data_cy`, `id`, and `preferred_locator` to "Unknown" for each, since these were never confirmed against real UI markup.
+3. Add an entry to `unresolved` stating that `navigation_path` was derived from `navigation_hint` (folder-derived) and has not been confirmed against real menu/routing source.
+4. Set `navigation_entry_type` to `unknown` in this case, since the entry mechanism itself (menu vs. modal vs. embedded) genuinely isn't known — only the hop labels are being derived.
 
-If a menu hierarchy source is missing, use Unknown for what cannot be confirmed and add the missing source to `unresolved`.
+Self-check before you finalize output: if `navigation_path` is an empty array `[]`, you have violated this section — go back and apply Step B. The only two acceptable end states are (a) a real, source-confirmed path from Step A, or (b) a folder-derived path from Step B built directly from `navigation_hint`, with the corresponding `unresolved` entry. An empty path with no `unresolved` entry, or an empty path claiming the source "did not show enough," is never correct once `navigation_hint` was supplied — `navigation_hint` is always supplied in `project_context`, so Step B is always available as a last resort and requires no parsing on your part.
 
 Project analysis
 
 Extract:
 - Project Summary
+
 - Frontend Framework
 - Backend Framework
 - Programming Languages
@@ -324,6 +320,15 @@ Backend-related gaps are not unresolved items. Report them as Unknown instead.
 
 An empty `unresolved` array is a claim that nothing needed was missing. Do not leave it empty just because resolution was hard; leave it empty only when everything referenced was actually supplied.
 
+Never truncate output (critical — confirmed real failure)
+
+On screens with a very large number of fields (multi-tab forms with hundreds of controls are common in this application), you must still enumerate every single field as its own complete object. Never shorten the output by:
+- Stopping partway through a list and adding a comment or note such as `// Additional fields will similarly follow...`, `// ...`, `(and so on)`, or any similar placeholder
+- Summarizing a run of similar fields into one entry or a description of the pattern instead of listing each one
+- Omitting fields from later tabs/sections because earlier ones already illustrate the pattern
+
+JSON has no comment syntax — a single placeholder comment inside the array makes the entire response invalid JSON and causes the whole analysis to fail to parse, discarding everything, including the fields that WERE correctly resolved. A large but complete and valid field list is always correct; a shorter list that becomes invalid JSON is a total failure, not a partial success. If a screen genuinely has hundreds of fields across many tabs, report hundreds of field objects — one per field, every tab, no shortcuts, no comments, no ellipses, anywhere in the output.
+
 Rules
 
 - Never invent information
@@ -338,6 +343,7 @@ Rules
 - Return one module object per module
 - Return one page object per page
 - Field, loop, and screen_section counts must cover Step 0's enumeration, per the composite-component rule
+- Never use a placeholder comment, ellipsis, or "and so on" note anywhere in the output, per the rule above — this applies to every array in the schema, not only fields
 - Return only valid JSON
 - No markdown, explanations, or comments
 

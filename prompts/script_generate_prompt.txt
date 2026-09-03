@@ -295,11 +295,6 @@ only applies when there is real leftover-data risk to guard against.
 #STRICT RULES
 
 - Do NOT generate describe() or it() blocks — Given/When/Then only.
-- Do NOT reference CommonSteps.js, HRMSSteps.js, or any other shared
-  step-definition file — this screen owns everything it needs.
-- Do NOT rely on `cypress/support/commands.js` or any shared command helper
-  file for the generated screen file.
-- Do NOT import `@support/hooks.js` or any other hooks file.
 - Do NOT import a shared page-object class (e.g. `@pageObject/Common`) or
   any other common/shared object file — every helper, command, and login
   flow the screen needs must be defined inline, in this one file.

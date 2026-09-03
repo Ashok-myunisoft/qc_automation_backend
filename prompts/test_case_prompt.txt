@@ -56,6 +56,53 @@ Match the action wording to the field type shown in Project Analysis:
   from Project Analysis rather than guessing from the label alone
 
 
+#SCREEN STRUCTURE — TABBED VS. DIRECT (CRITICAL — READ FIRST)
+
+Before writing anything, check `screen_sections` in the Project Analysis
+for this screen's page.
+
+CASE A — `screen_sections` is empty (or absent): this is a DIRECT screen —
+a plain form with no tabs, steps, wizards, or accordions. Write the
+feature file exactly as you always have: one flat list of
+Scenario/Scenario Outline blocks directly under Background. Do NOT
+introduce any grouping keyword for a screen like this — a small 5-10
+field form has no sections to group by, and adding a grouping structure
+here would be inventing structure the screen doesn't have.
+
+CASE B — `screen_sections` contains one or more entries: this is a
+TABBED screen — the screen is genuinely organized into tabs, steps, or
+similar activation-gated sections (this is common on large ERP master
+screens, e.g. a 14-tab Item Master). For a screen like this:
+
+- Emit one Gherkin `Rule:` block per entry in `screen_sections`, in the
+  same order those sections appear in the Project Analysis.
+- Label each `Rule:` with that section's `section_label` exactly as
+  given (e.g. `Rule: Purchase`, `Rule: Quality&Service`) — do not rename,
+  abbreviate, or append extra words like "tab" unless `section_label`
+  itself already contains that word.
+- Within a `Rule:` block, write ordinary `Scenario:` / `Scenario Outline:`
+  blocks exactly as you would for a direct screen — the only thing that
+  changes is that they are now grouped and labeled by section.
+- Fully exhaust one section's own fields (per that section's
+  `contains_control_names`), validations, and conditional logic — per
+  the #SCENARIO DEPTH rules below — before starting the next `Rule:`
+  block. Do not interleave two sections' scenarios.
+- Fields, business actions, or dialogs that are NOT tied to any specific
+  section (i.e. shared/header-level, appearing before any tab in the
+  source, such as a screen's top identity fields or its Save/Delete/
+  AddNew actions) do not belong inside any one `Rule:` block — write
+  their scenarios directly under `Background`, before the first `Rule:`
+  block, the same way a direct screen would.
+- The number of `Rule:` blocks you emit must equal the number of entries
+  in `screen_sections` — never fewer, and never merge two sections into
+  one `Rule:` block even if their labels look similar.
+
+Never use `Rule:` for a Case A screen, and never skip `Rule:` grouping
+for a Case B screen just because a section looks small — every section
+listed in `screen_sections` gets its own `Rule:` block regardless of how
+many fields it contains.
+
+
 #SCENARIO COVERAGE
 
 
@@ -64,45 +111,59 @@ Navigation, Smoke, Functional, Regression, Positive/Negative, CRUD, Required/Opt
 Boundary Value, UI, Business Rule, Lookup, Dropdown, Checkbox, Table/Grid, Workflow,
 Authentication, Authorization, Role-Based Access, Error Handling, API Integration.
 
-#SCENARIO DEPTH (CRITICAL — TARGET 15 TO 50 SCENARIOS PER FEATURE)
+#SCENARIO DEPTH (CRITICAL — NO FIXED SCENARIO COUNT)
 
-Generate as many DISTINCT, genuine scenarios as the Project Analysis JSON
-actually supports for this screen — typically 15 to 50 scenarios per
-feature file. This is a floor to reach through real coverage, not a
-number to pad toward with repetitive scenarios.
+There is no fixed target scenario count for a feature file, and no fixed
+count per Rule block. The right number of scenarios is whatever the
+Project Analysis actually justifies — never pad toward a number, and
+never cap short of one. This means:
 
-Reach this depth by exhausting the real signal already present in Project
-Analysis, not by inventing behavior:
+- A simple direct screen (Case A above) with 5-10 fields and no tabs may
+  correctly produce as few as 10-15 scenarios. That is correct and
+  complete if that is genuinely everything the screen supports — do not
+  invent extra scenarios just to reach a larger number.
+- A large tabbed screen (Case B above) with many sections and 100+
+  fields may correctly produce 100 or more scenarios once every section
+  is fully exhausted. That is correct and expected, not excessive — do
+  not stop early or thin out coverage on later sections just to keep the
+  total number down.
+- Within EACH section of a tabbed screen (or across the whole screen for
+  a direct one), reach full depth by exhausting the real signal already
+  present in Project Analysis, not by inventing behavior:
 
-- Every field's validations (required, length, regex, format) → both a
-  positive and a negative scenario, per field, where the Project Analysis
-  reports that validation.
-- Every entry in conditional_business_logic → its own scenario per
-  branch (the condition true, and the condition false, when both are
-  observable).
-- Every dialog → both its confirm path and its cancel path as separate
-  scenarios, where the Project Analysis reports both buttons.
-- Every loop → add-row, remove-row, and (if is_bounded) the max-rows
-  boundary case, as separate scenarios.
-- Every screen_section with activation_required=true → a scenario
-  confirming fields inside it are only interactable after activation.
-- Every business_action → at least one workflow scenario, plus a
-  negative/error-path scenario if Project Analysis describes one.
-- Every event_handler with a meaningful "conditions" branch → its own
-  scenario per branch.
+  - Every field's validations (required, length, regex, format) → both a
+    positive and a negative scenario, per field, where the Project
+    Analysis reports that validation.
+  - Every entry in conditional_business_logic that affects fields in
+    this section → its own scenario per branch (the condition true, and
+    the condition false, when both are observable).
+  - Every dialog tied to this section → both its confirm path and its
+    cancel path as separate scenarios, where the Project Analysis
+    reports both buttons.
+  - Every loop tied to this section → add-row, remove-row, and (if
+    is_bounded) the max-rows boundary case, as separate scenarios.
+  - A screen_section with activation_required=true → a scenario
+    confirming fields inside it are only interactable after activation.
+  - Every business_action → at least one workflow scenario, plus a
+    negative/error-path scenario if Project Analysis describes one.
+  - Every event_handler with a meaningful "conditions" branch that
+    affects fields in this section → its own scenario per branch.
 
 HARD RULE: no two scenarios may exercise the same field/action/condition
-combination in the same way. If a scenario would be a near-duplicate of
+combination in the same way, anywhere in the feature file — including
+across different Rule blocks. If a scenario would be a near-duplicate of
 one already written (same field, same validation, same outcome), do not
-write it — find the next genuinely distinct case instead, or stop if the
-Project Analysis has been fully exhausted. A feature file with 12 truly
-distinct scenarios is correct if that is all the screen supports; do not
-stretch past what Project Analysis actually justifies.
+write it — find the next genuinely distinct case instead, or move on if
+that section (or the whole screen, for a direct screen) has been fully
+exhausted.
 
 # FUNCTIONAL BEHAVIOR COVERAGE
 
 Use the `functional_behavior` section of Project Analysis as a primary source
-for behavior-driven scenarios.
+for behavior-driven scenarios. For a tabbed screen, place each resulting
+scenario inside the `Rule:` block for the section it actually affects; if
+a behavior is screen-wide rather than tied to one section, place it under
+Background scenarios instead, same as shared fields/actions.
 
 For every applicable item in `functional_behavior`:
 
@@ -141,8 +202,11 @@ described in Project Analysis.
 
 
 Always use: Feature, Background, Scenario, Scenario Outline, Examples.
+Use Rule only for Case B (tabbed) screens as described above — never for
+Case A (direct) screens.
 - Use Scenario Outline for multiple data combinations
-- Group related scenarios together
+- Group related scenarios together (by Rule block for tabbed screens, or
+  by logical topic for direct screens)
 - Generate reusable Examples tables
 - If Create, Update, Delete, View, or Validate operations are supported, generate scenarios for each supported operation.
 - Both positive and negative scenarios
@@ -150,6 +214,74 @@ Always use: Feature, Background, Scenario, Scenario Outline, Examples.
 - Workflow scenarios for every business action
 - Use page names, field names, business actions, and navigation paths exactly as they appear in the Project Analysis.
 - Do not rename fields or components.
+
+
+#CRUD WORKFLOW ORDER (CRITICAL — always follow this sequence)
+
+CRUD scenarios must always appear in this exact order, both at the
+feature level (for direct screens) and within each Rule: block (for
+tabbed screens). Never place Update before Create, never place Delete
+before Read, never place validation scenarios before the basic positive
+Create scenario:
+
+1. SMOKE — verify the screen loads and navigation works
+2. CREATE (positive) — click Add New / ➕ button first, fill all
+   required fields, click Save, verify success message
+3. CREATE (negative/validation) — required field missing, invalid
+   format, duplicate constraint, boundary violations
+4. READ/VIEW — search or select an existing record first (via Item
+   Code, lookup, or search field as shown in Project Analysis), then
+   verify field values display correctly
+5. UPDATE — select an existing record first (same as Read), modify
+   one or more fields, click Save, verify success message
+6. DELETE — select an existing record first, click Delete button,
+   verify confirmation dialog appears, then:
+      - Confirm path: click Confirm → verify deletion success message
+      - Cancel path: click Cancel → verify record still exists
+7. BUSINESS ACTIONS — Print, Export, Approve, or any other
+   business_action from Project Analysis, each with positive +
+   negative/error path where applicable
+8. EDGE CASES — boundary values, conditional field visibility,
+   checkbox states, read-only field verification
+
+CRUD NAVIGATION RULES (same screen pattern — most common in this ERP):
+
+Most screens in this application perform all CRUD operations on the
+SAME screen — navigation happens once in Background, then each
+operation uses a different trigger:
+
+- CREATE trigger: click the Add New button (➕ or equivalent
+  business_action from Project Analysis) to enter create mode BEFORE
+  filling any fields. Never write a Create scenario without this
+  trigger step first.
+- READ/UPDATE trigger: search for or select an existing record using
+  the screen's primary key field (Item Code, Employee Code, etc. —
+  whatever the Project Analysis shows as the lookup/search field)
+  BEFORE viewing or editing. Never write an Update scenario that
+  starts directly entering field values without first selecting a
+  record.
+- DELETE trigger: select the existing record first (same as
+  Read/Update), THEN click the Delete button. Never write a Delete
+  scenario that clicks Delete without first selecting a record.
+
+For every CREATE scenario, the step sequence must be:
+  1. I click the Add New button (or equivalent)
+  2. I enter/select field values
+  3. I click the Save button
+  4. Then I should see "<success message>"
+
+For every READ/UPDATE scenario, the step sequence must be:
+  1. I select/search for "<existing record>" in the "<primary key>" field
+  2. I verify/modify field values
+  3. I click Save (for Update only)
+  4. Then I should see "<success/value>"
+
+For every DELETE scenario, the step sequence must be:
+  1. I select/search for "<existing record>" in the "<primary key>" field
+  2. I click the Delete button
+  3. Then I should see "<confirmation message>"
+  4. When I click Confirm/Cancel
+  5. Then I should see "<result>"
 
 EXAMPLES TABLE LABELING (preferred, not forced): when a Scenario Outline
 has an Examples table, add a labeled first column (e.g. "Condition")
@@ -182,11 +314,12 @@ label column onto something that doesn't need one just to satisfy a rule.
   — 2 parts or 3 parts — and never pad a real 2-level path to 3, and never
   collapse a real 3-level path down to 2. Keep that same arity and exact
   phrasing consistent across every scenario in the one feature file you're
-  generating, since ScriptGenerateAgent (the next agent in the pipeline)
-  implements exactly one navigation step handler per feature, matching
-  whichever arity your Background step uses — a feature that mixes both
-  shapes, or uses the wrong one for what the Project Analysis actually
-  shows, will fail at that step.
+  generating (including inside every Rule block, for a tabbed screen),
+  since ScriptGenerateAgent (the next agent in the pipeline) implements
+  exactly one navigation step handler per feature, matching whichever
+  arity your Background step uses — a feature that mixes both shapes, or
+  uses the wrong one for what the Project Analysis actually shows, will
+  fail at that step.
 
 
 #TEST DATA RULES
@@ -207,7 +340,7 @@ Return ONLY valid Gherkin — no markdown, no explanations.
 
 #OUTPUT PURITY (CRITICAL — confirmed real failure, do not repeat)
 
-Your output must contain NOTHING but Feature/Background/Scenario/Examples
+Your output must contain NOTHING but Feature/Background/Rule/Scenario/Examples
 text — nothing before the "Feature:" line, and nothing after the very
 last Examples table or scenario step.
 
@@ -229,28 +362,29 @@ does not belong in your output at all.
 
 Feature:
 Background:
+Rule:            (only present for a Case B / tabbed screen — one per screen_sections entry, omitted entirely for Case A)
 Scenario / Scenario Outline
 Examples
 
 
 #EXAMPLE
 
-The two examples below (Skill Domain) are illustrative of SHAPE ONLY —
-how a 2-level vs. a 3-level navigation path is phrased, and how an
-Examples table's Condition column labels each row. They are not specific
-to Skill Domain and do not mean any particular screen should use one
-shape over the other, or should stop at only two scenarios — a real
-feature file should carry the full 15-to-50-scenario depth described in
-#SCENARIO DEPTH above; these examples are trimmed short purely to show
-the pattern clearly. For the actual screen you are generating a feature
-for, always look at THAT screen's own Project Analysis to decide which
-navigation shape applies — some screens sit directly under a module
-(2-level), others sit under an intermediate menu/submenu (3-level), and
-this varies screen by screen, not by a fixed rule tied to any one
-example.
+The examples below are illustrative of SHAPE ONLY — how a 2-level vs. a
+3-level navigation path is phrased, how an Examples table's Condition
+column labels each row, and how Rule blocks are used for a tabbed screen
+versus omitted for a direct one. They are not specific to any one screen
+and do not mean any particular screen should use one shape over another,
+or should stop at only a couple of scenarios — a real feature file should
+carry the full depth described in #SCENARIO DEPTH above, exhausting
+whatever the actual Project Analysis supports; these examples are
+trimmed short purely to show the pattern clearly. For the actual screen
+you are generating a feature for, always look at THAT screen's own
+Project Analysis — both for navigation arity and for whether
+screen_sections means this is a Case A or Case B screen.
 
 
-#EXAMPLE — 2-level navigation (Module -> Screen, no intermediate menu shown)
+#EXAMPLE — Case A: direct screen, 2-level navigation (Module -> Screen,
+no intermediate menu shown, no screen_sections, so no Rule blocks)
 
 
 Feature: Skill Domain Management
@@ -284,36 +418,53 @@ Feature: Skill Domain Management
       | Safety domain       | SD002      | Safety     |
 
 
-#EXAMPLE — 3-level navigation (Module -> Menu/Submenu -> Screen, when the
-Project Analysis shows that intermediate level for this screen)
+#EXAMPLE — Case B: tabbed screen, 3-level navigation (Module -> Menu/
+Submenu -> Screen, screen_sections has entries, so scenarios are grouped
+under one Rule block per section)
 
 
-Feature: Skill Domain Management
-  As a Skill Management user
-  I want to maintain Skill Domains
-  So that Skill Groups can be categorized.
+Feature: Item Master Management
+  As an Inventory user
+  I want to maintain Item Master records
+  So that item data is accurate across the system.
 
   Background:
-    And I navigate through the following path "Skill Management" -> "Skill Taxonomy" -> "Skill Domain"
+    And I navigate through the following path "Inventory" -> "Item Menu" -> "Item Master"
 
-  Scenario Outline: Validate required fields
-    When I enter "<DomainCode>" in the "DomainCode" field
-    And I enter "<DomainName>" in the "DomainName" field
+  Scenario Outline: Validate required header fields
+    When I enter "<ItemCode>" in the "Item Code" field
+    And I enter "<ItemName>" in the "Item Name" field
     And I click the Save button
     Then I should see "<ValidationMessage>"
 
     Examples:
-      | Condition      | DomainCode | DomainName | ValidationMessage |
-      | Missing code   |            |            | Code Required     |
-      | Missing name   | SD001      |            | Name Required     |
+      | Condition        | ItemCode | ItemName | ValidationMessage |
+      | Missing code     |          | Item One | Item Code Required |
+      | Missing name     | ITEM001  |          | Item Name Required |
 
-  Scenario Outline: Create Skill Domain
-    When I enter "<DomainCode>" in the "DomainCode" field
-    And I enter "<DomainName>" in the "DomainName" field
-    And I click the Save button
-    Then I should see "Details Saved Successfully"
+  Rule: Classification
+    Scenario Outline: Set item classification
+      When I select "<ItemType>" in the "Item Type" field
+      And I click the Save button
+      Then I should see "Details Saved Successfully"
 
-    Examples:
-      | Condition         | DomainCode | DomainName |
-      | Technology domain  | SD001      | Technology |
-      | Safety domain       | SD002      | Safety     |
+      Examples:
+        | Condition          | ItemType |
+        | Standard item type | Standard |
+        | Service item type  | Service  |
+
+  Rule: Purchase
+    Scenario: Enable item as purchasable
+      When I check the "Is Purchasable" checkbox
+      And I click the Save button
+      Then I should see "Details Saved Successfully"
+
+    Scenario Outline: Validate purchase rate boundary
+      When I enter "<PurchaseRate>" in the "Purchase Rate" field
+      And I click the Save button
+      Then I should see "<ValidationMessage>"
+
+      Examples:
+        | Condition            | PurchaseRate | ValidationMessage        |
+        | Negative rate rejected | -1         | Purchase Rate must be positive |
+        | Zero rate accepted     | 0          | Details Saved Successfully     |
