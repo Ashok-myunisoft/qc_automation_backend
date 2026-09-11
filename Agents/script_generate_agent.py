@@ -1,9 +1,29 @@
+import json
+import re
 import os
 from agent_framework import Agent
 from agent_framework.openai import OpenAIChatClient
 from dotenv import load_dotenv
 
 load_dotenv()
+
+
+_OUTER_JS_FENCE_RE = re.compile(
+    r"^```(?:javascript|js)?[ \t]*\r?\n(?P<body>[\s\S]*?)\r?\n```$",
+    re.IGNORECASE,
+)
+
+def _strip_outer_javascript_fence(text: str) -> str:
+    """Accept a model response wrapped in one Markdown JS fence.
+
+    The prompt explicitly forbids fences, but this is a narrow final safety
+    net before the content reaches validation, GitLab, or Cypress. It only
+    removes a single *outer* fence; it deliberately does not try to repair
+    prose, partial code, or malformed JavaScript.
+    """
+    trimmed = text.strip()
+    match = _OUTER_JS_FENCE_RE.fullmatch(trimmed)
+    return match.group("body").strip() if match else text
 
 
 class ScriptGenerateAgent:
@@ -27,7 +47,12 @@ class ScriptGenerateAgent:
             instructions=self.instructions
         )
 
-    async def generate_script(self, test_cases: str, locator_map: dict[str, str] | None = None) -> str:
+    async def generate_script(
+        self,
+        test_cases: str,
+        locator_map: dict[str, str] | None = None,
+        automation_contract: dict | None = None,
+    ) -> str:
         """test_cases: the full Gherkin feature text (as produced by
         TestCaseAgent). locator_map: optional {field_name: real data-cy
         value} distilled from ProjectAnalysisAgent's own output (see
@@ -41,6 +66,7 @@ class ScriptGenerateAgent:
             if locator_map else
             "none supplied — derive data-cy from the field/button name as usual."
         )
+        contract_block = json.dumps(automation_contract, indent=2) if automation_contract else "none supplied"
         user_message = f"""
 Feature file to implement (every Given/When/Then below needs a step
 definition in your output — this file is the screen's ONLY step file,
@@ -48,14 +74,17 @@ nothing else backs it):
 
 {test_cases}
 
+Source-derived automation contract (authoritative when present):
+{contract_block}
+
 Known real locators (VERIFIED from the actual source code — use these
 EXACT data-cy values for any field/button named below that appears in
 this list, instead of deriving your own):
 {locator_block}
 
-Product default action locators (use these exact data-cy values whenever
-the step clearly refers to the matching action, even if analysis output is
-missing, `0`, or a placeholder):
+Product default action locators (use these only when the source-derived
+automation contract and known real locators provide no verified locator for
+the matching action):
 - save -> data-cy="SaveForm"
 - add new -> data-cy="AddNewForm"
 - update -> data-cy="UpdateForm"
@@ -64,4 +93,4 @@ missing, `0`, or a placeholder):
 - attachments -> data-cy="FormAttachment"
 """
         response = await self.agent.run(user_message)
-        return response.text
+        return _strip_outer_javascript_fence(response.text)

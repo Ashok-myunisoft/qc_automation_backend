@@ -285,6 +285,49 @@ For each dialog report:
 
 If the dialog buttons do not have data-cy or id, use Unknown and describe the visible text in preferred_locator if confirmable.
 
+Automation contract (mandatory structured evidence)
+
+The legacy locator fields (`data_cy`, `id`, `name`, and `preferred_locator`) remain
+for compatibility. In addition, every interactable field, business action, table
+action, dialog button, section activator, and navigation hop must carry an
+`automation_locator` object whenever source confirms a UI target:
+- `strategy`: `data_cy`, `id`, `name`, `css`, `text`, or `Unknown`
+- `value`: the exact confirmed attribute value or selector; never derive it from a label
+- `verified`: true only when directly confirmed in supplied source
+- `target`: `host`, `input`, `textarea`, `button`, `checkbox_input`, `radio_input`,
+  `option`, `row`, `cell`, `dialog`, or `Unknown`
+- `fallbacks`: additional confirmed locator objects in this same shape, or `[]`
+
+`preferred_locator` is a legacy display field only. Never make it look like a
+data-cy value when it is actually an id, CSS selector, or text locator. The
+structured `automation_locator` is the authoritative automation contract.
+
+Every field must also carry an `automation_interaction` object:
+- `interaction_type`: `type`, `clear_and_type`, `native_select`, `material_option`,
+  `autocomplete`, `picklist`, `checkbox`, `radio`, `date_picker`, `file_upload`,
+  `read_only`, `display_only`, or `Unknown`
+- `value_target`: confirmed selector/attribute, or `Unknown` when host is the target
+- `option_target`: confirmed option/overlay selector, or `Unknown`
+- `clear_before_entry`: true, false, or `Unknown`
+- `read_value_strategy`: `input_value`, `text_content`, `checked_state`,
+  `selected_option`, `attribute`, or `Unknown`
+- `observable_success_signal`: source-confirmed UI state/message, or `Unknown`
+
+Every field and loop field must have a stable `field_key`. Build it from its real
+control/config key plus its containing form, section, or loop path when needed to
+avoid collisions. It is an identity key, not a locator, and must never be guessed.
+
+For every source-derived object that can affect automation, include
+`source_evidence`: an array of short objects with `path`, `symbol_or_markup`, and
+`reason`. Use actual supplied paths and never invent line numbers.
+
+Automation blockers and confidence
+
+At page level, `automation_readiness` must include `analysis_confidence` (`high`,
+`medium`, or `low`), `missing_source_dependencies`, and `automation_blockers`.
+Use a blocker only when a required selector, interaction behavior, or expected UI
+outcome cannot be confirmed; do not add one merely because extra context is useful.
+
 Validations
 
 Separate validations into:
@@ -371,7 +414,15 @@ Output JSON
               "hop_type": "",
               "data_cy": "",
               "id": "",
-              "preferred_locator": ""
+              "preferred_locator": "",
+              "automation_locator": {
+                "strategy": "",
+                "value": "",
+                "verified": false,
+                "target": "",
+                "fallbacks": []
+              },
+              "source_evidence": []
             }
           ],
           "trigger_source": {
@@ -388,7 +439,15 @@ Output JSON
               "data_cy": "",
               "id": "",
               "preferred_locator": "",
-              "resolution_trace": ""
+              "resolution_trace": "",
+              "automation_locator": {
+                "strategy": "",
+                "value": "",
+                "verified": false,
+                "target": "",
+                "fallbacks": []
+              },
+              "source_evidence": []
             }
           ],
           "screen_sections": [
@@ -399,7 +458,15 @@ Output JSON
               "activator": {
                 "data_cy": "",
                 "id": "",
-                "preferred_locator": ""
+                "preferred_locator": "",
+                "automation_locator": {
+                  "strategy": "",
+                  "value": "",
+                  "verified": false,
+                  "target": "",
+                  "fallbacks": []
+                },
+                "source_evidence": []
               },
               "activation_required": false,
               "entry_condition": "",
@@ -432,7 +499,24 @@ Output JSON
                   "business_validations": [],
                   "dependencies": [],
                   "preferred_locator": "",
-                  "resolution_trace": ""
+                  "resolution_trace": "",
+                  "field_key": "",
+                  "automation_locator": {
+                    "strategy": "",
+                    "value": "",
+                    "verified": false,
+                    "target": "",
+                    "fallbacks": []
+                  },
+                  "automation_interaction": {
+                    "interaction_type": "",
+                    "value_target": "",
+                    "option_target": "",
+                    "clear_before_entry": false,
+                    "read_value_strategy": "",
+                    "observable_success_signal": ""
+                  },
+                  "source_evidence": []
                 }
               ]
             }
@@ -452,20 +536,41 @@ Output JSON
                   "id": "",
                   "name": "",
                   "required": false,
-                  "preferred_locator": ""
+                  "preferred_locator": "",
+                  "field_key": "",
+                  "automation_locator": {
+                    "strategy": "",
+                    "value": "",
+                    "verified": false,
+                    "target": "",
+                    "fallbacks": []
+                  },
+                  "automation_interaction": {
+                    "interaction_type": "",
+                    "value_target": "",
+                    "option_target": "",
+                    "clear_before_entry": false,
+                    "read_value_strategy": "",
+                    "observable_success_signal": ""
+                  },
+                  "source_evidence": []
                 }
               ],
               "add_row_action": {
                 "action_name": "",
                 "data_cy": "",
                 "id": "",
-                "preferred_locator": ""
+                "preferred_locator": "",
+                "automation_locator": {"strategy": "", "value": "", "verified": false, "target": "", "fallbacks": []},
+                "source_evidence": []
               },
               "remove_row_action": {
                 "action_name": "",
                 "data_cy": "",
                 "id": "",
-                "preferred_locator": ""
+                "preferred_locator": "",
+                "automation_locator": {"strategy": "", "value": "", "verified": false, "target": "", "fallbacks": []},
+                "source_evidence": []
               },
               "is_bounded": false,
               "resolution_trace": ""
@@ -491,7 +596,9 @@ Output JSON
                   "action_name": "",
                   "data_cy": "",
                   "id": "",
-                  "preferred_locator": ""
+                  "preferred_locator": "",
+                  "automation_locator": {"strategy": "", "value": "", "verified": false, "target": "", "fallbacks": []},
+                  "source_evidence": []
                 }
               ],
               "toolbar_actions": [
@@ -499,13 +606,42 @@ Output JSON
                   "action_name": "",
                   "data_cy": "",
                   "id": "",
-                  "preferred_locator": ""
+                  "preferred_locator": "",
+                  "automation_locator": {"strategy": "", "value": "", "verified": false, "target": "", "fallbacks": []},
+                  "source_evidence": []
                 }
               ],
               "search": false,
               "filter": false,
               "pagination": false,
               "sorting": false,
+              "automation_locator": {
+                "strategy": "",
+                "value": "",
+                "verified": false,
+                "target": "",
+                "fallbacks": []
+              },
+              "row_identity": {
+                "field_key": "",
+                "locator_strategy": "",
+                "locator_value": "",
+                "verified": false
+              },
+              "column_details": [
+                {
+                  "column_name": "",
+                  "field_key": "",
+                  "automation_locator": {
+                    "strategy": "",
+                    "value": "",
+                    "verified": false,
+                    "target": "",
+                    "fallbacks": []
+                  },
+                  "source_evidence": []
+                }
+              ],
               "resolution_trace": ""
             }
           ],
@@ -516,13 +652,27 @@ Output JSON
               "confirm_button": {
                 "data_cy": "",
                 "id": "",
-                "preferred_locator": ""
+                "preferred_locator": "",
+                "automation_locator": {"strategy": "", "value": "", "verified": false, "target": "", "fallbacks": []},
+                "source_evidence": []
               },
               "cancel_button": {
                 "data_cy": "",
                 "id": "",
-                "preferred_locator": ""
+                "preferred_locator": "",
+                "automation_locator": {"strategy": "", "value": "", "verified": false, "target": "", "fallbacks": []},
+                "source_evidence": []
               },
+              "dialog_title": "",
+              "expected_message": "",
+              "automation_locator": {
+                "strategy": "",
+                "value": "",
+                "verified": false,
+                "target": "",
+                "fallbacks": []
+              },
+              "source_evidence": [],
               "resolution_trace": ""
             }
           ],
@@ -554,8 +704,13 @@ Output JSON
               {
                 "trigger_point": "",
                 "service_method": "",
+                "http_method": "",
+                "endpoint": "",
                 "request_data_summary": "",
-                "response_handling": ""
+                "response_handling": "",
+                "success_ui_signal": "",
+                "error_ui_signal": "",
+                "intercept_appropriate": false
               }
             ],
             "data_transformations": [
@@ -569,7 +724,10 @@ Output JSON
           "automation_readiness": {
             "locator_coverage": "",
             "coverage_notes": "",
-            "requires_source_changes": false
+            "requires_source_changes": false,
+            "analysis_confidence": "",
+            "missing_source_dependencies": [],
+            "automation_blockers": []
           },
           "rest_apis": [],
           "important_components": [],

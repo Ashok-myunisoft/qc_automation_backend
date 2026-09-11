@@ -78,7 +78,7 @@ class GitLabService:
         for attempt in range(1, TREE_FETCH_RETRIES + 1):
             try:
                 return self._project.repository_tree(
-                    recursive=True, all=True, ref=self._branch
+                    recursive=True, all=True, ref=self._branch, per_page=100
                 )
             except gitlab.exceptions.GitlabGetError as e:
                 last_error = e

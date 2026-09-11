@@ -54,9 +54,48 @@ def _source_gitlab_service() -> GitLabService:
 
 
 _IMPORT_RE = re.compile(r"""from\s+['"]([^'"]+)['"]""")
+_CUSTOM_COMPONENT_RE = re.compile(r"<\s*(gb-[a-zA-Z0-9-]+)\b", re.IGNORECASE)
+_DATA_CY_BINDING_RE = re.compile(r"(?:\[attr\.data-cy\]|\[data-cy\]|data-cy)\b", re.IGNORECASE)
+_CUSTOM_OPENING_TAG_RE = re.compile(
+    r"<\s*(gb-[a-zA-Z0-9-]+)\b(?P<attributes>[^>]*)>",
+    re.IGNORECASE | re.DOTALL,
+)
+# Static form-control values are safe to resolve. Dynamic bindings are not:
+# their rendered selector cannot be proven from the template alone.
+_STATIC_FORM_CONTROL_RE = re.compile(
+    r"\bformControlName\s*=\s*['\"](?P<name>[A-Za-z_][A-Za-z0-9_]*)['\"]",
+    re.IGNORECASE,
+)
+# Supported source constructions include:
+#   formControlName + '-PickList'
+#   this.formControlName + "-ComboBox"
+#   `${formControlName}-PickList`
+_DATA_CY_CONCAT_SUFFIX_RE = re.compile(
+    r"(?:this\.)?(?:formControlName|controlName)\s*\+\s*['\"](?P<suffix>-[A-Za-z0-9_-]+)['\"]",
+    re.IGNORECASE,
+)
+# Shared Angular controls commonly receive their runtime control name through
+# ``Field.Name`` or ``gbName`` instead of exposing ``formControlName`` in the
+# component template. Examples proven in the shared sources are:
+#   (Field()?.Name || gbName) + '-ComboBox'
+#   RemoveSpace(Field.Name || 'ProvideName') + '-PickList'
+# The screen's static formControlName supplies that runtime name, while this
+# pattern supplies the verified suffix. Neither part is screen-specific.
+_DATA_CY_FIELD_NAME_SUFFIX_RE = re.compile(
+    r"(?:Field\(\)\?\.Name|Field\.Name|gbName)(?:\s*\|\|\s*[^)]*)?\s*\)?\s*\+\s*['\"](?P<suffix>-[A-Za-z0-9_-]+)['\"]",
+    re.IGNORECASE,
+)
+_DATA_CY_TEMPLATE_SUFFIX_RE = re.compile(
+    r"`\$\{(?:this\.)?(?:formControlName|controlName)\}(?P<suffix>-[A-Za-z0-9_-]+)`",
+    re.IGNORECASE,
+)
 
 _MAX_IMPORT_DEPTH = 1
 _MAX_EXTRA_FILES = 15
+# A module can import many services and directives. For the one additional
+# dependency level below, retain only a few component templates: they provide
+# real DOM selectors without sending an unbounded library tree to the model.
+_MAX_MODULE_COMPONENT_TEMPLATES = 5
 
 # Hard ceiling on total source_files content sent to ProjectAnalysisAgent,
 # in characters. This is the safety net for the case items 1-3 can't fully
@@ -128,6 +167,35 @@ def _resolve_import_to_tree_path(import_path: str, current_dir: str, tree_set: s
     return None
 
 
+def _component_keywords_from_screen_html(html_contents: list[str]) -> set[str]:
+    """Return component-name hints for custom controls actually used here.
+
+    ``<gb-newpicklist>`` becomes both ``newpicklist`` and ``picklist`` so it
+    can match this repository's ``gbpicklist.component.ts`` naming. These
+    hints narrow the module-only second hop to components that can render the
+    current screen, rather than spending its small cap on unrelated controls.
+    """
+    keywords: set[str] = set()
+    for html in html_contents:
+        for tag in _CUSTOM_COMPONENT_RE.findall(html or ""):
+            name = tag.lower().replace("-", "")
+            if not name.startswith("gb"):
+                continue
+            name = name[2:]
+            if name:
+                keywords.add(name)
+                if name.startswith("new") and len(name) > 3:
+                    keywords.add(name[3:])
+    return keywords
+
+
+def _component_path_matches_keywords(path: str, keywords: set[str]) -> bool:
+    """Does a module import plausibly implement one screen custom tag?"""
+    basename = path.rsplit("/", 1)[-1].lower()
+    normalized = re.sub(r"[^a-z0-9]", "", basename)
+    return any(keyword in normalized for keyword in keywords)
+
+
 def _fetch_source_project_context(src: GitLabService, resolved: ResolvedSource,
                                    source_tree: list[str] | None = None) -> dict:
     _SKIP_SUFFIXES = (".spec.ts", ".scss", ".css", ".json")
@@ -157,6 +225,10 @@ def _fetch_source_project_context(src: GitLabService, resolved: ResolvedSource,
         extra_fetched = 0
         frontier = list(fetched.items())
         seen_paths = set(fetched.keys())
+        screen_component_keywords = _component_keywords_from_screen_html([
+            content for path, content in fetched.items()
+            if path.startswith(f"{resolved.dir}/") and path.endswith(".html")
+        ])
 
         for _ in range(_MAX_IMPORT_DEPTH):
             if extra_fetched >= _MAX_EXTRA_FILES or not frontier:
@@ -206,10 +278,74 @@ def _fetch_source_project_context(src: GitLabService, resolved: ResolvedSource,
                             next_frontier.append((resolved_ts, ts_content))
             frontier = next_frontier
 
+        # A screen commonly imports an Angular module (for example a picklist
+        # module), while the real component template is imported by that
+        # module. The normal one-level walk intentionally stops before that
+        # second hop to avoid a dependency-tree explosion. Inspect only the
+        # fetched module files here. Only consider component imports that
+        # plausibly implement a custom tag found in THIS screen's HTML; this
+        # captures the actual DOM selectors without spending the cap on every
+        # generic control exported by a form-controls module.
+        module_templates_fetched = 0
+        module_component_ts_fetched = 0
+        module_files = [
+            (path, content)
+            for path, content in fetched.items()
+            if path.endswith(".module.ts")
+        ]
+        for module_path, module_content in module_files:
+            if (
+                extra_fetched >= _MAX_EXTRA_FILES
+                or module_templates_fetched >= _MAX_MODULE_COMPONENT_TEMPLATES
+            ):
+                break
+            module_dir = module_path.rsplit("/", 1)[0] if "/" in module_path else ""
+            for import_path in _IMPORT_RE.findall(module_content):
+                if (
+                    extra_fetched >= _MAX_EXTRA_FILES
+                    or module_templates_fetched >= _MAX_MODULE_COMPONENT_TEMPLATES
+                ):
+                    break
+                component_ts = _resolve_import_to_tree_path(import_path, module_dir, tree_set)
+                if (
+                    not component_ts
+                    or not component_ts.endswith(".ts")
+                    or not _component_path_matches_keywords(component_ts, screen_component_keywords)
+                ):
+                    continue
+                component_html = component_ts[:-3] + ".html"
+                html_content = fetched.get(component_html)
+                if component_html not in seen_paths and component_html in tree_set:
+                    html_content = src.fetch_file(component_html)
+                    if html_content is not None:
+                        seen_paths.add(component_html)
+                        fetched[component_html] = html_content
+                        extra_fetched += 1
+                        module_templates_fetched += 1
+
+                # The template is the preferred source for rendered DOM
+                # selectors. If it has no data-cy binding (or no template is
+                # present), pull this one component's TS as a non-recursive
+                # fallback: selector construction is sometimes defined there.
+                if (
+                    (html_content is None or not _DATA_CY_BINDING_RE.search(html_content))
+                    and component_ts not in seen_paths
+                    and extra_fetched < _MAX_EXTRA_FILES
+                ):
+                    ts_content = src.fetch_file(component_ts)
+                    if ts_content is not None:
+                        seen_paths.add(component_ts)
+                        fetched[component_ts] = ts_content
+                        extra_fetched += 1
+                        module_component_ts_fetched += 1
+
         if extra_fetched:
             logger.info(
-                "pulled in %d additional library file(s) referenced by %s (up to depth %d)",
+                "pulled in %d additional library file(s) referenced by %s "
+                "(up to depth %d, including %d relevant module component template(s) "
+                "and %d component TS fallback file(s))",
                 extra_fetched, resolved.dir, _MAX_IMPORT_DEPTH,
+                module_templates_fetched, module_component_ts_fetched,
             )
 
     # Build project_context directly from `fetched`, in insertion order —
@@ -324,9 +460,33 @@ def _build_locator_map(project_analysis: dict) -> dict[str, str]:
     locator_map: dict[str, str] = {}
 
     def _best_locator(obj: dict) -> str | None:
+        # ProjectAnalysisAgent's structured automation contract is the
+        # authoritative source.  A verified data-cy value has already been
+        # traced through any shared component by the analysis agent, so never
+        # replace it with a legacy display field such as preferred_locator.
+        automation_locator = obj.get("automation_locator")
+        if isinstance(automation_locator, dict):
+            strategy = (automation_locator.get("strategy") or "").lower()
+            value = automation_locator.get("value")
+            if (
+                automation_locator.get("verified") is True
+                and strategy == "data_cy"
+                and value
+                and value != "Unknown"
+            ):
+                return value
+
+            # A structured result was supplied, but it is either not proven
+            # or it uses another locator strategy.  This string-only map is
+            # advertised to ScriptGenerateAgent as data-cy values, therefore
+            # it must not silently reinterpret an id/CSS/text locator as
+            # data-cy.  The full automation contract still carries that
+            # non-data-cy locator with its correct strategy.
+            return None
+
         locator = (
-            obj.get("preferred_locator")
-            or obj.get("data_cy")
+            obj.get("data_cy")
+            or obj.get("preferred_locator")
             or obj.get("id")
             or obj.get("name")
         )
@@ -382,8 +542,138 @@ def _build_locator_map(project_analysis: dict) -> dict[str, str]:
     return locator_map
 
 
+def _add_missing_locator_fallbacks(locator_map: dict[str, str], fallbacks: dict[str, str]) -> None:
+    """Add direct-source fallback values without replacing agent evidence."""
+    for name, locator in fallbacks.items():
+        locator_map.setdefault(name, locator)
+
+
+def _build_shared_component_locator_map(project_context: dict) -> dict[str, str]:
+    """Return source-proven custom-control ``name -> data-cy`` mappings.
+
+    This supplements, rather than replaces, the analysis-agent locator map.
+    It reads each screen control's static ``formControlName`` and joins it to
+    the data-cy suffix construction found in the fetched implementation of
+    that control's shared component. A mapping is emitted only if exactly one
+    suffix is evidenced for the component; missing or ambiguous source stays
+    unresolved so the generator never receives a guessed selector.
+    """
+    files = project_context.get("source_files", []) or []
+    primary_dir = (project_context.get("primary_dir") or "").rstrip("/") + "/"
+    controls_by_tag: dict[str, set[str]] = {}
+
+    for source_file in files:
+        path = source_file.get("path", "")
+        content = source_file.get("content", "") or ""
+        if not path.startswith(primary_dir) or not path.endswith(".html"):
+            continue
+        for match in _CUSTOM_OPENING_TAG_RE.finditer(content):
+            control = _STATIC_FORM_CONTROL_RE.search(match.group("attributes"))
+            if control:
+                controls_by_tag.setdefault(match.group(1).lower(), set()).add(control.group("name"))
+
+    resolved: dict[str, str] = {}
+    for tag, control_names in controls_by_tag.items():
+        keywords = _component_keywords_from_screen_html([f"<{tag}>"])
+        suffixes: set[str] = set()
+        for source_file in files:
+            path = source_file.get("path", "")
+            content = source_file.get("content", "") or ""
+            # Relevant shared templates are fetched by
+            # _fetch_source_project_context. Restricting the scan to their
+            # component-like paths avoids applying an unrelated rule.
+            if path.startswith(primary_dir) or not _component_path_matches_keywords(path, keywords):
+                continue
+            suffixes.update(m.group("suffix") for m in _DATA_CY_CONCAT_SUFFIX_RE.finditer(content))
+            suffixes.update(m.group("suffix") for m in _DATA_CY_FIELD_NAME_SUFFIX_RE.finditer(content))
+            suffixes.update(m.group("suffix") for m in _DATA_CY_TEMPLATE_SUFFIX_RE.finditer(content))
+
+        if len(suffixes) == 1:
+            suffix = next(iter(suffixes))
+            resolved.update({name: f"{name}{suffix}" for name in control_names})
+        elif suffixes:
+            logger.warning(
+                "shared selector resolver skipped %s: ambiguous data-cy suffixes %s",
+                tag, sorted(suffixes),
+            )
+
+    return resolved
+
+
+def _build_automation_contract(project_analysis: dict) -> dict:
+    """Build the compact source-derived UI contract consumed by the script
+    generator. It preserves selector strategy and interaction details that a
+    name-to-data-cy map cannot represent, without forwarding the entire
+    architecture analysis or raw source text a second time."""
+    modules = project_analysis.get("modules") or []
+    page = ((modules[0].get("pages") or [{}])[0] if modules else {})
+
+    field_keys = (
+        "field_key", "label", "control_name", "component_kind",
+        "component_category", "data_cy", "id", "name", "required",
+        "readonly", "disabled", "hidden", "visibility_condition",
+        "automation_locator", "automation_interaction", "source_evidence",
+    )
+    action_keys = (
+        "action_name", "data_cy", "id", "preferred_locator",
+        "automation_locator", "source_evidence",
+    )
+
+    fields = []
+    for form in page.get("forms") or []:
+        for field in form.get("fields") or []:
+            if isinstance(field, dict):
+                fields.append({
+                    "context": "form",
+                    "form_name": form.get("form_name"),
+                    **{key: field.get(key) for key in field_keys if key in field},
+                })
+
+    # Repeating controls are not part of forms[].fields[]. Retaining them is
+    # essential for scripts that add, edit, or remove a grid row.
+    for loop in page.get("loops") or []:
+        for field in loop.get("fields") or []:
+            if isinstance(field, dict):
+                fields.append({
+                    "context": "loop",
+                    "loop_type": loop.get("loop_type"),
+                    "index_variable": loop.get("index_variable"),
+                    **{key: field.get(key) for key in field_keys if key in field},
+                })
+
+    def action_contract(action: dict) -> dict:
+        return {key: action.get(key) for key in action_keys if key in action}
+
+    tables = []
+    for table in page.get("tables") or []:
+        if not isinstance(table, dict):
+            continue
+        tables.append({
+            "grid_name": table.get("grid_name"),
+            "automation_locator": table.get("automation_locator"),
+            "row_identity": table.get("row_identity"),
+            "column_details": table.get("column_details") or [],
+            "row_actions": [action_contract(a) for a in table.get("row_actions") or [] if isinstance(a, dict)],
+            "toolbar_actions": [action_contract(a) for a in table.get("toolbar_actions") or [] if isinstance(a, dict)],
+        })
+
+    return {
+        "navigation_entry_type": page.get("navigation_entry_type"),
+        "navigation_path": page.get("navigation_path") or [],
+        "screen_sections": page.get("screen_sections") or [],
+        "fields": fields,
+        "business_actions": [action_contract(a) for a in page.get("business_actions") or [] if isinstance(a, dict)],
+        "tables": tables,
+        "dialogs": page.get("dialogs") or [],
+        "automation_readiness": page.get("automation_readiness") or {},
+        "unresolved": project_analysis.get("unresolved") or [],
+    }
+
+
 async def send_log(ws: WebSocket, text: str, tone: str = "secondary"):
     await ws.send_json({"type": "log", "text": text, "tone": tone})
+    # Let the ASGI server flush this event before the caller starts more work.
+    await asyncio.sleep(0)
 
 async def send_status(ws: WebSocket, phase: str):
     await ws.send_json({"type": "status", "phase": phase})
@@ -669,7 +959,11 @@ async def _generate_one_screen(ws: WebSocket, src: GitLabService, module: str,
     tag = f"[{label}] " if label else ""
     try:
         await send_log(ws, f"{tag}fetching source files...", "secondary")
-        project_context = _fetch_source_project_context(src, resolved_source, source_tree)
+        # GitLab file reads are synchronous. Keep them off the WebSocket event
+        # loop so this progress message reaches the browser immediately.
+        project_context = await asyncio.to_thread(
+            _fetch_source_project_context, src, resolved_source, source_tree,
+        )
         project_context = _enforce_source_char_budget(project_context)
         await send_log(
             ws,
@@ -708,8 +1002,18 @@ async def _generate_one_screen(ws: WebSocket, src: GitLabService, module: str,
         )
 
         locator_map = _build_locator_map(project_analysis)
-        await send_log(ws, f"{tag}running script generate agent ({len(locator_map)} known locator(s))...", "secondary")
-        generated_script = await script_generate_agent.generate_script(test_cases=test_cases, locator_map=locator_map)
+        shared_component_locators = _build_shared_component_locator_map(project_context)
+        # ProjectAnalysisAgent's verified automation contract is authoritative.
+        # The lightweight direct-source scanner can only supplement a missing
+        # entry; it must never replace the agent's component-aware conclusion.
+        _add_missing_locator_fallbacks(locator_map, shared_component_locators)
+        automation_contract = _build_automation_contract(project_analysis)
+        await send_log(ws, f"{tag}running script generate agent ({len(locator_map)} known locator(s), {len(shared_component_locators)} resolved from shared component source)...", "secondary")
+        generated_script = await script_generate_agent.generate_script(
+            test_cases=test_cases,
+            locator_map=locator_map,
+            automation_contract=automation_contract,
+        )
 
         await send_log(ws, f"{tag}running validate agent...", "secondary")
         validation_result = await validate_agent.validate(
@@ -750,8 +1054,10 @@ async def handle_generate(ws: WebSocket, session: dict, msg: dict):
     out_tree = None
     out_gl   = None
     try:
-        out_gl   = _gitlab_service()
-        out_tree = out_gl.get_repo_tree()
+        # Tree listing is paginated and can be slow for a large repository.
+        # A worker thread keeps the WebSocket responsive while it runs.
+        out_gl   = await asyncio.to_thread(_gitlab_service)
+        out_tree = await asyncio.to_thread(out_gl.get_repo_tree)
     except Exception as e:
         await send_log(ws, f"could not check output repo ({e}) — will resolve path on approve.", "muted")
 
@@ -779,8 +1085,8 @@ async def handle_generate(ws: WebSocket, session: dict, msg: dict):
 
     await send_log(ws, "reading source repo structure...", "secondary")
     try:
-        src      = _source_gitlab_service()
-        src_tree = src.get_repo_tree()
+        src      = await asyncio.to_thread(_source_gitlab_service)
+        src_tree = await asyncio.to_thread(src.get_repo_tree)
     except Exception as e:
         await send_error(ws, f"source gitlab connection failed: {e}")
         return
