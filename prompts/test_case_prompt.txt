@@ -268,20 +268,20 @@ For every CREATE scenario, the step sequence must be:
   1. I click the Add New button (or equivalent)
   2. I enter/select field values
   3. I click the Save button
-  4. Then I should see "<success message>"
+  4. Then I should see the confirmation message "<success message>"
 
 For every READ/UPDATE scenario, the step sequence must be:
   1. I select/search for "<existing record>" in the "<primary key>" field
   2. I verify/modify field values
   3. I click Save (for Update only)
-  4. Then I should see "<success/value>"
+  4. Then I should see the confirmation message "<success message>"
 
 For every DELETE scenario, the step sequence must be:
   1. I select/search for "<existing record>" in the "<primary key>" field
   2. I click the Delete button
-  3. Then I should see "<confirmation message>"
+  3. Then I should see the confirmation message "<confirmation message>"
   4. When I click Confirm/Cancel
-  5. Then I should see "<result>"
+  5. Then I should see the confirmation message "<result>"
 
 EXAMPLES TABLE LABELING (preferred, not forced): when a Scenario Outline
 has an Examples table, add a labeled first column (e.g. "Condition")
@@ -399,7 +399,7 @@ Feature: Skill Domain Management
     When I enter "<DomainCode>" in the "DomainCode" field
     And I enter "<DomainName>" in the "DomainName" field
     And I click the Save button
-    Then I should see "<ValidationMessage>"
+    Then I should see the validation message "<ValidationMessage>"
 
     Examples:
       | Condition      | DomainCode | DomainName | ValidationMessage |
@@ -410,12 +410,12 @@ Feature: Skill Domain Management
     When I enter "<DomainCode>" in the "DomainCode" field
     And I enter "<DomainName>" in the "DomainName" field
     And I click the Save button
-    Then I should see "Details Saved Successfully"
+    Then I should see the confirmation message "<Message>"
 
     Examples:
-      | Condition         | DomainCode | DomainName |
-      | Technology domain  | SD001      | Technology |
-      | Safety domain       | SD002      | Safety     |
+      | Condition         | DomainCode | DomainName | Message                    |
+      | Technology domain  | SD001      | Technology | Details Saved Successfully |
+      | Safety domain       | SD002      | Safety     | Details Saved Successfully |
 
 
 #EXAMPLE — Case B: tabbed screen, 3-level navigation (Module -> Menu/
@@ -435,7 +435,7 @@ Feature: Item Master Management
     When I enter "<ItemCode>" in the "Item Code" field
     And I enter "<ItemName>" in the "Item Name" field
     And I click the Save button
-    Then I should see "<ValidationMessage>"
+    Then I should see the validation message "<ValidationMessage>"
 
     Examples:
       | Condition        | ItemCode | ItemName | ValidationMessage |
@@ -446,7 +446,7 @@ Feature: Item Master Management
     Scenario Outline: Set item classification
       When I select "<ItemType>" in the "Item Type" field
       And I click the Save button
-      Then I should see "Details Saved Successfully"
+      Then I should see the confirmation message "Details Saved Successfully"
 
       Examples:
         | Condition          | ItemType |
@@ -457,12 +457,12 @@ Feature: Item Master Management
     Scenario: Enable item as purchasable
       When I check the "Is Purchasable" checkbox
       And I click the Save button
-      Then I should see "Details Saved Successfully"
+      Then I should see the confirmation message "Details Saved Successfully"
 
     Scenario Outline: Validate purchase rate boundary
       When I enter "<PurchaseRate>" in the "Purchase Rate" field
       And I click the Save button
-      Then I should see "<ValidationMessage>"
+      Then I should see the validation message "<ValidationMessage>"
 
       Examples:
         | Condition            | PurchaseRate | ValidationMessage        |

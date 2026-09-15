@@ -16,6 +16,7 @@ from service.architecture_resolver import (
 )
 from service.cypress_runner import run_cypress, CypressRunError
 from Agents.project_analyze_agent import ProjectAnalysisAgent
+from Agents.shared_component_locator_agent import SharedComponentLocatorAgent
 from Agents.test_case_agent import TestCaseAgent
 from Agents.script_generate_agent import ScriptGenerateAgent
 from Agents.validate_agent import ValidateAgent
@@ -30,6 +31,7 @@ logger = logging.getLogger(__name__)
 app = FastAPI()
 
 project_analysis_agent = ProjectAnalysisAgent()
+shared_component_locator_agent = SharedComponentLocatorAgent()
 test_case_agent        = TestCaseAgent()
 script_generate_agent  = ScriptGenerateAgent()
 validate_agent         = ValidateAgent()
@@ -548,6 +550,86 @@ def _add_missing_locator_fallbacks(locator_map: dict[str, str], fallbacks: dict[
         locator_map.setdefault(name, locator)
 
 
+def _unresolved_shared_fields(project_analysis: dict) -> list[dict]:
+    """Return custom fields whose main analysis has no verified locator."""
+    unresolved: list[dict] = []
+    for module in project_analysis.get("modules") or []:
+        for page in module.get("pages") or []:
+            for form in page.get("forms") or []:
+                for field in form.get("fields") or []:
+                    if not isinstance(field, dict):
+                        continue
+                    kind = field.get("component_kind") or ""
+                    locator = field.get("automation_locator") or {}
+                    if kind.startswith("gb-") and not locator.get("verified"):
+                        unresolved.append(field)
+    return unresolved
+
+
+def _build_shared_locator_context(project_context: dict, unresolved_fields: list[dict]) -> dict:
+    """Narrow a retry to the primary markup and matching shared templates."""
+    primary_dir = (project_context.get("primary_dir") or "").rstrip("/") + "/"
+    tags = {field.get("component_kind", "").lower() for field in unresolved_fields}
+    keywords: set[str] = set()
+    for tag in tags:
+        keywords.update(_component_keywords_from_screen_html([f"<{tag}>"]))
+
+    source_files = []
+    for source_file in project_context.get("source_files") or []:
+        path = source_file.get("path", "")
+        if (
+            path.startswith(primary_dir)
+            or (path.endswith(".html") and _component_path_matches_keywords(path, keywords))
+        ):
+            source_files.append({
+                "path": path,
+                "content": source_file.get("content", ""),
+            })
+
+    return {
+        "primary_dir": project_context.get("primary_dir"),
+        "unresolved_controls": [
+            {
+                "control_name": field.get("control_name"),
+                "component_kind": field.get("component_kind"),
+                "component_category": field.get("component_category"),
+                "label": field.get("label"),
+            }
+            for field in unresolved_fields
+        ],
+        "source_files": source_files,
+    }
+
+
+def _merge_shared_locator_results(project_analysis: dict, resolution: dict) -> int:
+    """Merge only verified data-cy results into their matching unresolved fields."""
+    resolved_by_name = {
+        item.get("control_name"): item
+        for item in resolution.get("resolved_fields") or []
+        if isinstance(item, dict)
+        and isinstance(item.get("automation_locator"), dict)
+        and item["automation_locator"].get("verified") is True
+        and item["automation_locator"].get("strategy") == "data_cy"
+        and item["automation_locator"].get("value")
+    }
+    merged = 0
+    for field in _unresolved_shared_fields(project_analysis):
+        result = resolved_by_name.get(field.get("control_name"))
+        if not result:
+            continue
+        locator = result["automation_locator"]
+        field["data_cy"] = locator["value"]
+        field["preferred_locator"] = locator["value"]
+        field["automation_locator"] = locator
+        field["automation_interaction"] = result.get(
+            "automation_interaction", field.get("automation_interaction", {})
+        )
+        field["source_evidence"] = result.get("source_evidence", [])
+        field["resolution_trace"] = "Resolved by shared-component locator analysis"
+        merged += 1
+    return merged
+
+
 def _build_shared_component_locator_map(project_context: dict) -> dict[str, str]:
     """Return source-proven custom-control ``name -> data-cy`` mappings.
 
@@ -982,6 +1064,21 @@ async def _generate_one_screen(ws: WebSocket, src: GitLabService, module: str,
         project_analysis = await project_analysis_agent.analyze(
             project_context=project_context, user_request=user_request,
         )
+        unresolved_shared_fields = _unresolved_shared_fields(project_analysis)
+        if unresolved_shared_fields:
+            await send_log(
+                ws,
+                f"{tag}resolving {len(unresolved_shared_fields)} unresolved shared control(s)...",
+                "secondary",
+            )
+            shared_resolution = await shared_component_locator_agent.resolve(
+                _build_shared_locator_context(project_context, unresolved_shared_fields)
+            )
+            merged_count = _merge_shared_locator_results(project_analysis, shared_resolution)
+            logger.info(
+                "%sshared-component locator resolution merged %d/%d field(s): %s",
+                tag, merged_count, len(unresolved_shared_fields), shared_resolution,
+            )
         logger.info("%sanalysis output=%s", tag, project_analysis)
 
         source_hints = _extract_source_hints(project_context)

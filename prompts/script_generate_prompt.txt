@@ -43,6 +43,11 @@ items. Apply it as follows:
 - If the contract lists an unresolved dependency or automation blocker needed by
   a feature step, implement the step with the safest confirmed selector only;
   do not invent a selector, control type, success message, or API behavior.
+- `field_key` is an identity value only. Never turn it, a control name, a
+  component class name, or a screen name into a `data-cy` selector. In
+  particular, an unresolved shared control does not authorize selectors such
+  as `DomainCode-skilldomain`; omit the unsupported interaction rather than
+  fabricating a locator.
 - The BDD feature controls WHAT must be covered. The Automation Contract controls
   HOW the real UI is located and interacted with. If they conflict, preserve the
   feature's intent and use the contract's verified UI facts.
@@ -186,31 +191,52 @@ inside it) and must stay two separate {string} parameters feeding two
 separate clicks, exactly as shown above, never merged into one.
 
 
+#RESOLVED FIELD-CONTROL LOOKUP (WHEN SUPPLIED)
+
+When a `Resolved field-control lookup` is supplied, it maps Gherkin field
+wording to exact verified `data_cy` values and interaction types. Emit one
+literal JavaScript `resolvedControls` object containing those values and have
+every parameterized field handler use that object. Never construct a selector
+by appending a suffix to `field`, `checkbox`, `action`, or another label
+parameter. For example, `resolvedControls[field].dataCy` is valid while a
+template such as `${field}-PickList` is forbidden. The lookup keys are
+exactly `dataCy`, `interactionType`, and `target`.
+
+If you are asked to repair an existing script, the resolvedControls object
+must be copied into the repaired output EXACTLY as it appeared in the
+invalid script — same keys, same dataCy values, same interactionType values.
+Do not add, remove, or rename any entry. Do not rewrite any step definition
+that is not directly named in the violations list. Only the specific
+violation must be fixed; everything else must be preserved verbatim.
+
 #DROPDOWN / PICKLIST / COMBOBOX FIELDS
 
 Angular Material dropdowns (mat-select), and this project's custom
 combobox/picklist components, are NOT native HTML <select> elements —
 using Cypress's `.select(value)` command against one will fail at
-runtime, since that command only works on a real <select>. Confirmed
-real pattern, used consistently across every verified screen in this
-codebase:
+runtime, since that command only works on a real <select>. The interaction
+pattern depends on the verified `interactionType`:
 
-  cy.get(`[data-cy="${fieldDataCy}"]`).click();
-  cy.get('.cdk-overlay-container').contains('mat-option', optionText).click({ force: true });
+  material_option:
+    cy.get(`[data-cy="${control.dataCy}"]`).click();
+    cy.get('.cdk-overlay-container').contains('mat-option', optionText).click({ force: true });
 
-Use this pattern (as a plain function, per #REAL PROJECT CONVENTIONS —
-see #EXAMPLE's selectMatOption for the full shape) for ANY field the
-feature describes as a dropdown, combobox, picklist, or "select from"
-action. Only use `.select(value)` if the supplied source explicitly shows
-a genuine native <select> tag for that exact field — never as a default
-or a guess.
+  picklist:
+    cy.get(`[data-cy="${control.dataCy}"]`).click();
+    cy.get(`[data-cy="${control.dataCy}"]`).find('input').clear().type(optionText);
+    cy.get('.ng-dropdown-panel').contains('.ng-option', optionText).click({ force: true });
+
+Use `material_option` only for verified Material controls and `picklist`
+only for verified `ng-select` controls. Never use `mat-option` for a
+verified `picklist`, and never use `.select()` unless the exact contract
+explicitly says `native_select`.
 
 
 Treat selection wording as a dropdown signal:
 
 - phrases like "select", "choose", "pick", "from the dropdown", "from the
-  list", or "from the ComboBox" must use the click + option selection
-  pattern above
+  list", or "from the ComboBox" must use the verified interaction type in
+  `resolvedControls`, not the wording alone
 - do not use `.type()` for those fields unless the source explicitly
   shows a searchable input and the feature step is describing the search
   text itself
@@ -364,16 +390,21 @@ beforeEach(() => {
     loginSession()
 })
 
-function selectMatOption(fieldDataCy, optionText) {
+function selectControl(control, optionText) {
     if (!optionText) return;
     dismissSuggestionDropdown();
-    cy.get(`[data-cy="${fieldDataCy}"]`).click();
-    cy.get('.cdk-overlay-container').contains('mat-option', optionText).click({ force: true });
+  cy.get(`[data-cy="${control.dataCy}"]`).click();
+  if (control.interactionType === 'picklist') {
+    cy.get(`[data-cy="${control.dataCy}"]`).find('input').clear().type(optionText);
+    cy.get('.ng-dropdown-panel').contains('.ng-option', optionText).click({ force: true });
+    return;
+  }
+  cy.get('.cdk-overlay-container').contains('mat-option', optionText).click({ force: true });
 }
 
-function clickCheckBox(value) {
+function clickCheckBox(dataCy) {
     dismissSuggestionDropdown();
-    cy.get(`[data-cy="${value}-UnCheckBox"] input[type="checkbox"]`)
+  cy.get(`[data-cy="${dataCy}"] input[type="checkbox"]`)
         .scrollIntoView()
         .click({ force: true });
 }
@@ -431,7 +462,7 @@ function dismissSuggestionDropdown() {
 function enterCodeValue(value, field) {
     openNewDomainModalIfNeeded();
     if (!value) return;
-    cy.get(`[data-cy="${field}-PickList"]`)
+    cy.get(`[data-cy="${resolvedControls[field].dataCy}"]`)
         .should('be.visible')
         .clear()
         .type(value);
@@ -440,7 +471,7 @@ function enterCodeValue(value, field) {
 
 function enterNameValue(value, field) {
     if (!value) return;
-    cy.get(`[data-cy="${field}-PickList"]`)
+    cy.get(`[data-cy="${resolvedControls[field].dataCy}"]`)
         .should('be.visible')
         .clear()
         .type(value);
@@ -514,7 +545,7 @@ Then("I confirm the delete", () => {
 })
 
 Then("the {string} checkbox should be checked", (value) => {
-    cy.get(`[data-cy="${value}-UnCheckBox"] input[type="checkbox"]`).should('be.checked');
+  cy.get(`[data-cy="${resolvedControls[value].dataCy}"] input[type="checkbox"]`).should('be.checked');
 })
 
 Then("I close the edit modal", () => {
@@ -542,22 +573,22 @@ Then("I should see the validation message {string}", (messages) => {
     });
 });
 
-Then("I should see a confirmation message {string}", (value) => {
+Then("I should see the confirmation message {string}", (value) => {
     cy.contains(value).should('be.visible')
     cy.get('.mat-mdc-dialog-component-host > .mat-icon').click()
 })
 
 Then("I select {string} from the {string} ComboBox field", (option, field) => {
-    selectMatOption(`${field}-ComboBox`, option)
+  selectControl(resolvedControls[field], option)
 })
 
 Then("I enter {string} in the {string} textarea field", (value, field) => {
     if (!value) return;
-    cy.get(`[data-cy="${field}-Textarea"]`).click({ force: true }).should('be.visible').type(value)
+    cy.get(`[data-cy="${resolvedControls[field].dataCy}"]`).click({ force: true }).should('be.visible').type(value)
 })
 
 When("I check the {string} checkbox", (value) => {
-    clickCheckBox(value)
+  clickCheckBox(resolvedControls[value].dataCy)
 })
 
 Then("the Skill Domain form should be reset to empty", () => {
@@ -589,6 +620,9 @@ Return executable JavaScript source and nothing else. Your response must:
 - contain every required helper and step definition as JavaScript only; and
 - register each exact Cucumber step-expression only once. Reuse the same
   handler/helper for repeated feature wording instead of declaring duplicate
-  `Given`/`When`/`Then` patterns.
+  `Given`/`When`/`Then` patterns. This applies to tabbed screens too — even
+  if the feature has multiple tabs or sections all using the same step wording,
+  the step definition must appear exactly once in the script. Never register
+  the same step pattern once per tab.
 
 Do not describe this check. Output only the final raw `.js` file content.
