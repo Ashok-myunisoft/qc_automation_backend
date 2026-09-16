@@ -29,15 +29,7 @@ def _strip_outer_javascript_fence(text: str) -> str:
     return match.group("body").strip() if match else text
 
 
-_STEP_DEFINITION_RE = re.compile(
-    r"\b(?:Given|When|Then)\(\s*(['\"])(?P<step>.*?)\1\s*,",
-    re.DOTALL,
-)
-_LABEL_DERIVED_SELECTOR_RE = re.compile(
-    r"(?:data-cy|dataCy)[^\n`]*\$\{\s*(?:field|checkbox|action|value)\s*\}-"
-    r"(?:PickList|ComboBox|CheckBox|Textarea|Form)",
-    re.IGNORECASE,
-)
+
 
 
 def _build_resolved_control_lookup(automation_contract: dict | None) -> dict[str, dict]:
@@ -79,46 +71,13 @@ def _controls_referenced_by_feature(
 
 
 def _script_output_violations(script: str) -> list[str]:
-    """Catch deterministic invalid output before it reaches ValidateAgent."""
+    """Only catches structural output issues the validate agent cannot fix.
+    Semantic checks (duplicate steps, missing locators, wrong interaction
+    types) are delegated to ValidateAgent — not hardcoded here.
+    """
     violations = []
     if "```" in script:
         violations.append("contains a Markdown code fence")
-    if _LABEL_DERIVED_SELECTOR_RE.search(script):
-        violations.append("derives a selector from a step-label parameter")
-    steps = [match.group("step") for match in _STEP_DEFINITION_RE.finditer(script)]
-    duplicates = sorted({step for step in steps if steps.count(step) > 1})
-    if duplicates:
-        violations.append("registers duplicate Cucumber steps: " + ", ".join(duplicates))
-    return violations
-
-
-def _interaction_violations(script: str, controls: dict[str, dict]) -> list[str]:
-    """Check verified controls against the interaction primitives in output."""
-    violations = []
-    for name, control in controls.items():
-        data_cy = control["dataCy"]
-        interaction = str(control.get("interactionType", "")).lower()
-        if data_cy not in script:
-            violations.append(f'verified locator for "{name}" is missing')
-            continue
-        local_contexts = []
-        for match in re.finditer(re.escape(data_cy), script):
-            start = script.rfind("\n", 0, match.start()) + 1
-            end = min(len(script), match.end() + 300)
-            local_contexts.append(script[start:end])
-        local_script = "\n".join(local_contexts)
-        if interaction == "picklist":
-            if "mat-option" in local_script:
-                violations.append(f'picklist "{name}" uses Material mat-option interaction')
-            direct_native_select = re.search(
-                rf"data-cy\s*=\s*['\"]{re.escape(data_cy)}['\"][^;\n]*\.select\s*\(",
-                script,
-                re.IGNORECASE,
-            )
-            if direct_native_select:
-                violations.append(f'picklist "{name}" uses native select interaction')
-        elif interaction == "material_option" and "mat-option" not in script:
-            violations.append(f'material option "{name}" does not use mat-option interaction')
     return violations
 
 
@@ -164,11 +123,7 @@ class ScriptGenerateAgent:
         )
         contract_block = json.dumps(automation_contract, indent=2) if automation_contract else "none supplied"
         resolved_controls = _build_resolved_control_lookup(automation_contract)
-        referenced_controls = _controls_referenced_by_feature(test_cases, resolved_controls)
         resolved_controls_block = json.dumps(resolved_controls, indent=2) if resolved_controls else "none supplied"
-        required_locators = ", ".join(
-            control["dataCy"] for control in referenced_controls.values()
-        ) or "none"
         user_message = f"""
 Feature file to implement (every Given/When/Then below needs a step
 definition in your output — this file is the screen's ONLY step file,
@@ -200,7 +155,6 @@ the matching action):
         response = await self.agent.run(user_message)
         script = _strip_outer_javascript_fence(response.text)
         violations = _script_output_violations(script)
-        violations.extend(_interaction_violations(script, referenced_controls))
         if not violations:
             return script
 
@@ -221,10 +175,6 @@ CRITICAL REPAIR RULES — read before changing anything:
 Violations to fix:
 {json.dumps(violations)}
 
-Verified locator strings that MUST appear in the repaired script
-(inside resolvedControls — do not omit any):
-{required_locators}
-
 Resolved field-control lookup (resolvedControls must match this exactly):
 {resolved_controls_block}
 
@@ -239,7 +189,6 @@ Invalid script to repair:
 """
         repaired = _strip_outer_javascript_fence((await self.agent.run(repair_message)).text)
         remaining = _script_output_violations(repaired)
-        remaining.extend(_interaction_violations(repaired, referenced_controls))
         if remaining:
             logger.error("ScriptGenerateAgent repair output still fails gate: %s", remaining)
             raise ValueError("ScriptGenerateAgent output failed deterministic gate after repair: " + "; ".join(remaining))
