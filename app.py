@@ -1896,6 +1896,343 @@ async def handle_screenshots(ws: WebSocket, session: dict):
     })
 
 
+# ----------------------------------------------------------------------
+# UNATTENDED AUTO-RUN — one trigger, whole pipeline, no human input.
+#
+#   discover -> generate (new AND existing, existing always REPLACED)
+#   -> auto-approve + push to GitLab -> Cypress run on everything that was
+#   pushed -> Excel report + screenshots built.
+#
+# Works for one screen or for a queue of modules. Failures are
+# skip-and-continue at every stage: a screen that fails to generate, push
+# or run is logged and the rest of the batch carries on. Progress goes
+# through the same send_log lines as Fetch/Generate/Run, and the results
+# land in the session exactly like a manual sweep + approve + run would
+# leave them, so the existing Run / Report / Screenshots buttons keep
+# working afterward. The manual flow above is not touched.
+# ----------------------------------------------------------------------
+async def _auto_push_entry(ws: WebSocket, out_gl: GitLabService, entry: dict,
+                           module: str, label: str, attempts: int = 3) -> bool:
+    """Pushes one generated screen (feature + script) to the QC repo.
+    Retries a couple of times since this runs with nobody watching and a
+    transient GitLab hiccup shouldn't cost a whole screen."""
+    resolved = entry["resolved"]
+    last_error: Exception | None = None
+    for attempt in range(1, attempts + 1):
+        try:
+            await asyncio.to_thread(
+                out_gl.create_or_update_file,
+                resolved.feature_path, entry["feature"],
+                f"QC: add/update feature file for {module}/{resolved.slug}",
+            )
+            await asyncio.to_thread(
+                out_gl.create_or_update_file,
+                resolved.script_path, entry["script"],
+                f"QC: add/update cypress script for {module}/{resolved.slug}",
+            )
+            entry["pushed"] = True
+            await send_log(ws, f"[{label}] auto-approved and pushed to gitlab at {resolved.dir}.", "success")
+            return True
+        except Exception as e:
+            last_error = e
+            logger.warning("auto-run push attempt %d/%d failed for %s: %s", attempt, attempts, label, e)
+            if attempt < attempts:
+                await asyncio.sleep(2 * attempt)
+    logger.error("auto-run push failed for %s: %s", label, last_error)
+    await send_log(ws, f"[{label}] push failed: {last_error} — this screen will not be run.", "danger")
+    return False
+
+
+async def handle_auto_run(ws: WebSocket, session: dict, msg: dict):
+    scope        = (msg.get("scope") or "module").strip().lower()
+    user_request = (msg.get("request") or "").strip()
+
+    # Prerequisite (unchanged from today): the test environment must already
+    # be set. Checked FIRST so a missing env fails in a second instead of
+    # after an hour of generation.
+    if not session.get("test_env"):
+        await send_error(
+            ws,
+            "no test environment set — set baseUrl / db / username / password before starting Auto-run.",
+        )
+        await send_status(ws, "idle")
+        return
+
+    single_screen = None
+    if scope == "screen":
+        module = (msg.get("module") or "").strip()
+        single_screen = (msg.get("screen") or "").strip()
+        if not module or not single_screen:
+            await send_error(ws, "module and screen are required.")
+            await send_status(ws, "idle")
+            return
+        modules = [module]
+    else:
+        scope = "module"
+        modules = list(dict.fromkeys(m.strip() for m in (msg.get("modules") or []) if m and m.strip()))
+        if not modules:
+            await send_error(ws, "at least one module is required.")
+            await send_status(ws, "idle")
+            return
+
+    # Fresh slate — same keys a manual "reject"/"terminate" clears.
+    for key in ("pending_generate", "pending_sweep", "screens", "module_batches",
+                "run_results", "feature", "script", "resolved"):
+        session.pop(key, None)
+    session["scope"]  = "module"
+    session["origin"] = "generate"
+    session["pushed"] = False
+    session["module"] = ", ".join(modules)
+    session["screen"] = single_screen
+    clear_screenshot_stash()
+
+    await send_status(ws, "auto_running")
+    if single_screen:
+        await send_log(
+            ws,
+            f"auto-run started for {modules[0]} / {single_screen} — generate, push, run and report will follow with no prompts.",
+            "accent",
+        )
+    else:
+        await send_log(
+            ws,
+            f"auto-run started for {len(modules)} module(s) — generate, push, run and report will follow with no prompts.",
+            "accent",
+        )
+
+    all_screens: list = []
+    module_batches: dict[str, list] = {}
+
+    try:
+        # ---------------- connect to both repos ----------------
+        await send_log(ws, "checking the QC repo for existing tests...", "secondary")
+        try:
+            out_gl   = await asyncio.to_thread(_gitlab_service)
+            out_tree = await asyncio.to_thread(out_gl.get_repo_tree)
+        except Exception as e:
+            await send_error(ws, f"QC repo gitlab connection failed: {e} — nothing to push to, auto-run stopped.")
+            await send_status(ws, "idle")
+            return
+
+        await send_log(ws, "reading source repo structure...", "secondary")
+        try:
+            src      = await asyncio.to_thread(_source_gitlab_service)
+            src_tree = await asyncio.to_thread(src.get_repo_tree)
+        except Exception as e:
+            await send_error(ws, f"source gitlab connection failed: {e} — auto-run stopped.")
+            await send_status(ws, "idle")
+            return
+        await send_log(ws, f"scanned {len(src_tree)} source files.", "secondary")
+
+        # ---------------- discover every screen in the queue ----------------
+        jobs: list[dict] = []
+        for module in modules:
+            filtered_src_tree = filter_tree_by_module(src_tree, module)
+
+            if single_screen:
+                resolved_source = await resolve_source_screen_precise(filtered_src_tree, module, single_screen)
+                if resolved_source is None:
+                    await send_log(ws, f"[{module}] no source files found for '{single_screen}' — skipping.", "danger")
+                    continue
+                if resolved_source.ambiguous:
+                    await send_log(ws, f"[{module}] more than one close match ({resolved_source.resolved_by}) — picked {resolved_source.dir} (confidence {resolved_source.confidence}).", "accent")
+                else:
+                    await send_log(ws, f"[{module}] matched source {resolved_source.dir} via {resolved_source.resolved_by} (confidence {resolved_source.confidence})", "success")
+                candidates = [(single_screen, resolved_source)]
+            else:
+                await send_log(ws, f"[{module}] scanning source repo for screens...", "secondary")
+                found = await resolve_source_module_screens_precise(filtered_src_tree, module)
+                if not found:
+                    await send_log(ws, f"[{module}] no source screens found — skipping.", "danger")
+                    continue
+                candidates = [(c.dir.rsplit("/", 1)[-1], c) for c in found]
+
+            new_count = existing_count = 0
+            for screen_name, c in candidates:
+                try:
+                    resolved_out, existed, _ef, _es = await _check_output_existing(out_gl, out_tree, module, screen_name)
+                except Exception as e:
+                    logger.warning("auto-run existing-check failed for %s/%s: %s", module, screen_name, e)
+                    resolved_out, existed = build_new_path(module, screen_name), False
+                jobs.append({
+                    "module": module, "screen_name": screen_name,
+                    "source": c, "resolved": resolved_out, "existed": existed,
+                })
+                if existed:
+                    existing_count += 1
+                else:
+                    new_count += 1
+            await send_log(
+                ws,
+                f"[{module}] {new_count + existing_count} screen(s) — {new_count} new, {existing_count} existing (will be replaced).",
+                "success",
+            )
+
+        if not jobs:
+            await send_log(ws, "no screens found across the queued modules — nothing to do.", "danger")
+            await send_status(ws, "not_found")
+            return
+
+        # ---------------- generate + auto-approve/push, screen by screen ----------------
+        total = len(jobs)
+        gen_failed = 0
+        await send_log(ws, f"generating and pushing {total} screen(s)...", "accent")
+
+        for i, job in enumerate(jobs, start=1):
+            module      = job["module"]
+            screen_name = job["screen_name"]
+            label       = f"{module}/{screen_name}"
+            await send_log(
+                ws,
+                f"[{i}/{total}] {label} — {'replacing existing tests' if job['existed'] else 'new screen'}...",
+                "accent",
+            )
+
+            screen_request = user_request or f"Generate Cypress tests for the {screen_name} screen in the {module} module."
+            try:
+                outcome = await _generate_one_screen(
+                    ws, src, module, screen_name, job["source"], screen_request,
+                    label=label, source_tree=src_tree,
+                )
+            except Exception as e:
+                logger.exception("auto-run generate crashed for %s", label)
+                await send_log(ws, f"[{label}] generation failed: {e}", "danger")
+                outcome = None
+
+            if outcome is None:
+                gen_failed += 1
+                await send_log(ws, f"[{label}] skipped — nothing generated, moving on.", "danger")
+                continue
+
+            batch = module_batches.setdefault(module, [])
+            entry = {
+                "resolved": job["resolved"], "feature": outcome["feature"], "script": outcome["script"],
+                "module": module, "moduleIndex": len(batch), "pushed": False,
+            }
+            batch.append(entry)
+            all_screens.append(entry)
+
+            await _auto_push_entry(ws, out_gl, entry, module, label)
+
+        pushed_screens = [s for s in all_screens if s.get("pushed")]
+        await send_log(
+            ws,
+            f"generate + push finished — {len(pushed_screens)}/{total} screen(s) pushed"
+            + (f", {gen_failed} failed to generate" if gen_failed else "")
+            + (f", {len(all_screens) - len(pushed_screens)} failed to push" if len(all_screens) > len(pushed_screens) else "")
+            + ".",
+            "success" if len(pushed_screens) == total else "accent",
+        )
+
+        if not all_screens:
+            await send_log(ws, "auto-run finished — nothing could be generated.", "danger")
+            await send_status(ws, "not_found")
+            return
+
+        # Same session shape a manual sweep + approve leaves behind, so the
+        # existing Run / Report / Screenshots buttons work on this result.
+        session["screens"]        = all_screens
+        session["module_batches"] = module_batches
+        session["pushed"]         = len(pushed_screens) == len(all_screens)
+
+        if not pushed_screens:
+            await send_log(ws, "nothing was pushed — skipping the Cypress run.", "danger")
+            await send_artifacts(ws, session)
+            await send_status(ws, "awaiting_approval")
+            return
+
+        # ---------------- auto-run Cypress on everything just pushed ----------------
+        session["run_results"] = []
+        await send_log(ws, f"cypress: running {len(pushed_screens)} screen(s)...", "accent")
+        fixtures = await _fetch_shared_fixtures(ws)
+
+        summary = []
+        for i, s in enumerate(pushed_screens, start=1):
+            resolved = s["resolved"]
+            slug     = resolved.slug
+            label    = f"{s.get('module', '')}/{resolved.dir}" if s.get("module") else resolved.dir
+
+            await send_log(ws, f"[{i}/{len(pushed_screens)}] {label} — preparing workspace...", "secondary")
+            await send_log(ws, f"[{i}/{len(pushed_screens)}] {label} — starting run...", "secondary")
+
+            try:
+                async for kind, payload, tone in run_cypress(
+                    session, s["feature"], s["script"], slug,
+                    fixtures=fixtures, test_env=session["test_env"],
+                ):
+                    if kind == "log":
+                        await send_log(ws, f"[{label}] {payload}", tone or "secondary")
+                    elif kind == "exit":
+                        passed = payload == 0
+                        summary.append((label, passed, payload))
+                        await send_log(ws, f"[{label}] {'PASSED' if passed else 'FAILED'} (exit {payload})",
+                                       "success" if passed else "danger")
+                    elif kind == "result":
+                        session.setdefault("run_results", []).append(payload)
+            except asyncio.CancelledError:
+                await send_log(ws, "run cancelled.", "muted")
+                raise
+            except CypressRunError as e:
+                summary.append((label, False, None))
+                await send_log(ws, f"[{label}] run error: {e}", "danger")
+                continue
+            except Exception as e:
+                logger.exception("auto-run cypress crashed for %s", label)
+                summary.append((label, False, None))
+                await send_log(ws, f"[{label}] run error: {e}", "danger")
+                continue
+
+        passed_count = sum(1 for _, p, _ in summary if p)
+        await send_log(
+            ws,
+            f"module run complete: {passed_count}/{len(summary)} screens passed.",
+            "success" if passed_count == len(summary) else "accent",
+        )
+
+        # ---------------- auto-report ----------------
+        run_results = session.get("run_results") or []
+        if run_results:
+            report_module = session.get("module") or ""
+            try:
+                xlsx_bytes = await asyncio.to_thread(report_builder.build_report_xlsx, report_module, run_results)
+                await asyncio.to_thread(report_builder.build_screenshots_html, report_module, run_results)
+                await send_log(
+                    ws,
+                    f"report ready ({len(xlsx_bytes) // 1024} KB Excel + screenshots compilation) — "
+                    f"use the Report (Excel) and Screenshots buttons to download.",
+                    "success",
+                )
+            except Exception as e:
+                logger.exception("auto-run report build failed")
+                await send_log(ws, f"report build failed: {e} — try the Report button once more.", "danger")
+        else:
+            await send_log(ws, "no run data was captured, so there is no report to build.", "danger")
+
+        await send_log(ws, "auto-run complete.", "success")
+        await send_artifacts(ws, session)
+        await send_status(ws, "done")
+        await ws.send_json({
+            "type":    "module_result",
+            "results": [{"name": name, "passed": p, "exit_code": ec} for name, p, ec in summary],
+        })
+
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:
+        logger.exception("auto-run stopped unexpectedly")
+        await send_error(ws, f"auto-run stopped unexpectedly: {e}")
+        if all_screens:
+            session["screens"]        = all_screens
+            session["module_batches"] = module_batches
+            await send_artifacts(ws, session)
+            await send_status(
+                ws,
+                "awaiting_review" if all(s.get("pushed") for s in all_screens) else "awaiting_approval",
+            )
+        else:
+            await send_status(ws, "idle")
+
+
 @app.websocket("/ws/qc")
 async def qc_session(websocket: WebSocket):
     await websocket.accept()
@@ -1933,6 +2270,9 @@ async def qc_session(websocket: WebSocket):
 
             elif action == "generate_decision":
                 session["current_task"] = asyncio.create_task(handle_generate_decision(websocket, session, msg))
+
+            elif action == "auto_run":
+                session["current_task"] = asyncio.create_task(handle_auto_run(websocket, session, msg))
 
             elif action == "approve":
                 session["current_task"] = asyncio.create_task(handle_approve(websocket, session, msg))
