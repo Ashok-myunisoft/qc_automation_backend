@@ -10,7 +10,7 @@ load_dotenv()
 
 logger = logging.getLogger(__name__)
 
-TREE_CACHE_SECONDS = 45
+TREE_CACHE_SECONDS = 3600  # 1 hour
 
 # repository_tree(recursive=True, all=True) isn't one API call for a repo of
 # any real size — python-gitlab walks it page by page under the hood, and
