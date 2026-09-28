@@ -2358,6 +2358,15 @@ async def api_history_get(run_id: int):
     return run
 
 
+@app.delete("/api/history/{run_id}")
+async def api_history_delete(run_id: int):
+    """Permanently remove one run (and its report/screenshots) from History."""
+    deleted = await asyncio.to_thread(history_store.delete_run, run_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="history entry not found")
+    return {"deleted": True, "id": run_id}
+
+
 @app.get("/api/history/{run_id}/report")
 async def api_history_report(run_id: int):
     found = await asyncio.to_thread(history_store.get_report, run_id)

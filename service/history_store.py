@@ -158,3 +158,14 @@ def get_screenshots(run_id: int) -> tuple[str, str] | None:
     if not row or row["screenshots_html"] is None:
         return None
     return row["screenshots_filename"] or f"qc-screenshots-{run_id}.html", row["screenshots_html"]
+
+
+def delete_run(run_id: int) -> bool:
+    """Delete one history row (report and screenshots included). True if a row was removed."""
+    _ensure_schema()
+    with _connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM dbo.run_history WHERE id = %s", (run_id,))
+        deleted = cursor.rowcount > 0
+        conn.commit()
+    return deleted
