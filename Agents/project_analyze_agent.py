@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 class ProjectAnalysisAgent:
     def __init__(self):
         self.client = AnthropicClient(
-            model=os.getenv("OPENAI_MODEL")
+            model=os.getenv("ANALYSIS_CLAUDE_MODEL")
         )
         self.instructions = Path(
             "prompts/project_analysis_prompt.txt").read_text(encoding="utf-8")
