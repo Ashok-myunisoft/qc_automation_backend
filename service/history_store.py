@@ -65,6 +65,11 @@ def _ensure_schema() -> None:
 
 def _row_to_dict(row: dict) -> dict:
     result = dict(row)
+    # created_at is stored as naive UTC. Mark it as UTC so the browser converts
+    # it to the viewer's local time instead of showing the raw UTC clock time.
+    created = result.get("created_at")
+    if isinstance(created, datetime) and created.tzinfo is None:
+        result["created_at"] = created.replace(tzinfo=timezone.utc)
     result["has_report"] = bool(result.get("has_report"))
     result["has_screenshots"] = bool(result.get("has_screenshots"))
     try:
