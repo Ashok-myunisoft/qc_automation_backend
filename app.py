@@ -2,7 +2,6 @@ import asyncio
 import base64
 import copy
 import logging
-import os
 import posixpath
 import re
 from pathlib import Path
@@ -34,18 +33,12 @@ logger = logging.getLogger(__name__)
 app = FastAPI()
 
 # The history screen fetches these endpoints over HTTP rather than the
-# existing WebSocket. Set CORS_ORIGINS to a comma-separated list in deployed
-# environments (for example, https://qc-ui.example.com).
-_cors_origins = [
-    origin.strip()
-    for origin in os.getenv("CORS_ORIGINS", "http://localhost:5173").split(",")
-    if origin.strip()
-]
+# existing WebSocket. The UI can be hosted from any origin.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=_cors_origins,
-    allow_methods=["GET"],
-    allow_headers=[],
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 project_analysis_agent = ProjectAnalysisAgent()
