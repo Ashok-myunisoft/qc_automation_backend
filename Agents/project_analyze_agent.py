@@ -3,7 +3,7 @@ import logging
 from pathlib import Path
 import os
 from agent_framework import Agent
-from agent_framework.openai import OpenAIChatClient
+from agent_framework.anthropic import AnthropicClient
 from dotenv import load_dotenv
 
 
@@ -13,8 +13,8 @@ logger = logging.getLogger(__name__)
 
 class ProjectAnalysisAgent:
     def __init__(self):
-        self.client = OpenAIChatClient(
-            model=os.getenv("ANALYSIS_OPENAI_MODEL")
+        self.client = AnthropicClient(
+            model=os.getenv("ANALYSIS_CLAUDE_MODEL")
         )
         self.instructions = Path(
             "prompts/project_analysis_prompt.txt").read_text(encoding="utf-8")

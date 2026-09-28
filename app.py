@@ -2,11 +2,13 @@ import asyncio
 import base64
 import copy
 import logging
+import os
 import posixpath
 import re
 from pathlib import Path
 import logger_config
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Response, WebSocket, WebSocketDisconnect
+from fastapi.middleware.cors import CORSMiddleware
 from service.gitlab_service import GitLabService
 from service.architecture_resolver import (
     build_new_path, ResolvedSource,
@@ -24,11 +26,27 @@ from Agents.append_agent import AppendAgent
 from Agents.business_context_agent import BusinessContextAgent
 from service import report_builder
 from service import chunk_analysis
+from service import history_store
 from service.cypress_runner import clear_stash as clear_screenshot_stash
 
 logger = logging.getLogger(__name__)
 
 app = FastAPI()
+
+# The history screen fetches these endpoints over HTTP rather than the
+# existing WebSocket. Set CORS_ORIGINS to a comma-separated list in deployed
+# environments (for example, https://qc-ui.example.com).
+_cors_origins = [
+    origin.strip()
+    for origin in os.getenv("CORS_ORIGINS", "http://localhost:5173").split(",")
+    if origin.strip()
+]
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=_cors_origins,
+    allow_methods=["GET"],
+    allow_headers=[],
+)
 
 project_analysis_agent = ProjectAnalysisAgent()
 shared_component_locator_agent = SharedComponentLocatorAgent()
@@ -1812,6 +1830,11 @@ async def handle_run(ws: WebSocket, session: dict):
         passed_count = sum(1 for _, p, _ in summary if p)
         await send_log(ws, f"module run complete: {passed_count}/{len(summary)} screens passed.",
                        "success" if passed_count == len(summary) else "accent")
+        await _record_history(
+            session,
+            "generate" if session.get("origin") == "generate" else "fetch",
+            session.get("run_results") or [],
+        )
         await send_status(ws, "done")
         await ws.send_json({
             "type":    "module_result",
@@ -1861,6 +1884,12 @@ async def handle_run(ws: WebSocket, session: dict):
     except asyncio.CancelledError:
         await send_log(ws, "run cancelled.", "muted")
         raise
+
+    await _record_history(
+        session,
+        "generate" if session.get("origin") == "generate" else "fetch",
+        session.get("run_results") or [],
+    )
 
 
 async def handle_report(ws: WebSocket, session: dict):
@@ -2195,7 +2224,8 @@ async def handle_auto_run(ws: WebSocket, session: dict, msg: dict):
             report_module = session.get("module") or ""
             try:
                 xlsx_bytes = await asyncio.to_thread(report_builder.build_report_xlsx, report_module, run_results)
-                await asyncio.to_thread(report_builder.build_screenshots_html, report_module, run_results)
+                shots_html = await asyncio.to_thread(report_builder.build_screenshots_html, report_module, run_results)
+                await _record_history(session, "auto_run", run_results, xlsx_bytes, shots_html)
                 await send_log(
                     ws,
                     f"report ready ({len(xlsx_bytes) // 1024} KB Excel + screenshots compilation) — "
@@ -2231,6 +2261,77 @@ async def handle_auto_run(ws: WebSocket, session: dict, msg: dict):
             )
         else:
             await send_status(ws, "idle")
+
+
+# ----------------------------------------------------------------------
+# RUN HISTORY — SQL Server persistence and GET endpoints for the History UI.
+# ----------------------------------------------------------------------
+async def _record_history(session: dict, source: str, run_results: list[dict],
+                          xlsx_bytes: bytes | None = None, shots_html: str | None = None) -> None:
+    """Persist one completed run without allowing storage errors to break it."""
+    if not run_results:
+        return
+
+    try:
+        module = session.get("module") or ""
+        if xlsx_bytes is None:
+            xlsx_bytes = await asyncio.to_thread(report_builder.build_report_xlsx, module, run_results)
+        if shots_html is None:
+            shots_html = await asyncio.to_thread(report_builder.build_screenshots_html, module, run_results)
+        screen = session.get("screen") or ", ".join(
+            str(result.get("slug")) for result in run_results if result.get("slug")
+        )
+        base = (module or "run").replace(" ", "_")
+        run_id = await asyncio.to_thread(
+            history_store.save_run,
+            source=source,
+            module=module,
+            screen=screen,
+            run_results=run_results,
+            report_filename=f"qc-report-{base}.xlsx",
+            report_xlsx=xlsx_bytes,
+            screenshots_filename=f"qc-screenshots-{base}.html",
+            screenshots_html=shots_html,
+        )
+        logger.info("run saved to SQL Server history (id=%s, source=%s)", run_id, source)
+    except Exception:
+        logger.exception("could not save run to SQL Server history")
+
+
+@app.get("/api/history")
+async def api_history_list(limit: int = 200):
+    items = await asyncio.to_thread(history_store.list_runs, min(max(limit, 1), 500))
+    return {"items": items}
+
+
+@app.get("/api/history/{run_id}")
+async def api_history_get(run_id: int):
+    run = await asyncio.to_thread(history_store.get_run, run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="history entry not found")
+    return run
+
+
+@app.get("/api/history/{run_id}/report")
+async def api_history_report(run_id: int):
+    found = await asyncio.to_thread(history_store.get_report, run_id)
+    if not found:
+        raise HTTPException(status_code=404, detail="report not found")
+    filename, data = found
+    return Response(
+        content=data,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@app.get("/api/history/{run_id}/screenshots")
+async def api_history_screenshots(run_id: int):
+    found = await asyncio.to_thread(history_store.get_screenshots, run_id)
+    if not found:
+        raise HTTPException(status_code=404, detail="screenshots not found")
+    _, html_text = found
+    return Response(content=html_text, media_type="text/html; charset=utf-8")
 
 
 @app.websocket("/ws/qc")
