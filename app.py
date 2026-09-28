@@ -26,6 +26,8 @@ from Agents.business_context_agent import BusinessContextAgent
 from service import report_builder
 from service import chunk_analysis
 from service import history_store
+from service import job_manager
+from service import job_store
 from service.cypress_runner import clear_stash as clear_screenshot_stash
 
 logger = logging.getLogger(__name__)
@@ -2259,6 +2261,31 @@ async def handle_auto_run(ws: WebSocket, session: dict, msg: dict):
 # ----------------------------------------------------------------------
 # RUN HISTORY — SQL Server persistence and GET endpoints for the History UI.
 # ----------------------------------------------------------------------
+def _clear_stash_if_idle() -> None:
+    """Wipe the screenshots stash only when no background run is using it.
+
+    A reopened UI can press Terminate/Reject while a run from a closed tab is
+    still going; that must not delete the running job's screenshots."""
+    if not job_manager.any_active():
+        clear_screenshot_stash()
+
+
+def _run_row_info(session: dict) -> tuple[str, str]:
+    """Module and screen text for a History/job row, from the current session."""
+    module = session.get("module") or ""
+    screen = session.get("screen") or ""
+    if not screen:
+        names = []
+        for s in session.get("screens") or []:
+            resolved = s.get("resolved")
+            names.append(str(getattr(resolved, "slug", "") or getattr(resolved, "dir", "") or ""))
+        if not names and session.get("resolved") is not None:
+            resolved = session["resolved"]
+            names.append(str(getattr(resolved, "slug", "") or getattr(resolved, "dir", "") or ""))
+        screen = ", ".join(n for n in names if n)
+    return module, screen
+
+
 async def _record_history(session: dict, source: str, run_results: list[dict],
                           xlsx_bytes: bytes | None = None, shots_html: str | None = None) -> None:
     """Persist one completed run without allowing storage errors to break it."""
@@ -2287,6 +2314,7 @@ async def _record_history(session: dict, source: str, run_results: list[dict],
             screenshots_html=shots_html,
         )
         logger.info("run saved to SQL Server history (id=%s, source=%s)", run_id, source)
+        session["_history_saved"] = True  # tells the background job its result is on the shelf
     except Exception:
         logger.exception("could not save run to SQL Server history")
 
@@ -2295,6 +2323,31 @@ async def _record_history(session: dict, source: str, run_results: list[dict],
 async def api_history_list(limit: int = 200):
     items = await asyncio.to_thread(history_store.list_runs, min(max(limit, 1), 500))
     return {"items": items}
+
+
+@app.get("/api/jobs")
+async def api_jobs_list():
+    """Runs that are queued, running, or recently failed (for the History page)."""
+    try:
+        items = await asyncio.to_thread(job_store.list_jobs)
+    except Exception:
+        logger.exception("could not list jobs")
+        items = []
+    return {"items": items}
+
+
+@app.post("/api/jobs/{job_id}/cancel")
+async def api_jobs_cancel(job_id: int):
+    """Cancel a queued/running job. The run is discarded, nothing is saved."""
+    cancelled = job_manager.cancel_job(job_id)
+    if not cancelled:
+        # Not running on this server (already finished, or its server died):
+        # just remove the stale slip so it stops showing in History.
+        try:
+            await asyncio.to_thread(job_store.delete_job, job_id)
+        except Exception:
+            logger.exception("could not delete job row %s", job_id)
+    return {"cancelled": cancelled}
 
 
 @app.get("/api/history/{run_id}")
@@ -2327,6 +2380,11 @@ async def api_history_screenshots(run_id: int):
     return Response(content=html_text, media_type="text/html; charset=utf-8")
 
 
+def _session_job_active(session: dict) -> bool:
+    job = session.get("job")
+    return job is not None and job.active
+
+
 @app.websocket("/ws/qc")
 async def qc_session(websocket: WebSocket):
     await websocket.accept()
@@ -2336,6 +2394,7 @@ async def qc_session(websocket: WebSocket):
         "pushed": False, "process": None, "pending_generate": None,
         "pending_sweep": None,
         "current_task": None,
+        "job": None,
         "test_env": None,
     }
 
@@ -2366,7 +2425,23 @@ async def qc_session(websocket: WebSocket):
                 session["current_task"] = asyncio.create_task(handle_generate_decision(websocket, session, msg))
 
             elif action == "auto_run":
-                session["current_task"] = asyncio.create_task(handle_auto_run(websocket, session, msg))
+                if _session_job_active(session):
+                    await send_error(websocket, "a run is already in progress on this session — wait for it or terminate it first.")
+                else:
+                    scope_ = (msg.get("scope") or "module").strip().lower()
+                    if scope_ == "screen":
+                        job_module = (msg.get("module") or "").strip()
+                        job_screen = (msg.get("screen") or "").strip()
+                    else:
+                        job_module = ", ".join(dict.fromkeys(m.strip() for m in (msg.get("modules") or []) if m and m.strip()))
+                        job_screen = ""
+                    job = job_manager.start_job(
+                        session=session, ws=websocket, source="auto_run",
+                        module=job_module, screen=job_screen, queued_phase="auto_running",
+                        runner=lambda jws, _msg=msg: handle_auto_run(jws, session, _msg),
+                    )
+                    session["job"] = job
+                    session["current_task"] = job.task
 
             elif action == "approve":
                 session["current_task"] = asyncio.create_task(handle_approve(websocket, session, msg))
@@ -2387,12 +2462,23 @@ async def qc_session(websocket: WebSocket):
                 session.pop("pending_generate", None)
                 session.pop("pending_sweep", None)
                 session.pop("run_results", None)
-                clear_screenshot_stash()
+                _clear_stash_if_idle()
                 await send_log(websocket, "rejected — nothing pushed.", "muted")
                 await send_status(websocket, "idle")
 
             elif action == "run":
-                session["current_task"] = asyncio.create_task(handle_run(websocket, session))
+                if _session_job_active(session):
+                    await send_error(websocket, "a run is already in progress on this session — wait for it or terminate it first.")
+                else:
+                    job_module, job_screen = _run_row_info(session)
+                    job = job_manager.start_job(
+                        session=session, ws=websocket,
+                        source="generate" if session.get("origin") == "generate" else "fetch",
+                        module=job_module, screen=job_screen, queued_phase="running",
+                        runner=lambda jws: handle_run(jws, session),
+                    )
+                    session["job"] = job
+                    session["current_task"] = job.task
 
             elif action == "report":
                 session["current_task"] = asyncio.create_task(handle_report(websocket, session))
@@ -2423,7 +2509,7 @@ async def qc_session(websocket: WebSocket):
                 session.pop("pending_generate", None)
                 session.pop("pending_sweep", None)
                 session.pop("run_results", None)
-                clear_screenshot_stash()
+                _clear_stash_if_idle()
                 await send_log(
                     websocket,
                     "terminated — cancelled the in-progress run." if cancelled else "nothing in progress to terminate.",
@@ -2436,7 +2522,11 @@ async def qc_session(websocket: WebSocket):
 
     except WebSocketDisconnect:
         logger.info("qc session disconnected")
-        if session.get("process") is not None:
+        job = session.get("job")
+        if job is not None and job.active:
+            # A run / auto-run is in flight: let it finish in the backend.
+            job.detach()
+        elif session.get("process") is not None:
             try:
                 session["process"].kill()
             except ProcessLookupError:

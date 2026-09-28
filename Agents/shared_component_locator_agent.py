@@ -30,7 +30,7 @@ class SharedComponentLocatorAgent:
     """Resolves only shared controls left unresolved by screen analysis."""
 
     def __init__(self):
-        self.client = OpenAIChatClient(model=os.getenv("ANALYSIS_OPENAI_MODEL"))
+        self.client = OpenAIChatClient(model=os.getenv("ANTHROPIC_API_KEY"))
         self.instructions = Path(
             "prompts/shared_component_locator_prompt.txt"
         ).read_text(encoding="utf-8")
