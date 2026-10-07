@@ -3,7 +3,7 @@ import logging
 from pathlib import Path
 import os
 from agent_framework import Agent
-from agent_framework.anthropic import AnthropicClient
+from agent_framework.openai import OpenAIChatClient
 from dotenv import load_dotenv
 
 
@@ -13,8 +13,13 @@ logger = logging.getLogger(__name__)
 
 class ProjectAnalysisAgent:
     def __init__(self):
-        self.client = AnthropicClient(
-            model=os.getenv("ANALYSIS_CLAUDE_MODEL")
+        # ANALYSIS_OPENAI_MODEL lets ProjectAnalysisAgent run a different
+        # (stronger) OpenAI model than the other agents, without touching
+        # OPENAI_MODEL shared by everything else. Falls back to OPENAI_MODEL
+        # if ANALYSIS_OPENAI_MODEL isn't set, so nothing breaks if it's
+        # omitted from .env.
+        self.client = OpenAIChatClient(
+            model=os.getenv("ANALYSIS_OPENAI_MODEL", os.getenv("OPENAI_MODEL"))
         )
         self.instructions = Path(
             "prompts/project_analysis_prompt.txt").read_text(encoding="utf-8")

@@ -5,7 +5,7 @@ import re
 from pathlib import Path
 
 from agent_framework import Agent
-from agent_framework.anthropic import AnthropicClient
+from agent_framework.openai import OpenAIChatClient
 from dotenv import load_dotenv
 
 
@@ -30,7 +30,7 @@ class SharedComponentLocatorAgent:
     """Resolves only shared controls left unresolved by screen analysis."""
 
     def __init__(self):
-        self.client = AnthropicClient(model=os.getenv("ANALYSIS_CLAUDE_MODEL"))
+        self.client = OpenAIChatClient( model=os.getenv("ANALYSIS_OPENAI_MODEL", os.getenv("OPENAI_MODEL")))
         self.instructions = Path(
             "prompts/shared_component_locator_prompt.txt"
         ).read_text(encoding="utf-8")
