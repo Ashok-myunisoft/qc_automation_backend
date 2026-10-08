@@ -914,7 +914,7 @@ async def handle_fetch(ws: WebSocket, session: dict, msg: dict):
 
     resolved = await resolve_existing_precise(tree, module, screen)
     if resolved is None:
-        await send_log(ws, f"no matching feature/script pair found for '{module} / {screen}' — use Generate instead.", "danger")
+        await send_log(ws, f"Not present: no screen folder named '{screen}' under module '{module}'. Use Generate to create it.", "danger")
         await send_status(ws, "not_found")
         return
 

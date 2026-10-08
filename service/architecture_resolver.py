@@ -17,13 +17,6 @@ MODULE_HIT_THRESHOLD = 0.75
 
 _MODULE_STOPWORDS = {"module", "the", "and"}
 
-# If present, real-repo test trees keep UI regression screens under this
-# prefix, separate from API_Tests/Smoke-Testing trees that reuse the same
-# module names. Auto-detected — repos without this prefix (e.g. a flat
-# dummy/demo repo) are scanned in full instead. The new canonical layout
-# uses Regression-Testing/ as the primary root; the older nested
-# cypress/src/features/Regression-Testing/ path is still tolerated as a
-# fallback during transition.
 REGRESSION_TESTING_PREFIX = "Regression-Testing/"
 LEGACY_REGRESSION_TESTING_PREFIX = "cypress/src/features/Regression-Testing/"
 
@@ -54,21 +47,6 @@ def _searchable_tree(tree: list[str]) -> list[str]:
     legacy_scoped = [p for p in tree if p.startswith(LEGACY_REGRESSION_TESTING_PREFIX)]
     return legacy_scoped if legacy_scoped else tree
 
-
-# ---------------------------------------------------------------------------
-# qc_test (output) repo shape — NO fixed depth, NO shared step library.
-# Every real screen is a folder containing exactly one .feature file and
-# one script file (.js or .cy.js) — self-contained, no dependency on any
-# other screen's file. e.g.:
-#
-#   Regression-Testing/ESS_Module/PaySlip/PaySlip.feature
-#   Regression-Testing/ESS_Module/PaySlip/PaySlip.js
-#
-#   -- or, in a flatter demo/dummy repo --
-#
-#   Finance/InstrumentMaster/instrument-master.feature
-#   Finance/InstrumentMaster/instrument-master.js
-# ---------------------------------------------------------------------------
 @dataclass
 class ResolvedFeature:
     dir: str            # the screen's folder
@@ -156,6 +134,63 @@ def resolve_existing(tree: list[str], module: str, screen: str) -> ResolvedFeatu
     )
 
 
+def _module_matches_exactly(parts: list[str], module_norm: str) -> bool:
+    return bool(module_norm) and any(_normalize_module_text(p) == module_norm for p in parts)
+
+
+def resolve_existing_exact(tree: list[str], module: str, screen: str) -> ResolvedFeature | None:
+    module_norm = _normalize_module_text(module)
+    screen_norm = _normalize(screen)
+    if not module_norm or not screen_norm:
+        return None
+
+    hits = []
+    for directory, info in _group_screen_folders(_searchable_tree(tree)).items():
+        parts = directory.split("/")
+        if not _module_matches_exactly(parts[:-1], module_norm):
+            continue
+        feature_stem = info["feature"].rsplit("/", 1)[-1][: -len(".feature")]
+        if _normalize(parts[-1]) == screen_norm or _normalize(feature_stem) == screen_norm:
+            hits.append((directory, info))
+
+    if not hits:
+        return None
+
+    hits.sort(key=lambda t: t[0])
+    best_dir, best_info = hits[0]
+    return ResolvedFeature(
+        dir=best_dir,
+        feature_path=best_info["feature"],
+        script_path=_pick_script(best_info["scripts"], screen),
+        slug=best_dir.rsplit("/", 1)[-1],
+        confidence=1.0,
+        ambiguous=len(hits) > 1,
+        resolved_by="exact",
+    )
+
+
+def resolve_module_screens_exact(tree: list[str], module: str) -> list[ResolvedFeature]:
+    """Every screen folder under a path segment that IS the given module."""
+    module_norm = _normalize_module_text(module)
+    results = []
+    for directory, info in _group_screen_folders(_searchable_tree(tree)).items():
+        parts = directory.split("/")
+        if not _module_matches_exactly(parts[:-1], module_norm):
+            continue
+        screen_name = parts[-1]
+        results.append(ResolvedFeature(
+            dir=directory,
+            feature_path=info["feature"],
+            script_path=_pick_script(info["scripts"], screen_name),
+            slug=screen_name,
+            confidence=1.0,
+            ambiguous=False,
+            resolved_by="exact",
+        ))
+    results.sort(key=lambda r: r.dir)
+    return results
+
+
 def resolve_module_screens(tree: list[str], module: str) -> list[ResolvedFeature]:
     """Every screen folder anywhere under a path matching the given module."""
     module_norm = _normalize_module_text(module)
@@ -185,13 +220,6 @@ def _valid_feature_candidate(tree_set: set[str], directory: str, feature_path: s
         return False
     if feature_path not in tree_set or script_path not in tree_set:
         return False
-    # Must be the EXACT immediate parent folder of both files — not merely
-    # a string prefix. A prefix check (e.g. "startswith(directory + '/')")
-    # would wrongly accept a truncated/hallucinated dir like "cypress",
-    # since virtually every real path in this repo starts with "cypress/".
-    # That let a wrong dir slip through with a correct feature_path/script_path,
-    # corrupting resolved.dir/resolved.slug downstream (both would become
-    # "cypress" instead of the real screen folder name).
     if feature_path.rsplit("/", 1)[0] != directory:
         return False
     if script_path.rsplit("/", 1)[0] != directory:
@@ -226,54 +254,21 @@ def _feature_from_agent_result(result: dict) -> ResolvedFeature | None:
 
 
 async def resolve_existing_precise(tree: list[str], module: str, screen: str) -> ResolvedFeature | None:
-    result = await _architecture_agent.resolve_screen(tree, module, screen, repo_kind="test")
-
-    if "error" not in result:
-        tree_set = set(tree)
-        if _valid_feature_candidate(tree_set, result.get("dir"), result.get("feature_path"), result.get("script_path")):
-            resolved = _feature_from_agent_result(result)
-            if resolved is not None:
-                logger.info(
-                    "architecture agent resolved module=%r screen=%r -> feature_path=%r script_path=%r confidence=%.3f ambiguous=%s",
-                    module, screen, resolved.feature_path, resolved.script_path, resolved.confidence, resolved.ambiguous,
-                )
-                return resolved
-
-    logger.info("architecture agent unusable for %s/%s (%r) — falling back to fuzzy matcher", module, screen, result)
-    return resolve_existing(tree, module, screen)
+    resolved = resolve_existing_exact(tree, module, screen)
+    if resolved is None:
+        logger.info("no exact folder for module=%r screen=%r -- reporting not found", module, screen)
+    else:
+        logger.info("exact match module=%r screen=%r -> %s", module, screen, resolved.dir)
+    return resolved
 
 
 async def resolve_module_screens_precise(tree: list[str], module: str) -> list[ResolvedFeature]:
-    result = await _architecture_agent.resolve_module(tree, module, repo_kind="test")
-
-    if "error" not in result and isinstance(result.get("screens"), list) and result["screens"]:
-        tree_set = set(tree)
-        resolved_list: list[ResolvedFeature] = []
-        for item in result["screens"]:
-            if not _valid_feature_candidate(tree_set, item.get("dir"), item.get("feature_path"), item.get("script_path")):
-                resolved_list = []
-                break
-            feature = _feature_from_agent_result(item)
-            if feature is None:
-                resolved_list = []
-                break
-            resolved_list.append(feature)
-
-        if resolved_list:
-            resolved_list.sort(key=lambda r: r.feature_path)
-            logger.info(
-                "architecture agent resolved module=%r -> %d screen(s): %s",
-                module, len(resolved_list), [r.feature_path for r in resolved_list],
-            )
-            return resolved_list
-
-    logger.info("architecture agent unusable for module %s (%r) — falling back to fuzzy matcher", module, result)
-    return resolve_module_screens(tree, module)
+    results = resolve_module_screens_exact(tree, module)
+    logger.info("exact module match module=%r -> %d screen(s)", module, len(results))
+    return results
 
 
 def build_new_path(module: str, screen: str) -> ResolvedFeature:
-    """No existing match — construct a path for a brand new screen, per-screen
-    folder with its own self-contained feature + script."""
     module_folder = f"{_pascal(module)}_Module"
     screen_name = _pascal(screen)
     directory = f"Regression-Testing/{module_folder}/{screen_name}"
@@ -288,10 +283,6 @@ def build_new_path(module: str, screen: str) -> ResolvedFeature:
     )
 
 
-# ---------------------------------------------------------------------------
-# qc_source (input) repo shape — UNCHANGED. Angular source folders, each a
-# loose bag of files, no fixed pairing.
-# ---------------------------------------------------------------------------
 @dataclass
 class ResolvedSource:
     dir: str
@@ -431,23 +422,6 @@ def _source_from_agent_result(dirs_to_files: dict[str, list[str]], result: dict)
 
 
 def filter_tree_by_module(tree: list[str], module: str, min_results: int = 20) -> list[str]:
-    """Cheap, deterministic pre-filter run BEFORE the tree ever reaches
-    ArchitectureAgent's prompt -- no LLM involved. For the real source
-    repo (7000+ files) sending every path as-is has hit OpenAI's
-    per-minute token limit outright (confirmed: a real run requested
-    104,240 tokens against a 50,000 TPM cap and got a hard 429). Keeping
-    only paths that plausibly relate to the given module cuts that down
-    to a few hundred lines before the agent ever sees it -- the agent's
-    own job (picking the exact right folder) is unchanged, it's just
-    given a much shorter list to read.
-
-    Deliberately generous, not strict -- a false positive (an unrelated
-    path kept) costs nothing, a false negative (the real match thrown
-    away) breaks the whole resolve. Matches on either path segment
-    containing the normalized module text, or vice versa. If filtering
-    leaves suspiciously few results, falls back to the FULL original
-    tree rather than risk silently missing the real match -- safety net
-    over optimization."""
     module_norm = _normalize_module_text(module)
     if not module_norm:
         return tree
