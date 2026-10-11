@@ -9,6 +9,9 @@ import logger_config
 from fastapi import FastAPI, HTTPException, Response, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from service.gitlab_service import GitLabService
+from service.backend_context import (
+    is_mm_module, fetch_mm_source_context, fetch_backend_context, MM_MAX_SOURCE_CHARS,
+)
 from service.architecture_resolver import (
     build_new_path, ResolvedSource,
     resolve_existing_precise, resolve_module_screens_precise,
@@ -66,6 +69,10 @@ def _gitlab_service() -> GitLabService:
 
 def _source_gitlab_service() -> GitLabService:
     return GitLabService(env_prefix="SOURCE_GITLAB")
+
+
+def _backend_gitlab_service() -> GitLabService:
+    return GitLabService(env_prefix="BACKEND_GITLAB")
 
 
 _IMPORT_RE = re.compile(r"""from\s+['"]([^'"]+)['"]""")
@@ -399,7 +406,18 @@ def _enforce_source_char_budget(project_context: dict, limit: int = _MAX_SOURCE_
     actually prevents a context_length_exceeded 400 from OpenAI on an
     outlier screen (unusually large folder or import graph) — the fetch-time
     filtering in _fetch_source_project_context reduces the average case but
-    can't bound the worst case on its own."""
+    can't bound the worst case on its own.
+
+    NOTE: this "keep in order until it stops fitting, then skip-and-continue"
+    logic is fine for the normal (non-MM) path, where files are usually
+    comparably sized. It is NOT used for MM screens — see
+    _enforce_mm_source_char_budget below — because on an MM screen the
+    single largest file (gbmaterialmanagementgrid.component.ts) is also the
+    ONLY place grid columns like ItemCode/ItemName are defined (confirmed
+    in prod logs 2026-10-07), so letting two much-smaller .html files fill
+    the budget ahead of it — which this size-based skip-and-continue logic
+    allows, even with .ts files listed first — silently guts the analysis
+    every time that one file happens not to fit."""
     files = project_context.get("source_files", []) or []
     total = 0
     kept = []
@@ -421,6 +439,63 @@ def _enforce_source_char_budget(project_context: dict, limit: int = _MAX_SOURCE_
 
     project_context["source_files"] = kept
     return project_context
+
+
+def _enforce_mm_source_char_budget(project_context: dict, limit: int = None) -> dict:
+    """MM-specific budget enforcement. Unlike _enforce_source_char_budget,
+    this does NOT let file size/order determine what gets dropped — it
+    guarantees BOTH .ts files survive in full, unconditionally, since
+    together they're the only place real field/grid data exists for MM
+    screens (the .html files bind everything dynamically from arrays built
+    in the .ts — confirmed by direct grep: ItemCode/ItemName appear 26x in
+    gbmaterialmanagementgrid.component.ts and 0x in either .html file).
+    Only .html files are ever eligible to be dropped here. If the two .ts
+    files alone already exceed `limit`, both are still kept in full (a
+    screen with no grid data at all is a worse outcome than one slightly
+    over budget) and a warning is logged so this gets noticed rather than
+    silently degrading output quality."""
+    limit = limit or MM_MAX_SOURCE_CHARS
+    files = project_context.get("source_files", []) or []
+
+    ts_files = [f for f in files if f.get("path", "").lower().endswith(".ts")]
+    other_files = [f for f in files if not f.get("path", "").lower().endswith(".ts")]
+
+    ts_total = sum(len(f.get("content", "") or "") for f in ts_files)
+    if ts_total > limit:
+        logger.warning(
+            "MM .ts files alone (~%d chars) exceed the %d char budget — "
+            "keeping both in full anyway (grid data is non-negotiable for "
+            "MM screens); all .html files will be dropped this run. "
+            "Consider raising MM_MAX_SOURCE_CHARS if this becomes common.",
+            ts_total, limit,
+        )
+        kept = ts_files
+        dropped = [f.get("path", "?") for f in other_files]
+    else:
+        remaining = limit - ts_total
+        kept = list(ts_files)
+        dropped = []
+        total = ts_total
+        for f in other_files:
+            size = len(f.get("content", "") or "")
+            if total + size > limit:
+                dropped.append(f.get("path", "?"))
+                continue
+            kept.append(f)
+            total += size
+
+    if dropped:
+        logger.warning(
+            "MM project_context source_files trimmed to stay near %d char budget "
+            "(%d file(s) dropped — .html only, both .ts always kept in full, "
+            "%d kept, ~%d chars used): %s",
+            limit, len(dropped), len(kept),
+            sum(len(f.get("content", "") or "") for f in kept), dropped,
+        )
+
+    project_context["source_files"] = kept
+    return project_context
+
 
 
 def _extract_source_hints(project_context: dict, limit: int = 30) -> list[str]:
@@ -1052,14 +1127,35 @@ async def _generate_one_screen(ws: WebSocket, src: GitLabService, module: str,
     Callers without a tree handy just omit it; behavior degrades
     gracefully to screen-only."""
     tag = f"[{label}] " if label else ""
+    # Detect MM module screens — these 5 modules share one component file.
+    # Skip ArchitectureAgent folder lookup and fetch the 4 fixed files directly.
+    is_mm_screen = is_mm_module(module)
     try:
         await send_log(ws, f"{tag}fetching source files...", "secondary")
         # GitLab file reads are synchronous. Keep them off the WebSocket event
         # loop so this progress message reaches the browser immediately.
-        project_context = await asyncio.to_thread(
-            _fetch_source_project_context, src, resolved_source, source_tree,
-        )
-        project_context = _enforce_source_char_budget(project_context)
+        if is_mm_screen:
+            project_context = await asyncio.to_thread(
+                fetch_mm_source_context, src, module, screen_name, source_tree,
+            )
+        else:
+            project_context = await asyncio.to_thread(
+                _fetch_source_project_context, src, resolved_source, source_tree,
+            )
+        # MM screens use a dedicated budget function, not the generic one.
+        # Confirmed in prod logs 2026-10-07 (second occurrence, AFTER the
+        # .ts-first ordering fix): the size-based skip-and-continue logic in
+        # _enforce_source_char_budget still let both .html files fill the
+        # budget ahead of gbmaterialmanagementgrid.component.ts once that
+        # single file's real size pushed the running total past the limit —
+        # ordering alone wasn't enough, since a dropped item doesn't stop
+        # later, smaller items from still being kept. _enforce_mm_source_char_budget
+        # fixes this by making both .ts files unconditional and only .html
+        # eligible to be dropped.
+        if is_mm_screen:
+            project_context = _enforce_mm_source_char_budget(project_context)
+        else:
+            project_context = _enforce_source_char_budget(project_context)
         await send_log(
             ws,
             f"{tag}using {len(project_context.get('source_files', []))} source file(s) for analysis...",
@@ -1095,6 +1191,21 @@ async def _generate_one_screen(ws: WebSocket, src: GitLabService, module: str,
         logger.info("%sanalysis output=%s", tag, project_analysis)
 
         source_hints = _extract_source_hints(project_context)
+
+        # Fetch backend BL/DL files and append to project_context for
+        # ProjectAnalysisAgent — gives validation rules, business logic,
+        # and field relationship context unavailable from frontend alone.
+        try:
+            backend_src = _backend_gitlab_service()
+            backend_files = await asyncio.to_thread(
+                fetch_backend_context, backend_src, screen_name, source_hints,
+            )
+            if backend_files:
+                project_context["source_files"].extend(backend_files)
+                await send_log(ws, f"{tag}fetched {len(backend_files)} backend file(s) for business logic context.", "secondary")
+        except Exception as _be:
+            logger.warning("%sbackend context fetch failed: %s — continuing without it", tag, _be)
+
         await send_log(ws, f"{tag}looking up real test data ({len(source_hints)} hint(s) from source)...", "secondary")
         business_context_result = await business_context_agent.find_context(module, screen_name, source_hints)
         if "error" in business_context_result:
@@ -1204,16 +1315,22 @@ async def handle_generate(ws: WebSocket, session: dict, msg: dict):
     await send_log(ws, f"scanned {len(src_tree)} source files — looking for {module} / {screen}...", "secondary")
 
     filtered_src_tree = filter_tree_by_module(src_tree, module)
-    resolved_source = await resolve_source_screen_precise(filtered_src_tree, module, screen)
-    if resolved_source is None:
-        await send_log(ws, f"no source files found for '{module} / {screen}' in the source repo.", "danger")
-        await send_status(ws, "not_found")
-        return
-
-    if resolved_source.ambiguous:
-        await send_log(ws, f"more than one close match ({resolved_source.resolved_by}) — picked {resolved_source.dir} (confidence {resolved_source.confidence}). Double-check.", "accent")
+    # MM modules share one component — skip ArchitectureAgent folder lookup.
+    # resolved_source is unused for these; _generate_one_screen detects the
+    # module and fetches the 4 fixed files directly via fetch_mm_source_context.
+    if is_mm_module(module):
+        resolved_source = None
+        await send_log(ws, f"MM module detected — using shared materialmanagement component for {module} / {screen}.", "secondary")
     else:
-        await send_log(ws, f"matched source {resolved_source.dir} via {resolved_source.resolved_by} (confidence {resolved_source.confidence})", "success")
+        resolved_source = await resolve_source_screen_precise(filtered_src_tree, module, screen)
+        if resolved_source is None:
+            await send_log(ws, f"no source files found for '{module} / {screen}' in the source repo.", "danger")
+            await send_status(ws, "not_found")
+            return
+        if resolved_source.ambiguous:
+            await send_log(ws, f"more than one close match ({resolved_source.resolved_by}) — picked {resolved_source.dir} (confidence {resolved_source.confidence}). Double-check.", "accent")
+        else:
+            await send_log(ws, f"matched source {resolved_source.dir} via {resolved_source.resolved_by} (confidence {resolved_source.confidence})", "success")
 
     user_request = user_request or f"Generate Cypress tests for the {screen} screen in the {module} module."
 
@@ -1271,15 +1388,19 @@ async def handle_generate_decision(ws: WebSocket, session: dict, msg: dict):
 
         await send_log(ws, f"scanned {len(src_tree)} source files — looking for {module} / {screen}...", "secondary")
         filtered_src_tree = filter_tree_by_module(src_tree, module)
-        resolved_source = await resolve_source_screen_precise(filtered_src_tree, module, screen)
-        if resolved_source is None:
-            await send_error(ws, f"no source files found for '{module} / {screen}' in the source repo.")
-            session.pop("pending_generate", None)
-            return
-        if resolved_source.ambiguous:
-            await send_log(ws, f"more than one close match ({resolved_source.resolved_by}) — picked {resolved_source.dir} (confidence {resolved_source.confidence}). Double-check.", "accent")
+        if is_mm_module(module):
+            resolved_source = None
+            await send_log(ws, f"MM module detected — using shared materialmanagement component for {module} / {screen}.", "secondary")
         else:
-            await send_log(ws, f"matched source {resolved_source.dir} via {resolved_source.resolved_by} (confidence {resolved_source.confidence})", "success")
+            resolved_source = await resolve_source_screen_precise(filtered_src_tree, module, screen)
+            if resolved_source is None:
+                await send_error(ws, f"no source files found for '{module} / {screen}' in the source repo.")
+                session.pop("pending_generate", None)
+                return
+            if resolved_source.ambiguous:
+                await send_log(ws, f"more than one close match ({resolved_source.resolved_by}) — picked {resolved_source.dir} (confidence {resolved_source.confidence}). Double-check.", "accent")
+            else:
+                await send_log(ws, f"matched source {resolved_source.dir} via {resolved_source.resolved_by} (confidence {resolved_source.confidence})", "success")
 
         request = user_request or f"Generate Cypress tests for the {screen} screen in the {module} module."
         outcome = await _generate_one_screen(ws, src, module, screen, resolved_source, request, source_tree=src_tree)
@@ -2054,14 +2175,18 @@ async def handle_auto_run(ws: WebSocket, session: dict, msg: dict):
             filtered_src_tree = filter_tree_by_module(src_tree, module)
 
             if single_screen:
-                resolved_source = await resolve_source_screen_precise(filtered_src_tree, module, single_screen)
-                if resolved_source is None:
-                    await send_log(ws, f"[{module}] no source files found for '{single_screen}' — skipping.", "danger")
-                    continue
-                if resolved_source.ambiguous:
-                    await send_log(ws, f"[{module}] more than one close match ({resolved_source.resolved_by}) — picked {resolved_source.dir} (confidence {resolved_source.confidence}).", "accent")
+                if is_mm_module(module):
+                    resolved_source = None
+                    await send_log(ws, f"[{module}] MM module detected — using shared materialmanagement component.", "secondary")
                 else:
-                    await send_log(ws, f"[{module}] matched source {resolved_source.dir} via {resolved_source.resolved_by} (confidence {resolved_source.confidence})", "success")
+                    resolved_source = await resolve_source_screen_precise(filtered_src_tree, module, single_screen)
+                    if resolved_source is None:
+                        await send_log(ws, f"[{module}] no source files found for '{single_screen}' — skipping.", "danger")
+                        continue
+                    if resolved_source.ambiguous:
+                        await send_log(ws, f"[{module}] more than one close match ({resolved_source.resolved_by}) — picked {resolved_source.dir} (confidence {resolved_source.confidence}).", "accent")
+                    else:
+                        await send_log(ws, f"[{module}] matched source {resolved_source.dir} via {resolved_source.resolved_by} (confidence {resolved_source.confidence})", "success")
                 candidates = [(single_screen, resolved_source)]
             else:
                 await send_log(ws, f"[{module}] scanning source repo for screens...", "secondary")

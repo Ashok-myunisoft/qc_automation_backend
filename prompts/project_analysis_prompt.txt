@@ -9,6 +9,54 @@ This prompt must behave consistently across every screen in the application. Nev
 
 STEP 0 - Mandatory enumeration
 
+#BIZTRANSACTIONTYPE SCREEN FILTER (applies to materialmanagement component screens only)
+
+Some screens in this application — specifically those in the Sales, Purchase, Inventory,
+Jobwork, and Subcontract modules — share a single Angular component called
+`MaterialManagementComponent`. This one component renders multiple different screens by
+switching its fields, grid columns, and action buttons at runtime based on a value called
+`BizTransactionType`, which is loaded from the backend API via `BiztransactionService()`.
+
+If `project_context` contains a `biz_transaction_screen` key, that value is the specific
+screen being tested (e.g. "Purchase Order", "Purchase Requisition", "Sales Invoice").
+
+If `project_context` ALSO contains a `biz_transaction_class_id` key (a negative integer),
+that is the CONFIRMED BizTransactionClassId for this screen, looked up against the real
+database — do not re-derive or second-guess it from the screen name. If this key is present
+but its value is `null`, no confirmed ID exists yet for this screen; fall back to inferring
+from the screen name as described below, but flag in your output that the ID is unconfirmed.
+
+When `biz_transaction_screen` is present, you MUST:
+
+1. **Filter by BizTransactionClassId conditions** — The HTML template uses conditions like:
+   `MenuRights.BizTransactionClassId == -1799999919` to show/hide fields and buttons.
+   If `biz_transaction_class_id` is given, use that exact value to decide which conditions
+   are ACTIVE. Otherwise, infer the likely ClassId from the screen name and button/field
+   context — but note that these class IDs do NOT follow any predictable naming or numeric
+   pattern across modules (e.g. two numerically adjacent IDs can belong to entirely
+   different modules), so never guess based on numeric proximity to a known ID. Treat all
+   non-matching conditional sections as hidden and do not include their fields in the output.
+
+2. **Filter by BizTransactionType runtime properties** — Fields are shown/hidden based on
+   properties like `BizTransactionType.BizTransactionClassIsPartyApplicable`,
+   `BizTransactionType.ShowFields`, `BizTransactionType.BIZTransactionTypeIsMultiCurrency`.
+   Treat fields under `[style.display]="BizTransactionType.X != Y ? 'flex' : 'none'"` as
+   hidden when the condition evaluates false for the known screen type.
+
+3. **Focus grid columns** — The grid (`gb-mmgrid`) renders different columns per screen.
+   Only include the columns actually visible for the `biz_transaction_screen` being tested.
+
+4. **Focus action buttons** — Buttons like "PR to PO", "Load", "Purchase Request Plan" are
+   conditional. Only include buttons whose `*ngIf` condition matches the screen being tested.
+
+5. **Use backend files for business logic** — If C# backend files (prefixed `[backend]`) are
+   supplied in `source_files`, use them to understand validation rules, required fields,
+   field relationships, and business logic that is not visible in the Angular template alone.
+
+If `biz_transaction_screen` is NOT present, analyse all fields and conditions as usual.
+
+STEP 0 - Mandatory enumeration
+
 Before resolving any label, control name, data-cy, id, or locator, first build a complete inventory of every distinct form-bound and interactive element in the primary screen's template.
 
 Enumerate by scanning the template and TS source for all of the following:
@@ -123,7 +171,33 @@ Navigation rules — MANDATORY TWO-STEP ALGORITHM
 
 STEP A — Look for real navigation evidence in the supplied source: a menu component, a routing config, breadcrumb markup, or any data-cy-bearing navigation element. If you find real evidence, build `navigation_path` from it and set `navigation_entry_type` to `menu`, `modal_trigger`, or `embedded` as appropriate. Report the actual hop count the source shows — do not assume a fixed 2-hop or 3-hop path. For each hop report `hop_label`, `hop_type` (module, menu_folder, or menu_leaf), `data_cy`, `id`, `preferred_locator`.
 
-STEP B — If, and only if, Step A finds nothing (this is common — most screens have no dedicated navigation/menu file of their own), you MUST build a fallback `navigation_path` using `navigation_hint` from `project_context`. This is not optional, and an empty `navigation_path` is never an acceptable substitute for it. `navigation_hint` is a pre-computed, already-correct array of segment strings (e.g. `["inventory", "itemmenu", "itemmaster"]`) — the repository root and organizational folder levels have already been removed. Do not re-derive or re-filter it yourself; do not drop, reorder, or add segments; do not fall back to parsing `primary_dir` directly for this. To build the fallback:
+STEP A.5 — CHECK THIS BEFORE STEP B, EVERY TIME `biz_transaction_screen` IS PRESENT.
+If `project_context` contains both `explicit_module` and `explicit_screen` (these are only
+ever set for materialmanagement-component screens — the same screens where you used
+`biz_transaction_class_id` above), you MUST use `explicit_module` as the first hop and
+`explicit_screen` as the last hop DIRECTLY, and you MUST NOT use `navigation_hint` or
+`primary_dir` for these screens at all, even though `navigation_hint` is also present in
+`project_context`. This is not a stylistic preference — `navigation_hint` for MM screens is
+derived from the shared folder all 5 modules' screens physically live in (something like
+"materialmanagement"), which is NOT that screen's real business module or name, and using it
+produces a wrong, misleading result.
+
+Concrete example — do not just read this, match this exact shape:
+  If `project_context` contains:
+    "explicit_module": "purchase", "explicit_screen": "purchase requisition",
+    "navigation_hint": ["sales", "materialmanagement"]
+  Then `navigation_path` MUST be exactly:
+    [ {"hop_label": "purchase", "hop_type": "module", ...},
+      {"hop_label": "purchase requisition", "hop_type": "menu_leaf", ...} ]
+  It must NOT be [{"hop_label": "sales", ...}, {"hop_label": "materialmanagement", ...}] —
+  that is the WRONG, folder-derived answer this step exists specifically to prevent.
+
+Still set `navigation_entry_type` to `menu` and follow the same `hop_label`/`hop_type`/
+`unresolved`-entry conventions as Step B (fill `data_cy`/`id`/`preferred_locator` as
+"Unknown", and add an `unresolved` entry noting the path came from explicit_module/
+explicit_screen, not from confirmed menu/routing source).
+
+STEP B — If, and only if, Step A finds nothing and Step A.5 does not apply (this is common — most screens have no dedicated navigation/menu file of their own), you MUST build a fallback `navigation_path` using `navigation_hint` from `project_context`. This is not optional, and an empty `navigation_path` is never an acceptable substitute for it. `navigation_hint` is a pre-computed, already-correct array of segment strings (e.g. `["inventory", "itemmenu", "itemmaster"]`) — the repository root and organizational folder levels have already been removed. Do not re-derive or re-filter it yourself; do not drop, reorder, or add segments; do not fall back to parsing `primary_dir` directly for this. To build the fallback:
 1. Treat each string in `navigation_hint`, in order, as one hop: the first is the module, the last is the screen, anything in between is a menu/submenu hop.
 2. Report each hop with a `hop_label` equal to that exact segment string and a `hop_type` of `module` (first segment), `menu_leaf` (last segment), or `menu_folder` (any segment in between). Set `data_cy`, `id`, and `preferred_locator` to "Unknown" for each, since these were never confirmed against real UI markup.
 3. Add an entry to `unresolved` stating that `navigation_path` was derived from `navigation_hint` (folder-derived) and has not been confirmed against real menu/routing source.
@@ -363,14 +437,15 @@ Backend-related gaps are not unresolved items. Report them as Unknown instead.
 
 An empty `unresolved` array is a claim that nothing needed was missing. Do not leave it empty just because resolution was hard; leave it empty only when everything referenced was actually supplied.
 
-Never truncate output (critical — confirmed real failure)
+Never truncate output (critical — confirmed real failure — applies equally to grid/table columns, not just form fields)
 
-On screens with a very large number of fields (multi-tab forms with hundreds of controls are common in this application), you must still enumerate every single field as its own complete object. Never shorten the output by:
+On screens with a very large number of fields or grid columns (multi-tab forms with hundreds of controls, and grids with many columns, are both common in this application), you must still enumerate every single field OR grid column as its own complete object. Never shorten the output by:
 - Stopping partway through a list and adding a comment or note such as `// Additional fields will similarly follow...`, `// ...`, `(and so on)`, or any similar placeholder
-- Summarizing a run of similar fields into one entry or a description of the pattern instead of listing each one
-- Omitting fields from later tabs/sections because earlier ones already illustrate the pattern
+- Summarizing a run of similar fields or columns into one entry or a description of the pattern instead of listing each one
+- Omitting fields or columns from later tabs/sections because earlier ones already illustrate the pattern
+- Reporting a grid's `columns` array as empty or partial when the source shows more columns than that — a grid genuinely has every column its template renders, not just the first one or two found
 
-JSON has no comment syntax — a single placeholder comment inside the array makes the entire response invalid JSON and causes the whole analysis to fail to parse, discarding everything, including the fields that WERE correctly resolved. A large but complete and valid field list is always correct; a shorter list that becomes invalid JSON is a total failure, not a partial success. If a screen genuinely has hundreds of fields across many tabs, report hundreds of field objects — one per field, every tab, no shortcuts, no comments, no ellipses, anywhere in the output.
+JSON has no comment syntax — a single placeholder comment inside the array makes the entire response invalid JSON and causes the whole analysis to fail to parse, discarding everything, including the fields that WERE correctly resolved. A large but complete and valid field list is always correct; a shorter list that becomes invalid JSON is a total failure, not a partial success. If a screen genuinely has hundreds of fields across many tabs, or a grid with a dozen+ columns, report every one of them as its own object — one per field, one per column, every tab, no shortcuts, no comments, no ellipses, anywhere in the output.
 
 Rules
 

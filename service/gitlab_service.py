@@ -51,7 +51,15 @@ class GitLabService:
                 "in .env (see .env.example)."
             )
 
-        self._gl = gitlab.Gitlab(url, private_token=token)
+        # No timeout here previously — on a silently-dropping network (some
+        # firewall/proxy misconfigurations behave this way rather than
+        # cleanly refusing), a GitLab call could hang indefinitely with no
+        # error ever surfacing, which looks identical to the process just
+        # being slow. 30s is generous given this environment's observed
+        # tree-fetch latency (large repos have taken minutes legitimately)
+        # but still guarantees SOME error eventually instead of an
+        # unbounded hang.
+        self._gl = gitlab.Gitlab(url, private_token=token, timeout=30)
         self._project = self._gl.projects.get(project_id)
 
         self._tree_cache: list[str] | None = None
