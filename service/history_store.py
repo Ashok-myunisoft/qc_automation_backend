@@ -1,10 +1,12 @@
-"""SQL Server storage for completed QC runs and their downloadable artifacts."""
+"""PostgreSQL storage for completed QC runs and their downloadable artifacts."""
 
 import json
 import threading
+
+import psycopg2
 from datetime import datetime, timezone
 
-from service.db_service import _connection
+from service.store_db import connection as _connection
 
 
 _SCHEMA_LOCK = threading.Lock()
@@ -13,8 +15,8 @@ _SCHEMA_READY = False
 _LIST_COLUMNS = """
     id, created_at, source, module, screen, status, total, passed_count,
     failed_count, screens_json, report_filename, screenshots_filename,
-    CAST(CASE WHEN report_xlsx IS NULL THEN 0 ELSE 1 END AS bit) AS has_report,
-    CAST(CASE WHEN screenshots_html IS NULL THEN 0 ELSE 1 END AS bit) AS has_screenshots
+    (report_xlsx IS NOT NULL) AS has_report,
+    (screenshots_html IS NOT NULL) AS has_screenshots
 """
 
 
@@ -30,34 +32,26 @@ def _ensure_schema() -> None:
         with _connection() as conn:
             cursor = conn.cursor()
             cursor.execute("""
-                IF OBJECT_ID(N'dbo.run_history', N'U') IS NULL
-                BEGIN
-                    CREATE TABLE dbo.run_history (
-                        id BIGINT IDENTITY(1,1) NOT NULL PRIMARY KEY,
-                        created_at DATETIME2(7) NOT NULL,
-                        source NVARCHAR(32) NOT NULL,
-                        module NVARCHAR(255) NULL,
-                        screen NVARCHAR(MAX) NULL,
-                        status NVARCHAR(16) NOT NULL,
-                        total INT NOT NULL CONSTRAINT DF_run_history_total DEFAULT 0,
-                        passed_count INT NOT NULL CONSTRAINT DF_run_history_passed DEFAULT 0,
-                        failed_count INT NOT NULL CONSTRAINT DF_run_history_failed DEFAULT 0,
-                        screens_json NVARCHAR(MAX) NULL,
-                        report_filename NVARCHAR(255) NULL,
-                        report_xlsx VARBINARY(MAX) NULL,
-                        screenshots_filename NVARCHAR(255) NULL,
-                        screenshots_html NVARCHAR(MAX) NULL
-                    );
-                END
+                CREATE TABLE IF NOT EXISTS run_history (
+                    id BIGSERIAL PRIMARY KEY,
+                    created_at TIMESTAMP NOT NULL,
+                    source VARCHAR(32) NOT NULL,
+                    module VARCHAR(255) NULL,
+                    screen TEXT NULL,
+                    status VARCHAR(16) NOT NULL,
+                    total INT NOT NULL DEFAULT 0,
+                    passed_count INT NOT NULL DEFAULT 0,
+                    failed_count INT NOT NULL DEFAULT 0,
+                    screens_json TEXT NULL,
+                    report_filename VARCHAR(255) NULL,
+                    report_xlsx BYTEA NULL,
+                    screenshots_filename VARCHAR(255) NULL,
+                    screenshots_html TEXT NULL
+                )
             """)
             cursor.execute("""
-                IF NOT EXISTS (
-                    SELECT 1 FROM sys.indexes
-                    WHERE name = N'IX_run_history_created_at'
-                      AND object_id = OBJECT_ID(N'dbo.run_history')
-                )
-                CREATE INDEX IX_run_history_created_at
-                ON dbo.run_history (created_at DESC, id DESC);
+                CREATE INDEX IF NOT EXISTS ix_run_history_created_at
+                ON run_history (created_at DESC, id DESC)
             """)
             conn.commit()
         _SCHEMA_READY = True
@@ -95,15 +89,16 @@ def save_run(*, source: str, module: str, screen: str, run_results: list[dict],
     with _connection() as conn:
         cursor = conn.cursor()
         cursor.execute("""
-            INSERT INTO dbo.run_history (
+            INSERT INTO run_history (
                 created_at, source, module, screen, status, total, passed_count, failed_count,
                 screens_json, report_filename, report_xlsx, screenshots_filename, screenshots_html
             )
-            OUTPUT INSERTED.id
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            RETURNING id
         """, (
             datetime.now(timezone.utc).replace(tzinfo=None), source, module, screen, status,
-            total, passed, failed, json.dumps(screens), report_filename, report_xlsx,
+            total, passed, failed, json.dumps(screens), report_filename,
+            psycopg2.Binary(report_xlsx) if report_xlsx is not None else None,
             screenshots_filename, screenshots_html,
         ))
         row = cursor.fetchone()
@@ -116,7 +111,7 @@ def list_runs(limit: int = 200) -> list[dict]:
     with _connection() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            f"SELECT TOP (%s) {_LIST_COLUMNS} FROM dbo.run_history ORDER BY id DESC",
+            f"SELECT {_LIST_COLUMNS} FROM run_history ORDER BY id DESC LIMIT %s",
             (limit,),
         )
         rows = cursor.fetchall()
@@ -128,7 +123,7 @@ def get_run(run_id: int) -> dict | None:
     with _connection() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            f"SELECT {_LIST_COLUMNS} FROM dbo.run_history WHERE id = %s", (run_id,)
+            f"SELECT {_LIST_COLUMNS} FROM run_history WHERE id = %s", (run_id,)
         )
         row = cursor.fetchone()
     return _row_to_dict(row) if row else None
@@ -139,7 +134,7 @@ def get_report(run_id: int) -> tuple[str, bytes] | None:
     with _connection() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            "SELECT report_filename, report_xlsx FROM dbo.run_history WHERE id = %s", (run_id,)
+            "SELECT report_filename, report_xlsx FROM run_history WHERE id = %s", (run_id,)
         )
         row = cursor.fetchone()
     if not row or row["report_xlsx"] is None:
@@ -152,7 +147,7 @@ def get_screenshots(run_id: int) -> tuple[str, str] | None:
     with _connection() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            "SELECT screenshots_filename, screenshots_html FROM dbo.run_history WHERE id = %s", (run_id,)
+            "SELECT screenshots_filename, screenshots_html FROM run_history WHERE id = %s", (run_id,)
         )
         row = cursor.fetchone()
     if not row or row["screenshots_html"] is None:
@@ -165,7 +160,7 @@ def delete_run(run_id: int) -> bool:
     _ensure_schema()
     with _connection() as conn:
         cursor = conn.cursor()
-        cursor.execute("DELETE FROM dbo.run_history WHERE id = %s", (run_id,))
+        cursor.execute("DELETE FROM run_history WHERE id = %s", (run_id,))
         deleted = cursor.rowcount > 0
         conn.commit()
     return deleted

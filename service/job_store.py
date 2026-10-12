@@ -1,18 +1,18 @@
-"""SQL Server bookkeeping for background runs that are queued or in progress.
+"""PostgreSQL bookkeeping for background runs that are queued or in progress.
 
 A row here is the "order slip" for one run. It exists only while the run is
 queued or running (plus a short-lived "failed" row so a broken run is visible
 in History). When a run finishes normally its result lives in
-dbo.run_history and the slip is deleted. When a run is cancelled, or the
+run_history and the slip is deleted. When a run is cancelled, or the
 server dies mid-run, the slip is deleted too - nothing half-finished is kept.
 
-The table is in the shared SQL Server (same connection as history_store), so
+The table is in the shared PostgreSQL database (same connection as history_store), so
 every backend copy sees the same jobs.
 """
 
 import threading
 
-from service.db_service import _connection
+from service.store_db import connection as _connection
 
 
 _SCHEMA_LOCK = threading.Lock()
@@ -37,20 +37,17 @@ def _ensure_schema() -> None:
         with _connection() as conn:
             cursor = conn.cursor()
             cursor.execute("""
-                IF OBJECT_ID(N'dbo.run_jobs', N'U') IS NULL
-                BEGIN
-                    CREATE TABLE dbo.run_jobs (
-                        id BIGINT IDENTITY(1,1) NOT NULL PRIMARY KEY,
-                        source NVARCHAR(32) NOT NULL,
-                        module NVARCHAR(255) NULL,
-                        screen NVARCHAR(MAX) NULL,
-                        status NVARCHAR(16) NOT NULL,
-                        progress NVARCHAR(255) NULL,
-                        last_log NVARCHAR(1000) NULL,
-                        started_at DATETIME2(7) NOT NULL CONSTRAINT DF_run_jobs_started DEFAULT SYSUTCDATETIME(),
-                        updated_at DATETIME2(7) NOT NULL CONSTRAINT DF_run_jobs_updated DEFAULT SYSUTCDATETIME()
-                    );
-                END
+                CREATE TABLE IF NOT EXISTS run_jobs (
+                    id BIGSERIAL PRIMARY KEY,
+                    source VARCHAR(32) NOT NULL,
+                    module VARCHAR(255) NULL,
+                    screen TEXT NULL,
+                    status VARCHAR(16) NOT NULL,
+                    progress VARCHAR(255) NULL,
+                    last_log VARCHAR(1000) NULL,
+                    started_at TIMESTAMP NOT NULL DEFAULT (NOW() AT TIME ZONE 'utc'),
+                    updated_at TIMESTAMP NOT NULL DEFAULT (NOW() AT TIME ZONE 'utc')
+                )
             """)
             conn.commit()
         _SCHEMA_READY = True
@@ -69,9 +66,9 @@ def create_job(source: str, module: str, screen: str, status: str = "queued") ->
         cursor = conn.cursor()
         cursor.execute(
             """
-            INSERT INTO dbo.run_jobs (source, module, screen, status)
-            OUTPUT INSERTED.id
+            INSERT INTO run_jobs (source, module, screen, status)
             VALUES (%s, %s, %s, %s)
+            RETURNING id
             """,
             (source, _clip(module, 255), screen or "", status),
         )
@@ -84,7 +81,7 @@ def update_job(job_id: int, *, status: str | None = None,
                progress: str | None = None, last_log: str | None = None) -> None:
     """Update whichever fields are given and always refresh the heartbeat."""
     _ensure_schema()
-    sets = ["updated_at = SYSUTCDATETIME()"]
+    sets = ["updated_at = (NOW() AT TIME ZONE 'utc')"]
     params: list = []
     if status is not None:
         sets.append("status = %s")
@@ -98,7 +95,7 @@ def update_job(job_id: int, *, status: str | None = None,
     params.append(job_id)
     with _connection() as conn:
         cursor = conn.cursor()
-        cursor.execute(f"UPDATE dbo.run_jobs SET {', '.join(sets)} WHERE id = %s", tuple(params))
+        cursor.execute(f"UPDATE run_jobs SET {', '.join(sets)} WHERE id = %s", tuple(params))
         conn.commit()
 
 
@@ -110,7 +107,7 @@ def delete_job(job_id: int) -> None:
     _ensure_schema()
     with _connection() as conn:
         cursor = conn.cursor()
-        cursor.execute("DELETE FROM dbo.run_jobs WHERE id = %s", (job_id,))
+        cursor.execute("DELETE FROM run_jobs WHERE id = %s", (job_id,))
         conn.commit()
 
 
@@ -121,13 +118,13 @@ def sweep() -> None:
         cursor = conn.cursor()
         cursor.execute(
             """
-            DELETE FROM dbo.run_jobs
-            WHERE (status IN (N'queued', N'running')
-                   AND DATEDIFF(SECOND, updated_at, SYSUTCDATETIME()) > %s)
-               OR (status = N'failed'
-                   AND DATEDIFF(HOUR, updated_at, SYSUTCDATETIME()) > %s)
+            DELETE FROM run_jobs
+            WHERE (status IN ('queued', 'running')
+                   AND EXTRACT(EPOCH FROM ((NOW() AT TIME ZONE 'utc') - updated_at)) > %s)
+               OR (status = 'failed'
+                   AND EXTRACT(EPOCH FROM ((NOW() AT TIME ZONE 'utc') - updated_at)) > %s)
             """,
-            (STALE_SECONDS, FAILED_KEEP_HOURS),
+            (STALE_SECONDS, FAILED_KEEP_HOURS * 3600),
         )
         conn.commit()
 
@@ -137,7 +134,7 @@ def list_jobs() -> list[dict]:
     sweep()
     with _connection() as conn:
         cursor = conn.cursor()
-        cursor.execute(f"SELECT {_COLUMNS} FROM dbo.run_jobs ORDER BY id ASC")
+        cursor.execute(f"SELECT {_COLUMNS} FROM run_jobs ORDER BY id ASC")
         rows = cursor.fetchall()
     result = []
     for row in rows:
