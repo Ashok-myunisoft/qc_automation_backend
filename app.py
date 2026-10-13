@@ -917,8 +917,8 @@ async def handle_fetch_module_queue(ws: WebSocket, session: dict, msg: dict):
     await send_status(ws, "resolving")
 
     try:
-        gl   = _gitlab_service()
-        tree = gl.get_repo_tree()
+        gl   = await asyncio.to_thread(_gitlab_service)  # loopfix
+        tree = await asyncio.to_thread(gl.get_repo_tree)
     except Exception as e:
         await send_error(ws, f"gitlab connection failed: {e}")
         return
@@ -936,8 +936,8 @@ async def handle_fetch_module_queue(ws: WebSocket, session: dict, msg: dict):
         module_screens = []
         for c in candidates:
             try:
-                feature_content = gl.fetch_file(c.feature_path)
-                script_content  = gl.fetch_file(c.script_path)
+                feature_content = await asyncio.to_thread(gl.fetch_file, c.feature_path)
+                script_content  = await asyncio.to_thread(gl.fetch_file, c.script_path)
             except Exception as e:
                 await send_log(ws, f"[{module}] [{c.dir}] gitlab fetch failed: {e} — skipping.", "danger")
                 continue
@@ -989,8 +989,8 @@ async def handle_fetch(ws: WebSocket, session: dict, msg: dict):
     await send_log(ws, "reading gitlab repo structure...", "secondary")
 
     try:
-        gl   = _gitlab_service()
-        tree = gl.get_repo_tree()
+        gl   = await asyncio.to_thread(_gitlab_service)  # loopfix
+        tree = await asyncio.to_thread(gl.get_repo_tree)
     except Exception as e:
         await send_error(ws, f"gitlab connection failed: {e}")
         return
@@ -1009,8 +1009,8 @@ async def handle_fetch(ws: WebSocket, session: dict, msg: dict):
         await send_log(ws, f"matched {resolved.dir} via {resolved.resolved_by} (confidence {resolved.confidence})", "success")
 
     try:
-        feature_content = gl.fetch_file(resolved.feature_path)
-        script_content  = gl.fetch_file(resolved.script_path)
+        feature_content = await asyncio.to_thread(gl.fetch_file, resolved.feature_path)
+        script_content  = await asyncio.to_thread(gl.fetch_file, resolved.script_path)
     except Exception as e:
         await send_error(ws, f"gitlab fetch failed: {e}")
         return
@@ -1040,8 +1040,8 @@ async def _check_output_existing(out_gl: GitLabService, out_tree, module: str, s
     if resolved is None:
         return build_new_path(module, screen_name), False, None, None
     try:
-        existing_feature = out_gl.fetch_file(resolved.feature_path)
-        existing_script  = out_gl.fetch_file(resolved.script_path)
+        existing_feature = await asyncio.to_thread(out_gl.fetch_file, resolved.feature_path)
+        existing_script  = await asyncio.to_thread(out_gl.fetch_file, resolved.script_path)
     except Exception:
         existing_feature = existing_script = None
     if existing_feature is None or existing_script is None:
@@ -1227,6 +1227,8 @@ async def _generate_one_screen(ws: WebSocket, src: GitLabService, module: str,
                 await send_log(ws, f"{tag}added {len(backend_files)} backend file(s) to the analysis input.", "secondary")
             else:
                 await send_log(ws, f"{tag}no backend files matched (or no room in the size budget) - analysing frontend only.", "muted")
+        except WebSocketDisconnect:
+            raise  # loopfix: the browser is gone - not a backend-fetch problem
         except Exception as _be:
             logger.warning("%sbackend context fetch failed: %s - continuing without it", tag, _be)
             await send_log(ws, f"{tag}backend context unavailable ({_be}) - analysing frontend only.", "muted")
@@ -1289,6 +1291,9 @@ async def _generate_one_screen(ws: WebSocket, src: GitLabService, module: str,
         validation_result = await validate_agent.validate(
             test_cases=test_cases, generated_script=generated_script,
         )
+    except WebSocketDisconnect:
+        logger.warning("%sclient disconnected during generation - stopping", tag)
+        raise
     except Exception as e:
         logger.exception("generate pipeline failed for %s", screen_name)
         await send_log(ws, f"{tag}generation failed: {e}", "danger")
@@ -1428,8 +1433,8 @@ async def handle_generate_decision(ws: WebSocket, session: dict, msg: dict):
 
     if decision == "replace":
         try:
-            src      = _source_gitlab_service()
-            src_tree = src.get_repo_tree()
+            src      = await asyncio.to_thread(_source_gitlab_service)  # loopfix: was blocking the event loop for minutes -> ping timeout -> socket closed
+            src_tree = await asyncio.to_thread(src.get_repo_tree)
         except Exception as e:
             await send_error(ws, f"source gitlab connection failed: {e}")
             session.pop("pending_generate", None)
@@ -1516,14 +1521,14 @@ async def handle_discover(ws: WebSocket, session: dict, msg: dict):
     out_tree = None
     out_gl   = None
     try:
-        out_gl   = _gitlab_service()
-        out_tree = out_gl.get_repo_tree()
+        out_gl   = await asyncio.to_thread(_gitlab_service)
+        out_tree = await asyncio.to_thread(out_gl.get_repo_tree)
     except Exception as e:
         await send_log(ws, f"could not check output repo ({e}) — every screen will be treated as new.", "muted")
 
     try:
-        src      = _source_gitlab_service()
-        src_tree = src.get_repo_tree()
+        src      = await asyncio.to_thread(_source_gitlab_service)
+        src_tree = await asyncio.to_thread(src.get_repo_tree)
     except Exception as e:
         await send_error(ws, f"source gitlab connection failed: {e}")
         return
@@ -1632,7 +1637,7 @@ async def handle_start_sweep(ws: WebSocket, session: dict, msg: dict):
     await send_status(ws, "running")
 
     try:
-        src = _source_gitlab_service()
+        src = await asyncio.to_thread(_source_gitlab_service)
     except Exception as e:
         await send_error(ws, f"source gitlab connection failed: {e}")
         return
