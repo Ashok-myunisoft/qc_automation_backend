@@ -29,6 +29,7 @@ from Agents.validate_agent import ValidateAgent
 from Agents.append_agent import AppendAgent
 from Agents.business_context_agent import BusinessContextAgent
 from service import report_builder
+from service import datacy_scan  # datacyscan
 from service import step_checker
 from service import chunk_analysis
 from service import history_store
@@ -1387,6 +1388,20 @@ async def _generate_one_screen(ws: WebSocket, src: GitLabService, module: str,
                 "%sshared-component locator resolution merged %d/%d field(s): %s",
                 tag, merged_count, len(unresolved_shared_fields), shared_resolution,
             )
+        # datacyscan: read the real data-cy values from the running app (normal
+        # AND MM screens) and merge them into the analysis. Best-effort: any
+        # problem is logged as one line and generation continues as before.
+        try:
+            await datacy_scan.scan_and_merge(
+                project_analysis, module, screen_name,
+                lambda text, tone="secondary": send_log(ws, f"{tag}{text}", tone),
+                is_mm=is_mm_screen,
+            )
+        except WebSocketDisconnect:
+            raise
+        except Exception as _se:
+            logger.warning("%sdata-cy scan failed unexpectedly: %s", tag, _se)
+            await send_log(ws, f"{tag}data-cy scan skipped ({_se}) - generating without it.", "muted")
         logger.info("%sanalysis output=%s", tag, project_analysis)
 
         await send_log(ws, f"{tag}looking up real test data ({len(source_hints)} hint(s) from source)...", "secondary")
