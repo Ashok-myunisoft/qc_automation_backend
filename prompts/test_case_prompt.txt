@@ -97,6 +97,40 @@ Examples table. To test "mandatory picklist left empty", write a separate
 Scenario Outline whose steps simply do not include the select step for that
 field. (The input step does skip empty values, so an empty input cell is fine.)
 
+AUTOMATIC STEP CHECK (CRITICAL): after you answer, a code checker compares every
+step in your feature with the step definitions. A step that breaks one of these
+rules has no definition, so its scenario cannot run:
+- Use ONLY the step sentences listed above, character for character. The button
+  step is exactly "I click the save button" - lowercase "s", never "Save". Do
+  not invent any other step wording or any other action sentence.
+- Examples values must NEVER contain a double quote (") in any column. Write
+  Travel Expenses, not "Travel Expenses". Each "<Placeholder>" in a step is
+  already wrapped in quotes, so a value with its own quotes becomes
+  ""Travel Expenses"", which matches no step.
+- A missing / empty picklist case needs its own Scenario Outline that omits that
+  picklist step. Never leave a picklist cell empty.
+- Every "<Placeholder>" used in a step needs an Examples column with exactly
+  that name.
+
+NO INVENTED FACTS (CRITICAL): every row must be backed by the Project Analysis or
+the Business Context. A row built on a guess fails on the real application.
+- ExpectedResult: use only a message that appears in the Project Analysis
+  (ui_validations, business_validations, a dialog's expected_message, a field's
+  own validation text) or one of the ERP's standard messages shown in this
+  prompt's examples ("Details Saved Successfully", "<Field label>* Should not be
+  Empty"). If you do not know the real message for a row, leave that row out.
+  Never write made-up wording such as "Created Successfully", "Updated
+  Successfully", "Must be a number" or "Amount exceeds the maximum limit".
+- Never invent a maximum, minimum, length limit or format rule. Write boundary
+  and invalid-format rows only when the Project Analysis states the rule and its
+  message.
+- Picklist and lookup values (employee, item, type, number ...) come from the
+  Business Context only. When none is supplied use PLACEHOLDER_ values; never
+  write names like "Employee 01", "John Doe" or "Standard" as if they were real.
+- The picklist step always clicks the first matching row, so never write a
+  scenario that selects a value that does not exist or expects a "not found"
+  result.
+
 
 #SCREEN STRUCTURE — TABBED VS. DIRECT (CRITICAL — READ FIRST)
 
@@ -187,7 +221,7 @@ the backend source it summarises. Never invent a field, limit or message.
      update, then delete (Delete uses "I click the Delete button").
 
 Where the Project Analysis gives no real test data, use clear placeholder
-values and say so in that row's Condition, e.g. ... "Basic Save [placeholder data]".
+values and say so in that row's Condition, e.g. ... Basic Save [placeholder data].
 
 ROW CAP: one Examples table holds at most 25 rows. If a theme needs more,
 split it into a second Scenario Outline for the next theme (e.g. "Numeric
@@ -405,8 +439,9 @@ allows an Examples table under "Scenario Outline:", never under "Scenario:").
   text equals the Examples column header exactly.
 - Examples columns, in this order:
     1. Condition  — a short plain-language description of what THIS row tests,
-       e.g.  Purchase Requisition "Basic Save", "Mandatory field missing",
-       "Quantity zero", "Quantity maximum boundary"
+       e.g.  Purchase Requisition Basic Save, Mandatory field missing,
+       Quantity zero, Quantity maximum boundary
+       (no double quotes inside any Examples value)
     2. one column per field used in the steps, in step order
        (header = the placeholder name; a "Reference_No"-style column only when
        the screen really has a reference/document number field)
@@ -427,14 +462,17 @@ come from the real Project Analysis, never from this example):
       Then I should see a confirmation message "<ExpectedResult>"
       Examples:
           | Condition                         | BizType                | Item Code | Qty | ExpectedResult                                |
-          | Purchase Requisition "Basic Save" | Purchase Requisition M | R000662   | 57  | Detail Saved Successfully With DocumentNumber |
+          | Purchase Requisition Basic Save   | Purchase Requisition M | R000662   | 57  | Detail Saved Successfully With DocumentNumber |
 
 
 #TEST DATA RULES
 
 
 If ERP Business Context exists → use its values (e.g. CUST001, VEN001, WH001, ITEM1001). Never replace with fictional values.
-If not provided → use meaningful placeholder values.
+If not provided → invent clearly fake values and prefix every invented text/code
+value with PLACEHOLDER_ (for example PLACEHOLDER_Travel_Expenses, PLACEHOLDER_ABC)
+so nobody mistakes it for real data. Numeric and date fields keep a valid number
+or date. Examples values never contain double quotes.
 
 #STRICT RULES
 

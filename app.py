@@ -29,6 +29,7 @@ from Agents.validate_agent import ValidateAgent
 from Agents.append_agent import AppendAgent
 from Agents.business_context_agent import BusinessContextAgent
 from service import report_builder
+from service import step_checker
 from service import chunk_analysis
 from service import history_store
 from service import job_manager
@@ -1155,6 +1156,140 @@ async def _run_test_cases_with_chunking(
     return merged
 
 
+# ---------------------------------------------------------------------------
+# Deterministic step check (service/step_checker.py) — no AI. Catches the
+# defects the AI validate agent keeps missing: undefined / ambiguous steps,
+# quotes inside Examples cells, empty picklist cells, missing Examples columns.
+# Everything here is written to the BACKEND log only (nothing is sent to the
+# browser's Run log). It never blocks generation: every failure path falls
+# back to "carry on with what we have".
+# ---------------------------------------------------------------------------
+_STEP_CHECK_LOG_LIMIT = 25
+
+
+def _safe_step_check(feature: str, script: str):
+    """Returns the findings list, or None if the checker itself crashed."""
+    try:
+        return step_checker.check_steps(feature, script)
+    except Exception:
+        logger.exception("step checker crashed - skipping it")
+        return None
+
+
+def _log_step_findings(tag: str, findings, heading: str) -> None:
+    logger.warning("%sstep check %s: %d finding(s), %d critical",
+                   tag, heading, len(findings), step_checker.critical_count(findings))
+    for f in findings[:_STEP_CHECK_LOG_LIMIT]:
+        where = f" [{f.scenario}]" if f.scenario else ""
+        logger.warning("%sstep check (%s) %s (fix in %s)%s: %s | %s",
+                       tag, f.severity, f.kind, f.fix_in or "?", where, f.detail, f.hint)
+    if len(findings) > _STEP_CHECK_LOG_LIMIT:
+        logger.warning("%sstep check: ...and %d more finding(s).", tag, len(findings) - _STEP_CHECK_LOG_LIMIT)
+
+
+async def _step_check_and_repair(tag: str, test_cases: str, generated_script: str,
+                                 automation_contract: dict | None):
+    """Runs the step checker on the generated pair, logs every finding to the
+    backend log, and - only when there are critical findings - makes ONE repair
+    attempt per agent (test_case_agent for feature defects, script_generate_agent
+    for script defects), re-checking after each. A repair is kept only if it
+    strictly reduces the number of critical findings (and, for a script, leaves
+    the QC template untouched; for a feature, keeps every Scenario Outline).
+    The reason for every rejected repair is logged.
+    Returns (test_cases, generated_script, findings, repaired_parts)."""
+    repaired_parts: list[str] = []
+    findings = _safe_step_check(test_cases, generated_script)
+    if findings is None:
+        return test_cases, generated_script, [], repaired_parts
+    if not findings:
+        logger.info("%sstep check: every feature step matches exactly one step definition.", tag)
+        return test_cases, generated_script, findings, repaired_parts
+
+    _log_step_findings(tag, findings, "initial")
+
+    if step_checker.has_critical(findings):
+        # 1) feature-side defects -> test_case_agent
+        feature_side = [f for f in findings if f.fix_in == step_checker.FIX_FEATURE and f.severity != step_checker.MINOR]
+        if feature_side:
+            try:
+                new_feature = await test_case_agent.repair_test_cases(
+                    test_cases, step_checker.format_for_prompt(feature_side),
+                )
+                after = _safe_step_check(new_feature, generated_script)
+                reasons = []
+                if after is None:
+                    reasons.append("checker crashed on the repaired feature")
+                else:
+                    if "Feature:" not in new_feature:
+                        reasons.append("repaired text has no 'Feature:' line")
+                    old_n, new_n = step_checker.count_outlines(test_cases), step_checker.count_outlines(new_feature)
+                    if new_n < old_n:
+                        reasons.append(f"scenario outlines dropped {old_n} -> {new_n}")
+                    if step_checker.critical_count(after) >= step_checker.critical_count(findings):
+                        reasons.append(f"critical findings not reduced ({step_checker.critical_count(findings)} -> {step_checker.critical_count(after)})")
+                if not reasons:
+                    logger.info("%sstep check: feature repaired (%d -> %d critical).", tag,
+                                step_checker.critical_count(findings), step_checker.critical_count(after))
+                    test_cases, findings = new_feature, after
+                    repaired_parts.append("feature")
+                else:
+                    logger.warning("%sstep check: feature repair rejected - %s", tag, "; ".join(reasons))
+                    if after:
+                        _log_step_findings(tag, after, "of the rejected feature repair")
+            except Exception as e:
+                logger.warning("%sstep check: feature repair failed (%s) - keeping the original feature.", tag, e)
+
+        # 2) script-side defects -> script_generate_agent (re-evaluated after the feature repair)
+        script_side = [f for f in findings if f.fix_in == step_checker.FIX_SCRIPT and f.severity != step_checker.MINOR]
+        if script_side and step_checker.has_critical(script_side):
+            try:
+                new_script = await script_generate_agent.repair_script(
+                    generated_script, test_cases, step_checker.format_for_prompt(script_side), automation_contract,
+                )
+                after = _safe_step_check(test_cases, new_script)
+                reasons = []
+                if new_script == generated_script:
+                    reasons.append("the agent returned the script unchanged")
+                if not step_checker.qc_template_intact(generated_script, new_script):
+                    reasons.append("the QC template block was altered or lost")
+                if after is None:
+                    reasons.append("checker crashed on the repaired script")
+                elif step_checker.critical_count(after) >= step_checker.critical_count(findings):
+                    reasons.append(f"critical findings not reduced ({step_checker.critical_count(findings)} -> {step_checker.critical_count(after)})")
+                if not reasons:
+                    logger.info("%sstep check: script repaired (%d -> %d critical).", tag,
+                                step_checker.critical_count(findings), step_checker.critical_count(after))
+                    generated_script, findings = new_script, after
+                    repaired_parts.append("script")
+                else:
+                    logger.warning("%sstep check: script repair rejected - %s", tag, "; ".join(reasons))
+                    if after:
+                        _log_step_findings(tag, after, "of the rejected script repair")
+            except Exception as e:
+                logger.warning("%sstep check: script repair failed (%s) - keeping the original script.", tag, e)
+
+        _log_step_findings(tag, findings, f"after repair attempt (repaired: {repaired_parts or 'nothing'})")
+
+    return test_cases, generated_script, findings, repaired_parts
+
+
+def _merge_step_findings(validation: dict | None, findings, repaired_parts: list[str]) -> dict:
+    """Adds the step-checker findings to the validate agent's result (same
+    "findings" shape) without removing anything the AI reported."""
+    result = dict(validation) if isinstance(validation, dict) else {}
+    result["findings"] = list(result.get("findings") or []) + step_checker.findings_to_validation_entries(findings)
+    result["step_checker"] = {
+        "total": len(findings),
+        "critical": step_checker.critical_count(findings),
+        "auto_repaired": repaired_parts,
+    }
+    if step_checker.has_critical(findings):
+        result["overall_verdict"] = "fail"
+    elif findings and result.get("overall_verdict") in (None, "pass"):
+        result["overall_verdict"] = "pass_with_warnings"
+    return result
+
+
 async def _generate_one_screen(ws: WebSocket, src: GitLabService, module: str,
                                 screen_name: str, resolved_source: ResolvedSource,
                                 user_request: str, label: str | None = None,
@@ -1287,10 +1422,15 @@ async def _generate_one_screen(ws: WebSocket, src: GitLabService, module: str,
             automation_contract=automation_contract,
         )
 
+        test_cases, generated_script, step_findings, step_repaired = await _step_check_and_repair(
+            tag, test_cases, generated_script, automation_contract,
+        )
+
         await send_log(ws, f"{tag}running validate agent...", "secondary")
         validation_result = await validate_agent.validate(
             test_cases=test_cases, generated_script=generated_script,
         )
+        validation_result = _merge_step_findings(validation_result, step_findings, step_repaired)
     except WebSocketDisconnect:
         logger.warning("%sclient disconnected during generation - stopping", tag)
         raise

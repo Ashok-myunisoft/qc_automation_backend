@@ -204,3 +204,58 @@ Invalid script to repair:
             raise ValueError("ScriptGenerateAgent output failed deterministic gate after repair: " + "; ".join(remaining))
         return repaired
         return repaired
+
+    async def repair_script(
+        self,
+        script: str,
+        test_cases: str,
+        findings_text: str,
+        automation_contract: dict | None = None,
+    ) -> str:
+        """One-shot repair of a script using findings from the deterministic
+        step checker (service/step_checker.py): a missing step definition or a
+        duplicated one. The QC template block is never touched - the caller
+        also rejects the repair if the template changed. Returns the original
+        script unchanged if the model's output fails the output gate."""
+        contract_block = json.dumps(automation_contract, indent=2) if automation_contract else "none supplied"
+        resolved_controls = _build_resolved_control_lookup(automation_contract)
+        resolved_controls_block = json.dumps(resolved_controls, indent=2) if resolved_controls else "none supplied"
+        repair_message = f"""
+Repair the JavaScript below. Return only complete raw JavaScript.
+
+An automatic step checker compared the feature file with this script and found
+the defects listed below.
+
+CRITICAL REPAIR RULES - read before changing anything:
+1. Fix ONLY the listed defects. Do not rewrite, remove or restructure anything
+   that is not directly causing one.
+2. The QC team template block (the import, the creds line, the picklist / input /
+   confirmation-message / Delete steps, `beforeEach` and `loginSession`) must stay
+   EXACTLY as it is, character for character, and appear only once.
+3. Keep every existing step definition. Only change or remove one if a defect names it.
+4. For an undefined step: add ONE definition whose expression matches the feature
+   step text exactly (same wording and letter case, {{string}} for quoted values).
+   Never write a definition that could also match a template step.
+5. For a duplicated or ambiguous step: keep exactly one definition of that expression.
+
+Defects found:
+{findings_text}
+
+Resolved field-control lookup (only for screen-specific steps, not for the template steps):
+{resolved_controls_block}
+
+Automation contract:
+{contract_block}
+
+Feature file (authoritative - every step must have exactly one definition):
+{test_cases}
+
+Script to repair:
+{script}
+"""
+        repaired = _strip_outer_javascript_fence((await self.agent.run(repair_message)).text)
+        remaining = _script_output_violations(repaired)
+        if remaining:
+            logger.warning("ScriptGenerateAgent.repair_script output failed the output gate: %s", remaining)
+            return script
+        return repaired

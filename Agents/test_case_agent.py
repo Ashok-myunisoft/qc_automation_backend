@@ -1,5 +1,6 @@
 import json
 import os
+import re
 from pathlib import Path
 from agent_framework import Agent
 from agent_framework.openai import OpenAIChatClient
@@ -51,3 +52,37 @@ present in the Project Analysis.
 
         response = await self.agent.run(user_message)
         return response.text
+
+    async def repair_test_cases(self, test_cases: str, findings_text: str) -> str:
+        """One-shot repair of a feature file using findings from the
+        deterministic step checker (service/step_checker.py). Returns the full
+        corrected feature text. The caller keeps the original if the repair
+        does not actually reduce the findings."""
+        user_message = f"""
+The feature file below has defects found by an automatic step checker. Fix
+ONLY the listed defects and return the COMPLETE corrected feature file.
+
+Rules for the repair:
+- Do not add, remove or reorder scenarios, rows or steps unless a defect below
+  requires it. Keep every Scenario Outline, Rule, Background and Examples table.
+- Examples values must never contain double quotes - remove them from the values.
+- Use the exact step vocabulary from your instructions, spelled exactly the same
+  way (for example "I click the save button" - lowercase s).
+- A picklist step must never receive an empty value. For a case that needs an
+  empty picklist, put it in its own Scenario Outline that omits that picklist
+  step, rather than leaving the cell empty.
+- Every "<Placeholder>" in a step needs an Examples column with exactly that name.
+- Keep Examples tables aligned. Output ONLY Gherkin - no markdown, no commentary.
+
+Defects found:
+{findings_text}
+
+Feature file to repair:
+{test_cases}
+"""
+        response = await self.agent.run(user_message)
+        text = response.text.strip()
+        if text.startswith("```"):  # tolerate a stray Markdown fence
+            text = re.sub(r"^```[a-zA-Z]*[ \t]*\r?\n", "", text)
+            text = re.sub(r"\r?\n```\s*$", "", text)
+        return text.strip()

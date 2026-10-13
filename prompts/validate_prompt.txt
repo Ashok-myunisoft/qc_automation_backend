@@ -27,6 +27,19 @@ You will receive:
    does: it is ground truth for what a selector SHOULD be, when present.
 
 
+#CODE CHECKER ALREADY RAN (deterministic, not AI)
+
+Before you, a code checker verified step matching on this pair: undefined steps
+(including letter-case mismatches), ambiguous or duplicate step definitions,
+double quotes inside Examples cells, empty picklist cells, and "<Placeholder>"s
+with no Examples column. The code adds its findings to your result itself, so
+do not re-derive or repeat them (sections 0b, 0c, 0d, 0g and the placeholder
+part of 0f are covered). Spend your effort on test coverage (1, 7), script
+correctness (2), assertions (3), selectors / locators (4), login and navigation
+(5), cleanup (6), and on whether the QC template block is present and unaltered
+(0a), which the checker does not report.
+
+
 #VALIDATION AREAS
 
 Work through every area below for every scenario in the feature file. Do
