@@ -408,6 +408,32 @@ Separate validations into:
 - UI Validations: Required, Length, Regex, Email, Number, Date
 - Business Validations: only rules explicitly implemented in the source
 
+Coverage inputs (the test-case stage builds its Save/form coverage only from
+what you report here, so be exact and complete — never guess):
+- For every field, record the facts the source shows inside its existing
+  `required`, `ui_validations`, `business_validations`, `default_value`,
+  `lookup_source` and `dependencies` entries: whether it is mandatory (set
+  `required` true only when the source makes it mandatory, including via the
+  backend validation files when supplied), min/max length, min/max/decimal
+  limits, regex/format/email/date rules, the allowed or lookup values of a
+  picklist or dropdown when the source lists them, and the exact validation
+  message text the source or backend returns for each rule (for example
+  "Code* Should not be Empty"). Write these as short strings inside the existing
+  arrays, e.g. "required: message 'Code* Should not be Empty'",
+  "max length 50", "min 0, max 99999, 2 decimals".
+- Report uniqueness/duplicate rules (a code or number that must be unique) and
+  the exact success and error message texts for Save, Update and Delete inside
+  `business_validations` / `conditional_business_logic` of the affected field or
+  action. Report fields that become required or hidden depending on another
+  field in `dependencies` / `visibility_condition`.
+- For grid/loop line items, report each line-item field's data-cy exactly as it
+  appears (including its index digit, e.g. ItemCode0) and note whether more than
+  one row can be added.
+- Report `data_cy` exactly as the source writes it, including any control suffix
+  such as "-PickListDrop" or "-Input" — do not strip or rename it.
+- If a limit, message or rule is not shown anywhere in the supplied source,
+  leave it out. Do not invent values.
+
 Functionality / code behavior
 
 Capture only frontend-observable behavior from the primary screen's TypeScript and directly referenced frontend service files.

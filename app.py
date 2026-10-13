@@ -11,7 +11,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from service.gitlab_service import GitLabService
 from service.backend_context import (
     is_mm_module, fetch_mm_source_context, fetch_backend_context, MM_MAX_SOURCE_CHARS,
+    fit_backend_files_to_budget,  # mmfix
 )
+from service.mm_test_data import find_mm_test_data  # mmfix2
 from service.architecture_resolver import (
     build_new_path, ResolvedSource,
     resolve_existing_precise, resolve_module_screens_precise,
@@ -71,8 +73,16 @@ def _source_gitlab_service() -> GitLabService:
     return GitLabService(env_prefix="SOURCE_GITLAB")
 
 
+_backend_gitlab_instance: GitLabService | None = None  # mmfix
+
+
 def _backend_gitlab_service() -> GitLabService:
-    return GitLabService(env_prefix="BACKEND_GITLAB")
+    # mmfix: reuse ONE instance so the (slow, ~5 min) backend repo tree listing
+    # is cached for an hour instead of being re-downloaded on every Generate.
+    global _backend_gitlab_instance
+    if _backend_gitlab_instance is None:
+        _backend_gitlab_instance = GitLabService(env_prefix="BACKEND_GITLAB")
+    return _backend_gitlab_instance
 
 
 _IMPORT_RE = re.compile(r"""from\s+['"]([^'"]+)['"]""")
@@ -1076,6 +1086,31 @@ async def _run_test_cases_with_chunking(
     file — chunking is invisible to ScriptGenerateAgent, which receives
     one ordinary feature file exactly as before."""
     if not chunk_analysis.should_chunk_test_cases(project_analysis):
+        if chunk_analysis.should_split_direct_test_cases(project_analysis):
+            # Big direct screen: full Save/form coverage will not fit in one response,
+            # so generate it theme by theme and merge the Examples tables.
+            labels = chunk_analysis.focus_pass_labels()
+            await send_log(
+                ws, f"{tag}large screen — generating scenarios in {len(labels)} passes...", "secondary",
+            )
+            texts = []
+            for i, label in enumerate(labels):
+                await send_log(ws, f"{tag}generating scenarios pass {i + 1}/{len(labels)}: '{label}'...", "secondary")
+                raw = await test_case_agent.generate_test_cases(
+                    project_analysis=project_analysis,
+                    user_request=chunk_analysis.build_focus_test_case_request(user_request, i),
+                    business_context=business_context,
+                )
+                texts.append(raw if i == 0 else chunk_analysis.strip_to_scenarios(raw))
+            merged = chunk_analysis.merge_test_case_chunks(texts[0], texts[1:])
+            counts = chunk_analysis.count_scenarios(merged)
+            await send_log(
+                ws,
+                f"{tag}merged {len(labels)} passes: {counts['outlines']} scenario outline(s), "
+                f"{counts['example_rows']} example row(s).",
+                "secondary",
+            )
+            return merged
         return await test_case_agent.generate_test_cases(
             project_analysis=project_analysis, user_request=user_request,
             business_context=business_context,
@@ -1110,7 +1145,13 @@ async def _run_test_cases_with_chunking(
         rule_texts.append(chunk_analysis.strip_to_rule_block(raw, label))
 
     merged = chunk_analysis.merge_test_case_chunks(shared_text, rule_texts)
-    await send_log(ws, f"{tag}merged {len(sections)} tab(s) of scenarios into one feature file.", "secondary")
+    counts = chunk_analysis.count_scenarios(merged)
+    await send_log(
+        ws,
+        f"{tag}merged {len(sections)} tab(s) of scenarios into one feature file "
+        f"({counts['outlines']} scenario outline(s), {counts['example_rows']} example row(s)).",
+        "secondary",
+    )
     return merged
 
 
@@ -1169,6 +1210,27 @@ async def _generate_one_screen(ws: WebSocket, src: GitLabService, module: str,
             [f.get("path") for f in project_context.get("source_files", [])[:5]],
         )
 
+        # mmfix: load the C# backend files BEFORE analysis (for MM AND regular screens).
+        # The old code fetched them AFTER analysis had already run, so no AI step ever saw them.
+        source_hints = _extract_source_hints(project_context)
+        try:
+            backend_src = await asyncio.to_thread(_backend_gitlab_service)
+            backend_files = await asyncio.to_thread(
+                fetch_backend_context, backend_src, screen_name, source_hints,
+            )
+            backend_files = fit_backend_files_to_budget(
+                project_context, backend_files,
+                limit=MM_MAX_SOURCE_CHARS if is_mm_screen else _MAX_SOURCE_CHARS,
+            )
+            if backend_files:
+                project_context["source_files"].extend(backend_files)
+                await send_log(ws, f"{tag}added {len(backend_files)} backend file(s) to the analysis input.", "secondary")
+            else:
+                await send_log(ws, f"{tag}no backend files matched (or no room in the size budget) - analysing frontend only.", "muted")
+        except Exception as _be:
+            logger.warning("%sbackend context fetch failed: %s - continuing without it", tag, _be)
+            await send_log(ws, f"{tag}backend context unavailable ({_be}) - analysing frontend only.", "muted")
+
         await send_log(ws, f"{tag}running project analysis agent...", "secondary")
         project_analysis = await project_analysis_agent.analyze(
             project_context=project_context, user_request=user_request,
@@ -1190,24 +1252,11 @@ async def _generate_one_screen(ws: WebSocket, src: GitLabService, module: str,
             )
         logger.info("%sanalysis output=%s", tag, project_analysis)
 
-        source_hints = _extract_source_hints(project_context)
-
-        # Fetch backend BL/DL files and append to project_context for
-        # ProjectAnalysisAgent — gives validation rules, business logic,
-        # and field relationship context unavailable from frontend alone.
-        try:
-            backend_src = _backend_gitlab_service()
-            backend_files = await asyncio.to_thread(
-                fetch_backend_context, backend_src, screen_name, source_hints,
-            )
-            if backend_files:
-                project_context["source_files"].extend(backend_files)
-                await send_log(ws, f"{tag}fetched {len(backend_files)} backend file(s) for business logic context.", "secondary")
-        except Exception as _be:
-            logger.warning("%sbackend context fetch failed: %s — continuing without it", tag, _be)
-
         await send_log(ws, f"{tag}looking up real test data ({len(source_hints)} hint(s) from source)...", "secondary")
-        business_context_result = await business_context_agent.find_context(module, screen_name, source_hints)
+        if is_mm_screen:  # mmfix2: fixed lookup list instead of letting the AI hunt (and invent values)
+            business_context_result = await asyncio.to_thread(find_mm_test_data, module, screen_name)
+        else:
+            business_context_result = await business_context_agent.find_context(module, screen_name, source_hints)
         if "error" in business_context_result:
             await send_log(ws, f"{tag}business context: {business_context_result['error']} — using placeholder values.", "muted")
             business_context = None
@@ -1844,8 +1893,9 @@ async def handle_reject_screen(ws: WebSocket, session: dict, msg: dict):
 async def _fetch_shared_fixtures(ws: WebSocket) -> dict:
     fixtures = {}
     try:
-        out_gl = _gitlab_service()
-        content = out_gl.fetch_file("fixtures/validation-error-message.json")
+        # GitLab calls are synchronous; keep them off the event loop so logs keep streaming.
+        out_gl = await asyncio.to_thread(_gitlab_service)
+        content = await asyncio.to_thread(out_gl.fetch_file, "fixtures/validation-error-message.json")
         if content:
             fixtures["validation-error-message.json"] = content
     except Exception as e:
@@ -1884,13 +1934,14 @@ async def handle_set_env(ws: WebSocket, session: dict, msg: dict):
         "userName": user_name,
     })
 
-
+# chg-patch-applied
 async def handle_run(ws: WebSocket, session: dict):
     if not session.get("test_env"):
         await send_error(
             ws,
             "no test environment set — set baseUrl / db / username / password before running.",
         )
+        await send_status(ws, "awaiting_review")  # frontend: re-enable the Run button
         return
 
     if session.get("scope") == "module" and session.get("screens"):
@@ -1898,6 +1949,7 @@ async def handle_run(ws: WebSocket, session: dict):
 
         if session.get("origin") == "generate" and not all(s.get("pushed") for s in screens):
             await send_error(ws, "approve & push every screen before running.")
+            await send_status(ws, "awaiting_approval")  # frontend: re-enable the Run button
             return
 
         clear_screenshot_stash()
@@ -1960,10 +2012,12 @@ async def handle_run(ws: WebSocket, session: dict):
 
     if not session.get("feature") or not session.get("script") or not session.get("resolved"):
         await send_error(ws, "nothing to run yet — fetch or generate first.")
+        await send_status(ws, "awaiting_review")  # frontend: re-enable the Run button
         return
 
     if session.get("origin") == "generate" and not session.get("pushed"):
         await send_error(ws, "approve the generated files before running.")
+        await send_status(ws, "awaiting_approval")  # frontend: re-enable the Run button
         return
 
     resolved = session["resolved"]
@@ -2560,7 +2614,7 @@ async def qc_session(websocket: WebSocket):
 
             elif action == "auto_run":
                 if _session_job_active(session):
-                    await send_error(websocket, "a run is already in progress on this session — wait for it or terminate it first.")
+                    await send_error(websocket, "A run is already in progress for this session, so this request was ignored. Wait for it to finish or click Terminate.")
                 else:
                     scope_ = (msg.get("scope") or "module").strip().lower()
                     if scope_ == "screen":
@@ -2602,7 +2656,7 @@ async def qc_session(websocket: WebSocket):
 
             elif action == "run":
                 if _session_job_active(session):
-                    await send_error(websocket, "a run is already in progress on this session — wait for it or terminate it first.")
+                    await send_error(websocket, "A run is already in progress for this session, so this request was ignored. Wait for it to finish or click Terminate.")
                 else:
                     job_module, job_screen = _run_row_info(session)
                     job = job_manager.start_job(

@@ -35,6 +35,126 @@ scenarios can still be missing implementations further down, especially
 now that feature files commonly carry 15–50 scenarios.
 
 
+## 0. QC Templates, Outline Format and Step Coverage (CHECK FIRST)
+
+The generator is required to copy the QC team's template block into every
+script verbatim. It is reproduced here as the reference. Compare the script
+against it.
+
+REFERENCE TEMPLATE BLOCK:
+
+import { Given, When, Then } from "@badeball/cypress-cucumber-preprocessor";
+const creds = Cypress.env('TestConnections').UILogin;
+
+Then("I select {string} in the {string} picklist field", (value, field) => {
+  cy.get(`[data-cy="${field}-PickListDrop"]`).click({ force: true });
+  cy.wait(500);
+  cy.get("[data-cy='PicklistSearchBar']").click().clear().type(value);
+  cy.wait(2000);
+  cy.get('.ag-row-even > .ag-column-first').click({ force: true });
+});
+
+Then("I enter {string} in the {string} input field", (value, field) => {
+  if (!value) {
+    return;
+  }
+  cy.wait(1000);
+  cy.get(`[data-cy="${field}-Input"]`)
+    .focus()
+    .click({ force: true })
+    .clear()
+    .type(value, { delay: 100 });
+  cy.wait(3000);
+});
+
+Then("I should see a confirmation message {string}", (value) => {
+  cy.contains(value).should('be.visible');
+  cy.get('.mat-mdc-dialog-component-host > .mat-icon').click();
+});
+
+Then("I click the Delete button", () => {
+  cy.wait(5000);
+  cy.get('[data-cy="DeleteForm"]').click();
+  cy.get('div.alertbutton').click();
+  cy.wait(5000);
+});
+
+beforeEach(() => {
+  loginSession();
+});
+
+function loginSession() {
+  cy.visit(Cypress.config('baseUrl'), {
+    timeout: 120000,
+    failOnStatusCode: false,
+  });
+  cy.get('body').then($body => {
+    if ($body.find('[data-cy="Database-Input"]').length === 0) {
+      cy.get('.login-btn', { timeout: 60000 }).click();
+    }
+  });
+  cy.get('[data-cy="Database-Input"]', { timeout: 30000 })
+    .should('be.visible')
+    .type(creds.dbName);
+  cy.get('.btn-submit').click();
+  cy.get('[data-cy="Username-Input"]', { timeout: 90000 })
+    .should('be.visible')
+    .type(creds.userName);
+  cy.get('[data-cy="Password-Input"]')
+    .type(creds.password, { log: false });
+  cy.get('.signin-button').click();
+  cy.wait(5000);
+}
+
+Check, and report each failure as a finding:
+
+a) TEMPLATE PRESENT AND UNALTERED — each of the four template steps,
+   `beforeEach`, `loginSession`, and the `creds` line must exist in the script
+   and be identical to the reference, ignoring only whitespace/indentation and
+   trailing semicolons. A missing template item is CRITICAL. A changed
+   selector, wait value, step text, option or statement order inside a
+   template item (the template was altered) is CRITICAL. Quote the altered line
+   in the finding. Do NOT flag the template's own `cy.wait(<ms>)` calls, its
+   missing `.should()` waits or its login flow under any other area — those
+   are mandated by the QC team.
+b) NO DUPLICATES — each template step expression, `beforeEach` and
+   `loginSession` appears exactly once. A second step definition whose
+   expression could also match a template step (for example another
+   "I select {string} in the {string} ..." or "I enter {string} in the
+   {string} ..." step, or a second confirmation-message / Delete step) is
+   CRITICAL (ambiguous step). A second `beforeEach` or a second login function
+   is CRITICAL.
+c) EVERY FEATURE STEP HAS A DEFINITION — list every distinct step sentence in
+   the feature (after removing the Given/When/Then/And/But keyword, with each
+   "<Placeholder>" and each quoted value treated as a {string} slot). Each must
+   match exactly one step definition in the script — either a template step or a
+   screen-specific one. A feature step with no matching definition is CRITICAL.
+   Steps that match a template definition count as defined — do not report
+   them as missing.
+d) STEP WORDING — feature steps that perform the template actions must use the
+   template wording exactly ("I select ... in the ... picklist field",
+   "I enter ... in the ... input field", "I should see a confirmation message",
+   "I click the Delete button"). A near-miss wording (for example "validation
+   message", "... ComboBox field", "... name field", "... code field") is
+   CRITICAL, because it has no definition.
+e) FIELD ARGUMENT — the "{string}" field argument of the select/enter steps must
+   be a data-cy base name (no spaces, no -PickListDrop / -Input suffix, not a
+   display label). If Known Real Locators were supplied, it must equal the
+   supplied data-cy value with its suffix removed. A display label or a name
+   with a space or a suffix is MAJOR.
+f) SCENARIO OUTLINE FORMAT — every scenario in the feature must be a
+   "Scenario Outline:" with an "Examples:" table; a plain "Scenario:" is MAJOR
+   (the format was mandated). Each Examples table must have a "Condition"
+   column first and an "ExpectedResult" column last, the header names must
+   match the "<Placeholder>" names used in the steps exactly (a placeholder
+   with no column, or a column no step uses, is MAJOR), all rows must have the
+   same number of cells as the header, and no table may exceed 25 rows
+   (MINOR). Columns not aligned with padding is MINOR.
+g) EMPTY PICKLIST CELLS — the picklist template has no empty-value guard. An
+   empty cell for a value used by an "... picklist field" step is MAJOR (it
+   would select the first row instead of testing an empty field).
+
+
 ## 1. Test Coverage Validation
 
 Verify:
@@ -76,7 +196,7 @@ Validate:
 - Proper command chaining — no chaining a jQuery-only method directly off
   a bare Cypress command without an intermediate `.then()` where one is
   required.
-- No hardcoded `cy.wait(<ms>)` used as the PRIMARY
+- (Excluding the QC template block, which is mandated verbatim.) No hardcoded `cy.wait(<ms>)` used as the PRIMARY
   wait strategy for a page load, navigation, or async data fetch (per
   ScriptGenerateAgent's convention). A short buffer wait (a few hundred
   ms) immediately after an already-asserted state is acceptable; a
@@ -93,6 +213,8 @@ Validate:
 
 
 ## 3. Assertion Validation
+
+The template step "I should see a confirmation message {string}" is a fixed, accepted assertion (it checks the exact message text); do not flag it as weak.
 
 Check:
 - Every important business validation named in the feature (a
@@ -130,8 +252,8 @@ Check:
   is a CRITICAL finding — it means the script is reproducing exactly the
   kind of fabricated-locator failure this pipeline has hit before (a
   script built on a guessed selector fails silently at runtime).
-- Dropdown/combobox/picklist fields use the click-then-select-mat-option
-  pattern, never `.select(value)` unless the feature/analysis explicitly
+- Dropdown/combobox/picklist fields are handled by the template picklist step;
+  never `.select(value)` unless the feature/analysis explicitly
   describes a genuine native `<select>` for that field. Using `.select()`
   against a non-native dropdown is a CRITICAL finding (guaranteed runtime
   failure).
@@ -143,9 +265,8 @@ Check:
 ## 5. Login & Navigation Structure Validation
 
 Check:
-- The script has exactly one login path — either the standard default
-  `beforeEach`/`loginSession()` flow, or a single alternate login flow
-  matching an explicit Background login step — never both, never neither.
+- The script has exactly one login path — the template `beforeEach`/`loginSession()`
+  flow (see section 0) — never a second one, never none.
 - The navigation step handler's parameter arity (2-part vs. 3-part path)
   matches what the feature's Background actually uses. A mismatch (e.g.
   feature uses a 3-part path but the script only implements a 2-string
@@ -155,31 +276,30 @@ Check:
 
 ## 6. Test Data Cleanup Validation
 
-Applies only when the feature's Examples tables contain code/identifier
-values used to create records (see ScriptGenerateAgent's #TEST DATA
-CLEANUP convention). When applicable, check:
+Applies only when the feature itself contains a cleanup step (see
+ScriptGenerateAgent's #TEST DATA CLEANUP convention). A feature with no
+cleanup step needs no cleanup helper — do not flag its absence. When a cleanup
+step exists, check:
 - A cleanup helper exists and is actually invoked at the start of
   execution (Background or first scenario), not merely defined and never
   called.
 - The codes it checks/removes are drawn from the actual codes present in
   this feature's Examples tables — not a stale/unrelated code list copied
   from an unrelated screen or example.
-- Missing cleanup entirely, when the feature clearly creates identifiable
-  records via a code/identifier field, is a MAJOR finding — flag it, but
-  it's not on its own a reason to block a push the way a CRITICAL finding
-  is (see SEVERITY below), since it's a data-hygiene risk for reruns
-  rather than a guaranteed failure of this run.
-- Do not flag its absence on a read-only/report screen or a screen with
-  no code/identifier-style field — cleanup does not apply there.
+- A cleanup step in the feature with no matching definition is CRITICAL (covered by section 0c).
 
 
 ## 7. Scenario Depth & Duplication Check
 
-Check:
+Check (an Examples ROW is the unit of coverage, not a scenario title):
 - No two scenarios/Examples rows in the feature test the exact same
   field/action/condition combination in the same way (per TestCaseAgent's
   no-duplicate rule) — flag any pair that does as a MINOR finding
   (wasted run time, not a correctness bug).
+- Save coverage: for a screen with a Save action, look for rows covering a basic
+  save, a full save, each mandatory field empty, boundary values, invalid
+  formats, picklist combinations and CRUD, to the extent the fields visible in
+  the feature support them. Missing groups are a MINOR finding each.
 - Where the feature file's overall scenario count looks unusually low
   given the screen's apparent complexity (many fields/loops/dialogs in
   play but very few scenarios), note this as a MINOR finding for
@@ -193,7 +313,7 @@ Classify every finding as one of:
 - "critical": the scenario/feature will fail to run, or will silently
   validate the wrong thing (fabricated/mismatched locator, missing step
   implementation, duplicate step pattern, wrong navigation arity,
-  `.select()` on a non-native dropdown).
+  `.select()` on a non-native dropdown, a missing or altered QC template).
 - "major": the script will likely run but is meaningfully wrong or risky
   (weak assertion, disallowed pattern like `Cypress.Commands.add`, a
   primary-strategy `cy.wait(<ms>)`, missing required cleanup).
@@ -218,7 +338,7 @@ trailing commas.
   "findings": [
     {
       "severity": "critical" | "major" | "minor",
-      "area": "coverage" | "script_correctness" | "assertions" | "selectors" | "login_navigation" | "cleanup" | "scenario_depth",
+      "area": "templates" | "coverage" | "script_correctness" | "assertions" | "selectors" | "login_navigation" | "cleanup" | "scenario_depth" | "outline_format",
       "scenario_or_step": "the scenario name or step text this finding relates to, or 'file-level' if not scenario-specific",
       "description": "specific, concrete description of the problem — not vague",
       "recommendation": "specific, concrete fix"

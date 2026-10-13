@@ -26,7 +26,10 @@ class ValidateAgent:
     async def validate(self, test_cases: str, generated_script: str):
 
         message = f"""
-Validate this test case and generated script.
+Validate this test case and generated script. Start with section 0 of your
+instructions (QC template block present and unaltered, no duplicate step
+definitions, every feature step has a definition, Scenario Outline / Examples
+format).
 
 Test Cases:
 {test_cases}
@@ -38,7 +41,12 @@ Return JSON only.
 """
 
         response = await self.agent.run(message)
-        try: 
-            return json.loads(response.text)
+        text = response.text.strip()
+        if text.startswith("```"):  # tolerate a stray Markdown fence around the JSON
+            text = text.strip("`").strip()
+            if text.lower().startswith("json"):
+                text = text[4:].strip()
+        try:
+            return json.loads(text)
         except json.JSONDecodeError:
             return {"error": "Failed to decode JSON"}

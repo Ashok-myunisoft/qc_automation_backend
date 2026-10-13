@@ -77,7 +77,7 @@ def _query(sql: str, params: tuple = ()) -> list[dict]:
 
 def _table_exists(table_name: str) -> bool:
     rows = _query(
-        "SELECT 1 FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME = %s",
+        "SELECT 1 AS found FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME = %s",  # mmfix: unnamed column broke as_dict=True
         (table_name,),
     )
     return len(rows) > 0
@@ -85,7 +85,7 @@ def _table_exists(table_name: str) -> bool:
 
 def _column_exists(table_name: str, column_name: str) -> bool:
     rows = _query(
-        "SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = %s AND COLUMN_NAME = %s",
+        "SELECT 1 AS found FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = %s AND COLUMN_NAME = %s",
         (table_name, column_name),
     )
     return len(rows) > 0

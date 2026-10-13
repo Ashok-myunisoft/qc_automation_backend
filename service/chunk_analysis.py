@@ -532,6 +532,7 @@ def strip_to_rule_block(raw_text: str, section_label: str) -> str:
     duplicated into the final merged file. If no Rule: line is found at
     all (model dropped the label), wrap the whole response under one,
     labeled with the real section_label so tab-grouping still holds."""
+    raw_text = strip_code_fences(raw_text)
     lines = raw_text.splitlines()
     rule_idx = next(
         (i for i, line in enumerate(lines) if line.strip().startswith("Rule:")),
@@ -553,7 +554,288 @@ def merge_test_case_chunks(shared_text: str, rule_texts: list[str]) -> str:
     file — the same 'chunk narrowly, merge back into one shape' pattern
     as merge_project_analyses() above, so everything downstream
     (ScriptGenerateAgent) sees one ordinary feature file and has no idea
-    chunking happened."""
-    parts = [shared_text.strip()]
-    parts.extend(t.strip() for t in rule_texts if t.strip())
-    return "\n\n".join(p for p in parts if p) + "\n"
+    chunking happened.
+
+    Every scenario is a Scenario Outline with an Examples table, so after
+    concatenating this also (1) merges Scenario Outlines that carry the same
+    title and the same Examples columns inside the same scope (their rows are
+    combined into ONE table, duplicate rows dropped) and (2) re-aligns every
+    Examples table so the '|' characters line up."""
+    parts = [strip_code_fences(shared_text).strip()]
+    parts.extend(strip_code_fences(t).strip() for t in rule_texts if t.strip())
+    merged = "\n\n".join(p for p in parts if p) + "\n"
+    return normalize_examples_tables(merge_duplicate_outlines(merged))
+
+
+# ---------------------------------------------------------------------------
+# Scenario Outline / Examples helpers
+#
+# Every generated scenario is a "Scenario Outline:" with an "Examples:" table
+# (Condition column, one column per field, ExpectedResult column). The helpers
+# below keep counting, splitting and merging correct for that shape.
+# ---------------------------------------------------------------------------
+
+import os
+import re
+
+_FENCE_LINE_RE = re.compile(r"^\s*```[A-Za-z]*\s*$")
+_BLOCK_START_RE = re.compile(r"^\s*(Scenario Outline:|Scenario Template:|Scenario:|Example:|Rule:|Background:|Feature:|@)")
+_OUTLINE_START_RE = re.compile(r"^\s*(Scenario Outline|Scenario Template):\s*(.*)$")
+_EXAMPLES_RE = re.compile(r"^\s*(Examples|Scenarios):\s*$")
+_ROW_RE = re.compile(r"^\s*\|")
+_CELL_SPLIT_RE = re.compile(r"(?<!\\)\|")
+
+
+def strip_code_fences(text: str) -> str:
+    """Drops Markdown fence lines (```gherkin ... ```) a model sometimes adds."""
+    return "\n".join(l for l in (text or "").splitlines() if not _FENCE_LINE_RE.match(l))
+
+
+def strip_to_scenarios(raw_text: str) -> str:
+    """Keeps everything from the first Scenario / Scenario Outline / Rule line
+    onward. Used for focus passes that must NOT repeat the Feature:/Background:
+    header (the first pass already supplied it)."""
+    lines = strip_code_fences(raw_text).splitlines()
+    for i, line in enumerate(lines):
+        if re.match(r"^\s*(Scenario Outline:|Scenario Template:|Scenario:|Rule:|@)", line):
+            return "\n".join(lines[i:]).strip()
+    return ""
+
+
+def _cells(line: str) -> list[str]:
+    body = line.strip()
+    if body.startswith("|"):
+        body = body[1:]
+    if body.endswith("|") and not body.endswith("\\|"):
+        body = body[:-1]
+    return [c.strip() for c in _CELL_SPLIT_RE.split(body)]
+
+
+def _format_table(rows: list[list[str]], indent: str) -> list[str]:
+    width = max(len(r) for r in rows)
+    rows = [r + [""] * (width - len(r)) for r in rows]
+    widths = [max(len(r[i]) for r in rows) for i in range(width)]
+    return [indent + "| " + " | ".join(r[i].ljust(widths[i]) for i in range(width)) + " |" for r in rows]
+
+
+def normalize_examples_tables(text: str) -> str:
+    """Re-pads every Examples table so its '|' characters line up."""
+    lines = text.splitlines()
+    out: list[str] = []
+    i = 0
+    while i < len(lines):
+        out.append(lines[i])
+        if _EXAMPLES_RE.match(lines[i]):
+            j = i + 1
+            while j < len(lines) and not lines[j].strip():
+                out.append(lines[j])
+                j += 1
+            k = j
+            while k < len(lines) and _ROW_RE.match(lines[k]):
+                k += 1
+            if k > j:
+                indent = re.match(r"\s*", lines[j]).group(0)
+                out.extend(_format_table([_cells(l) for l in lines[j:k]], indent))
+            i = k
+            continue
+        i += 1
+    return "\n".join(out) + ("\n" if text.endswith("\n") else "")
+
+
+def count_scenarios(text: str) -> dict:
+    """{'outlines': n, 'plain_scenarios': n, 'example_rows': n} — example_rows
+    counts data rows only (header rows excluded)."""
+    outlines = plain = rows = 0
+    lines = text.splitlines()
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        if _OUTLINE_START_RE.match(line):
+            outlines += 1
+        elif re.match(r"^\s*(Scenario|Example):", line):
+            plain += 1
+        if _EXAMPLES_RE.match(line):
+            j = i + 1
+            while j < len(lines) and not lines[j].strip():
+                j += 1
+            k = j
+            while k < len(lines) and _ROW_RE.match(lines[k]):
+                k += 1
+            rows += max(0, k - j - 1)
+            i = k
+            continue
+        i += 1
+    return {"outlines": outlines, "plain_scenarios": plain, "example_rows": rows}
+
+
+def merge_duplicate_outlines(text: str) -> str:
+    """Merges Scenario Outlines that share the same Rule scope, the same title and
+    the same Examples header into ONE outline whose table holds the rows of both
+    (rows already present are not repeated). Outlines that differ in title or
+    columns are left alone, as are outlines with more than one Examples block."""
+    lines = text.splitlines()
+    n = len(lines)
+
+    # 1. cut into blocks: ("text", lines) or ("outline", info)
+    blocks: list[dict] = []
+    rule = ""
+    i = 0
+    buf: list[str] = []
+    while i < n:
+        line = lines[i]
+        m = _OUTLINE_START_RE.match(line)
+        if line.strip().startswith("Rule:"):
+            rule = line.strip()
+        if not m:
+            buf.append(line)
+            i += 1
+            continue
+        # pull trailing tag lines (@tag) that belong to this outline out of buf
+        tags: list[str] = []
+        while buf and buf[-1].strip().startswith("@"):
+            tags.insert(0, buf.pop())
+        if buf:
+            blocks.append({"kind": "text", "lines": buf})
+            buf = []
+        j = i + 1
+        while j < n and not _BLOCK_START_RE.match(lines[j]):
+            j += 1
+        blocks.append({"kind": "outline", "rule": rule, "title": m.group(2).strip(),
+                       "lines": tags + lines[i:j]})
+        i = j
+    if buf:
+        blocks.append({"kind": "text", "lines": buf})
+
+    # 2. locate each outline's single Examples table
+    for b in blocks:
+        if b["kind"] != "outline":
+            continue
+        ex = [k for k, l in enumerate(b["lines"]) if _EXAMPLES_RE.match(l)]
+        b["table"] = None
+        if len(ex) != 1:
+            continue
+        start = ex[0] + 1
+        while start < len(b["lines"]) and not b["lines"][start].strip():
+            start += 1
+        end = start
+        while end < len(b["lines"]) and _ROW_RE.match(b["lines"][end]):
+            end += 1
+        if end - start >= 1:
+            b["table"] = (start, end)
+
+    # 3. merge duplicates into the first occurrence
+    first: dict[tuple, dict] = {}
+    for b in blocks:
+        if b["kind"] != "outline" or not b.get("table"):
+            continue
+        s0, e0 = b["table"]
+        header = tuple(c.lower() for c in _cells(b["lines"][s0]))
+        key = (b["rule"], re.sub(r"\s+", " ", b["title"]).lower(), header)
+        if key not in first:
+            b["rows"] = [_cells(l) for l in b["lines"][s0 + 1:e0]]
+            b["header"] = _cells(b["lines"][s0])
+            first[key] = b
+            continue
+        keeper = first[key]
+        seen = {tuple(r) for r in keeper["rows"]}
+        for l in b["lines"][s0 + 1:e0]:
+            row = _cells(l)
+            if tuple(row) not in seen:
+                keeper["rows"].append(row)
+                seen.add(tuple(row))
+        b["drop"] = True
+
+    # 4. rebuild
+    out: list[str] = []
+    for b in blocks:
+        if b["kind"] == "text":
+            out.extend(b["lines"])
+            continue
+        if b.get("drop"):
+            continue
+        if b.get("rows") is not None and b is first.get(
+            (b["rule"], re.sub(r"\s+", " ", b["title"]).lower(), tuple(c.lower() for c in b["header"]))
+        ):
+            s0, e0 = b["table"]
+            indent = re.match(r"\s*", b["lines"][s0]).group(0)
+            out.extend(b["lines"][:s0])
+            out.extend(_format_table([b["header"]] + b["rows"], indent))
+            out.extend(b["lines"][e0:])
+        else:
+            out.extend(b["lines"])
+    return "\n".join(out) + ("\n" if text.endswith("\n") else "")
+
+
+# ---------------------------------------------------------------------------
+# Focus passes for a DIRECT (non-tabbed) screen whose scenarios would not fit
+# in one model response. Each pass generates one theme from the same Project
+# Analysis; merge_test_case_chunks() then joins them into one feature file.
+# ---------------------------------------------------------------------------
+
+DIRECT_SPLIT_FIELD_THRESHOLD = int(os.getenv("TESTCASE_SPLIT_FIELD_THRESHOLD", "10"))
+
+_FOCUS_PASSES = [
+    (
+        "Save core",
+        "basic save with only the required fields, a full save with every mandatory and optional field "
+        "filled, each mandatory field left empty one at a time (plus one row with all mandatory fields "
+        "empty) with the real validation message, and duplicate-record checks where a uniqueness rule is "
+        "reported.",
+    ),
+    (
+        "Field variations",
+        "numeric boundaries (min, max, zero, negative, over-limit, decimals), text boundaries (max length, "
+        "over-length, spaces), special characters and invalid formats, and different picklist choices and "
+        "meaningful picklist combinations. Only for fields that the Project Analysis reports validations "
+        "or picklist values for.",
+    ),
+    (
+        "Line items, CRUD and behavior",
+        "multiple line items (grid/loop rows), CRUD (add new, edit, update, delete) where those buttons "
+        "exist, business actions, dialogs, conditional business logic and the remaining functional "
+        "behavior, plus a navigation/smoke scenario.",
+    ),
+]
+
+
+def _count_fields(project_analysis: dict) -> int:
+    modules = project_analysis.get("modules") or []
+    if not modules:
+        return 0
+    pages = modules[0].get("pages") or []
+    if not pages:
+        return 0
+    page = pages[0]
+    total = sum(len(f.get("fields") or []) for f in page.get("forms") or [])
+    total += sum(len(l.get("fields") or []) for l in page.get("loops") or [])
+    return total
+
+
+def should_split_direct_test_cases(project_analysis: dict) -> bool:
+    """True for a DIRECT screen with enough fields that one response cannot hold
+    full Save/form coverage (set TESTCASE_SPLIT_FIELD_THRESHOLD in .env to tune)."""
+    return _count_fields(project_analysis) >= DIRECT_SPLIT_FIELD_THRESHOLD
+
+
+def focus_pass_labels() -> list[str]:
+    return [label for label, _ in _FOCUS_PASSES]
+
+
+def build_focus_test_case_request(base_user_request: str, pass_index: int) -> str:
+    """Scoping text for focus pass `pass_index` (0-based); travels via user_request."""
+    label, themes = _FOCUS_PASSES[pass_index]
+    total = len(_FOCUS_PASSES)
+    header_rule = (
+        "Output the full 'Feature:' header, the 'Background:' (navigation step), and then the scenarios for "
+        "this theme."
+        if pass_index == 0 else
+        "Do NOT output 'Feature:' or 'Background:' — they come from the first pass. Start directly with the "
+        "first 'Scenario Outline:' line."
+    )
+    return (
+        f"{base_user_request}\n\n"
+        f"CHUNKED FEATURE-FILE NOTICE (pass {pass_index + 1} of {total}: {label}): this call covers ONLY "
+        f"these themes: {themes} Other themes are generated in other passes and merged afterwards, so do "
+        f"not repeat them. {header_rule} Every scenario is a Scenario Outline with an aligned Examples "
+        f"table (at most 25 rows per table); use a distinctive Scenario Outline title per theme."
+    )

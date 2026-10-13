@@ -86,6 +86,7 @@ class Job:
         self.queued_phase = queued_phase
         self.socket = JobSocket(ws, self)
         self.task: asyncio.Task | None = None
+        self.db_task: asyncio.Task | None = None   # background create_job, never awaited before the run
 
         self.status = "queued"
         self.stage = ""
@@ -174,6 +175,11 @@ class Job:
 
     async def _finalize(self, outcome: str) -> None:
         """outcome: 'done' | 'error' | 'cancelled'"""
+        if self.db_task is not None and not self.db_task.done():
+            try:
+                await asyncio.wait_for(asyncio.shield(self.db_task), timeout=12)
+            except Exception:
+                pass
         if self.db_id is None:
             return
         try:
@@ -191,16 +197,27 @@ class Job:
             logger.warning("[job %s] could not finalize job row", self.key, exc_info=True)
 
 
+async def _create_row(job: Job) -> None:
+    """Background: write the job row. A slow or unreachable DB only means the
+    run has no row; it never delays or breaks the run itself."""
+    try:
+        job.db_id = await asyncio.to_thread(
+            job_store.create_job, job.source, job.module, job.screen, "queued"
+        )
+        job.dirty = True
+    except Exception:
+        logger.warning("[job %s] could not create job row - running without one", job.key, exc_info=True)
+
+
 async def _execute(job: Job, runner) -> None:
     heartbeat = None
     outcome = "error"
     try:
-        try:
-            job.db_id = await asyncio.to_thread(
-                job_store.create_job, job.source, job.module, job.screen, "queued"
-            )
-        except Exception:
-            logger.warning("[job %s] could not create job row - running without one", job.key, exc_info=True)
+        # FIRST thing the browser hears, before any slow work (DB, GitLab, Cypress).
+        await job.socket.send_json({"type": "status", "phase": job.queued_phase})
+        await job.socket.send_json({"type": "log", "text": "run request received - starting...", "tone": "secondary"})
+
+        job.db_task = asyncio.create_task(_create_row(job))
         heartbeat = asyncio.create_task(job._heartbeat())
 
         gate = _gate()

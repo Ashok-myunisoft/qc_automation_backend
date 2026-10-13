@@ -29,9 +29,10 @@ class TestCaseAgent:
         user_request: str,
         business_context: dict = None,
     ):
-        """No existing-step-vocabulary input anymore — every generated screen
-        is self-contained (see ScriptGenerateAgent), so there's nothing to
-        phrase steps to match. Gherkin wording is free to read naturally."""
+        """Every scenario is a Scenario Outline with an aligned Examples table, and
+        steps use the QC team's fixed vocabulary (see test_case_prompt.txt,
+        #FIXED STEP VOCABULARY) so they match the template step definitions
+        that ScriptGenerateAgent copies into every script."""
         user_message = f"""
 User Request:
 {user_request}
@@ -41,6 +42,11 @@ Project Analysis:
 
 Business Context:
 {json.dumps(business_context, indent=2) if business_context else "No business context provided."}
+
+Reminder: every scenario must be a "Scenario Outline" with an aligned Examples table
+(Condition column, one column per field, ExpectedResult column, at most 25 rows per table),
+use the fixed step vocabulary, and cover the Save/form coverage matrix using only fields
+present in the Project Analysis.
 """
 
         response = await self.agent.run(user_message)

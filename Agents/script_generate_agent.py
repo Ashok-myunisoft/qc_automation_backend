@@ -125,8 +125,15 @@ class ScriptGenerateAgent:
         resolved_controls = _build_resolved_control_lookup(automation_contract)
         resolved_controls_block = json.dumps(resolved_controls, indent=2) if resolved_controls else "none supplied"
         user_message = f"""
+FIRST: your file must begin with the QC team's header and template block from
+your instructions (#QC TEAM TEMPLATES), copied verbatim — the picklist, input,
+confirmation-message and Delete steps, `beforeEach` and `loginSession`. Those
+steps are already implemented by it; do not write them again. Then write only
+the screen-specific steps this feature needs beyond them (navigation, button
+clicks such as "I click the save button", and so on).
+
 Feature file to implement (every Given/When/Then below needs a step
-definition in your output — this file is the screen's ONLY step file,
+definition in the file — this file is the screen's ONLY step file,
 nothing else backs it):
 
 {test_cases}
@@ -165,17 +172,20 @@ Repair the JavaScript below. Return only complete raw JavaScript.
 CRITICAL REPAIR RULES — read before changing anything:
 1. Fix ONLY the listed violations below. Do not rewrite, remove, or restructure
    any part of the script that is not directly causing a listed violation.
-2. The resolvedControls object must be preserved EXACTLY as it appears in the
-   invalid script — same keys, same dataCy values, same interactionType values.
-   Do not add, remove, or rename any entry in resolvedControls.
+2. The QC team template block at the top of the script (the import, the creds
+   line, the picklist / input / confirmation-message / Delete steps,
+   `beforeEach` and `loginSession`) must stay EXACTLY as it is, character for
+   character, and must appear only once. If any part of it is missing or was
+   changed, restore it verbatim from your instructions. If a resolvedControls
+   object exists in the script, keep it exactly as it is too.
 3. All existing step definitions (Given/When/Then) must be preserved. Only
    modify a step definition if it is directly named in the violations list.
-4. Do not derive any selector from a step parameter — always use resolvedControls[field].dataCy.
+4. Never write a second definition for a step the template already implements.
 
 Violations to fix:
 {json.dumps(violations)}
 
-Resolved field-control lookup (resolvedControls must match this exactly):
+Resolved field-control lookup (only for screen-specific steps, not for the template steps):
 {resolved_controls_block}
 
 Feature file (authoritative — every step must have a handler):
@@ -192,4 +202,5 @@ Invalid script to repair:
         if remaining:
             logger.error("ScriptGenerateAgent repair output still fails gate: %s", remaining)
             raise ValueError("ScriptGenerateAgent output failed deterministic gate after repair: " + "; ".join(remaining))
+        return repaired
         return repaired

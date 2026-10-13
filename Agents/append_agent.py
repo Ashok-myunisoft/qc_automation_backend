@@ -32,8 +32,11 @@ Current Cypress Script:
 {script}
 
 Addition requested (this may be a full Gherkin scenario the user already
-wrote themselves, ready to insert near-verbatim, or a short plain-language
-description of new scenario(s) to add):
+wrote themselves, ready to insert near-verbatim, a short plain-language
+description of new scenario(s) or Examples rows to add, or a request to change
+one existing value). The feature uses Scenario Outline + Examples tables and the
+script already holds the QC template block, so follow your #FEATURE FORMAT AND
+TEMPLATE RULES:
 {addition}
 """
         response = await self.agent.run(message)

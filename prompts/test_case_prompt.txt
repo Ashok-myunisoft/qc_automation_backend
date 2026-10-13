@@ -36,24 +36,66 @@ Customer/Vendor/Item/Employee/Warehouse Codes, GL Accounts, Cost Centers, Paymen
 Generate production-quality Gherkin Feature Files suitable for direct automation.
 Generate one Feature per application page/module.
 
-Every step you write will need its OWN new step definition (see
-ScriptGenerateAgent) — there is no shared step library this feature can
-lean on. Keep steps precise and consistently phrased across scenarios in
-this same feature (e.g. always "I enter {string} in the {string} field",
-never mixing that with "I fill in the {string} field with {string}" for
-the same action) so the generated script doesn't end up with near-duplicate
-step definitions for the same real action.
+Every scenario you write is run by a step-definition file. The QC team's
+step definitions are fixed (see #FIXED STEP VOCABULARY below) and are copied
+into that file word-for-word, so your step wording must match them exactly.
+Keep the phrasing identical across every scenario in the feature — never mix
+two wordings for the same real action.
 
 Match the action wording to the field type shown in Project Analysis:
 
-- dropdowns, picklists, comboboxes, and select-style fields use wording
-  like "select" or "choose"
-- free-text inputs, textareas, and fields whose placeholders indicate
-  entry use wording like "enter" or "type"
+- dropdowns, picklists, comboboxes, lookups and select-style fields use the
+  "select ... picklist field" step
+- free-text inputs, numbers, dates, textareas and fields whose placeholders
+  indicate entry use the "enter ... input field" step
 - do not describe dropdown-style fields as if the user types into them
 - do not describe free-text fields as if the user selects from them
 - if the field classification is ambiguous, follow the component kind
   from Project Analysis rather than guessing from the label alone
+
+
+#FIXED STEP VOCABULARY (QC TEAM TEMPLATES — CRITICAL, NEVER REPHRASE)
+
+These four steps already have definitions owned by the QC team. Use exactly
+these sentences, with the quotes and the placeholders as shown:
+
+  I select "<Value>" in the "<FieldName>" picklist field
+  I enter "<Value>" in the "<FieldName>" input field
+  I should see a confirmation message "<ExpectedResult>"
+  I click the Delete button
+
+<FieldName> is the field's REAL data-cy name from Project Analysis, with the
+control suffix removed. The definitions add the suffix themselves:
+  picklist field  -> "<FieldName>-PickListDrop"
+  input field     -> "<FieldName>-Input"
+So a field whose data_cy / automation_locator.value is
+"BizTransactionTypeName-PickListDrop" is written as "BizTransactionTypeName",
+and "MMDetailTransactionQuantity0-Input" is written as
+"MMDetailTransactionQuantity0". Use the exact data-cy text (grid rows keep
+their index digit, e.g. "ItemCode0"). Never use the display label ("Qty",
+"Item Code") as the field name, and never invent a name that is not in
+Project Analysis. If a field has no verified data-cy, do not write steps for it.
+
+Both success messages and validation messages are checked with the single step
+"I should see a confirmation message "<ExpectedResult>"" — put the exact
+message text in the ExpectedResult column. Do not write a separate "validation
+message" step.
+
+Other steps are screen-specific. Use ONLY these wordings, always spelled the
+same way, so one definition can serve every scenario:
+
+  I navigate through the following path "<Module>" -> "<Screen>"
+  I navigate through the following path "<Module>" -> "<Menu>" -> "<Screen>"
+  I click the Add New button
+  I click the save button
+  I click the Update button
+  I click the Edit button
+
+Picklist caution: the picklist step has no empty-value guard — an empty value
+would select the first row of the list. NEVER leave a picklist cell empty in an
+Examples table. To test "mandatory picklist left empty", write a separate
+Scenario Outline whose steps simply do not include the select step for that
+field. (The input step does skip empty values, so an empty input cell is fine.)
 
 
 #SCREEN STRUCTURE — TABBED VS. DIRECT (CRITICAL — READ FIRST)
@@ -110,6 +152,47 @@ Cover all applicable operations:
 Navigation, Smoke, Functional, Regression, Positive/Negative, CRUD, Required/Optional Field Validation,
 Boundary Value, UI, Business Rule, Lookup, Dropdown, Checkbox, Table/Grid, Workflow,
 Authentication, Authorization, Role-Based Access, Error Handling, API Integration.
+
+
+#SAVE AND FORM COVERAGE MATRIX (CRITICAL — COVERAGE MUST BE HIGH)
+
+For every screen, and above all for the Save action, do not stop at one
+"happy path". Write varied Examples rows covering every item below that the
+Project Analysis supports. Base every variation ONLY on fields, validations,
+picklists, buttons and messages that exist in the Project Analysis (including
+its ui_validations, business_validations and conditional_business_logic) and in
+the backend source it summarises. Never invent a field, limit or message.
+
+  1. Basic Save — happy path with only the required fields filled.
+  2. Full Save — every mandatory AND optional field filled.
+  3. Mandatory-field-empty — one row per mandatory field, left empty one at a
+     time with all other fields valid, ExpectedResult = that field's real
+     validation message (see the picklist caution above for picklists). Also
+     one row with ALL mandatory fields empty.
+  4. Numeric boundaries — for each numeric field that has limits or a numeric
+     validation: minimum, maximum, zero, negative, just over the limit, and
+     decimals (only the ones that make sense for that field).
+  5. Text boundaries and formats — maximum length, over-length, leading/
+     trailing spaces, special characters, and invalid formats for fields that
+     have a regex / email / date / format validation.
+  6. Picklist choices — different valid picklist values, and meaningful
+     combinations of dependent picklists (e.g. a type that changes which other
+     fields are required).
+  7. Multiple line items — if the screen has a grid/loop, rows with 1 line item
+     and with several line items (use the indexed data-cy names, e.g. ItemCode0,
+     ItemCode1).
+  8. Duplicates — if the source suggests a uniqueness rule (a code, number or
+     name that must be unique), a row that re-saves an already saved value.
+  9. CRUD — where Add New / Edit / Update / Delete exist: save, then reopen and
+     update, then delete (Delete uses "I click the Delete button").
+
+Where the Project Analysis gives no real test data, use clear placeholder
+values and say so in that row's Condition, e.g. ... "Basic Save [placeholder data]".
+
+ROW CAP: one Examples table holds at most 25 rows. If a theme needs more,
+split it into a second Scenario Outline for the next theme (e.g. "Numeric
+boundaries" and "Text boundaries") instead of growing one table. Keep every
+row distinct — no two rows may test the same thing in the same way.
 
 #SCENARIO DEPTH (CRITICAL — NO FIXED SCENARIO COUNT)
 
@@ -204,10 +287,10 @@ described in Project Analysis.
 Always use: Feature, Background, Scenario, Scenario Outline, Examples.
 Use Rule only for Case B (tabbed) screens as described above — never for
 Case A (direct) screens.
-- Use Scenario Outline for multiple data combinations
+- EVERY scenario is a Scenario Outline with an Examples table (see #SCENARIO OUTLINE FORMAT) — never a plain "Scenario:"
 - Group related scenarios together (by Rule block for tabbed screens, or
   by logical topic for direct screens)
-- Generate reusable Examples tables
+- Generate reusable, aligned Examples tables
 - If Create, Update, Delete, View, or Validate operations are supported, generate scenarios for each supported operation.
 - Both positive and negative scenarios
 - Validation scenarios for every validation in Project Analysis
@@ -265,35 +348,24 @@ operation uses a different trigger:
   scenario that clicks Delete without first selecting a record.
 
 For every CREATE scenario, the step sequence must be:
-  1. I click the Add New button (or equivalent)
-  2. I enter/select field values
-  3. I click the Save button
-  4. Then I should see the confirmation message "<success message>"
+  1. I click the Add New button (or skip it only if the screen is already in create mode per Project Analysis)
+  2. I select / I enter field values (fixed vocabulary above)
+  3. I click the save button
+  4. Then I should see a confirmation message "<ExpectedResult>"
 
 For every READ/UPDATE scenario, the step sequence must be:
-  1. I select/search for "<existing record>" in the "<primary key>" field
-  2. I verify/modify field values
-  3. I click Save (for Update only)
-  4. Then I should see the confirmation message "<success message>"
+  1. I select "<existing record>" in the "<primary key data-cy name>" picklist field
+     (or I enter ... input field, if the primary key is a plain input)
+  2. I select / I enter the field values being modified
+  3. I click the Update button (or I click the save button when the screen saves updates that way)
+  4. Then I should see a confirmation message "<ExpectedResult>"
 
 For every DELETE scenario, the step sequence must be:
-  1. I select/search for "<existing record>" in the "<primary key>" field
+  1. I select "<existing record>" in the "<primary key data-cy name>" picklist field
   2. I click the Delete button
-  3. Then I should see the confirmation message "<confirmation message>"
-  4. When I click Confirm/Cancel
-  5. Then I should see the confirmation message "<result>"
-
-EXAMPLES TABLE LABELING (preferred, not forced): when a Scenario Outline
-has an Examples table, add a labeled first column (e.g. "Condition")
-giving each row a short, plain-language description of what that row
-specifically tests — so the feature file is self-explanatory by reading
-down that column alone, without needing to interpret the data values.
-
-Use this whenever a table has more than one row, since that's exactly
-when rows need distinguishing. It's fine to omit the label column only
-when a table is trivially self-describing on its own (e.g. a single-row
-Examples table for one straightforward Create scenario) — don't force a
-label column onto something that doesn't need one just to satisfy a rule.
+  3. Then I should see a confirmation message "<ExpectedResult>"
+  (the Delete step itself already confirms the delete dialog — do not add a
+  separate Confirm/Cancel step)
 
 - NAVIGATION STEP ARITY — determined by the Project Analysis, not fixed:
   Check what the Project Analysis actually shows for this screen's location
@@ -320,6 +392,42 @@ label column onto something that doesn't need one just to satisfy a rule.
   arity your Background step uses — a feature that mixes both shapes, or
   uses the wrong one for what the Project Analysis actually shows, will
   fail at that step.
+
+
+#SCENARIO OUTLINE FORMAT (MANDATORY — EVERY SCENARIO)
+
+Every scenario is written as a data-driven "Scenario Outline:" (Cucumber only
+allows an Examples table under "Scenario Outline:", never under "Scenario:").
+
+- Title: "Scenario Outline: <Screen> <operation> "<Condition>"" — the
+  "<Condition>" placeholder in the title is filled from the Condition column.
+- Every value in a step is a "<Placeholder>" in double quotes. The placeholder
+  text equals the Examples column header exactly.
+- Examples columns, in this order:
+    1. Condition  — a short plain-language description of what THIS row tests,
+       e.g.  Purchase Requisition "Basic Save", "Mandatory field missing",
+       "Quantity zero", "Quantity maximum boundary"
+    2. one column per field used in the steps, in step order
+       (header = the placeholder name; a "Reference_No"-style column only when
+       the screen really has a reference/document number field)
+    3. ExpectedResult — the exact message the step "I should see a confirmation
+       message" checks
+- ALIGN the table: pad every cell with spaces so all "|" characters line up
+  vertically, header row and data rows alike.
+- Do not use "#" comment lines inside a scenario.
+
+Reference shape (illustrative — field names, picklist values and messages must
+come from the real Project Analysis, never from this example):
+
+  Scenario Outline: Purchase Enquiry CRUD operations "<Condition>"
+      Then I select "<BizType>" in the "BizTransactionTypeName" picklist field
+      Then I select "<Item Code>" in the "ItemCode0" picklist field
+      And I enter "<Qty>" in the "MMDetailTransactionQuantity0" input field
+      And I click the save button
+      Then I should see a confirmation message "<ExpectedResult>"
+      Examples:
+          | Condition                         | BizType                | Item Code | Qty | ExpectedResult                                |
+          | Purchase Requisition "Basic Save" | Purchase Requisition M | R000662   | 57  | Detail Saved Successfully With DocumentNumber |
 
 
 #TEST DATA RULES
@@ -363,28 +471,25 @@ does not belong in your output at all.
 Feature:
 Background:
 Rule:            (only present for a Case B / tabbed screen — one per screen_sections entry, omitted entirely for Case A)
-Scenario / Scenario Outline
+Scenario Outline
 Examples
 
 
 #EXAMPLE
 
 The examples below are illustrative of SHAPE ONLY — how a 2-level vs. a
-3-level navigation path is phrased, how an Examples table's Condition
-column labels each row, and how Rule blocks are used for a tabbed screen
-versus omitted for a direct one. They are not specific to any one screen
-and do not mean any particular screen should use one shape over another,
-or should stop at only a couple of scenarios — a real feature file should
-carry the full depth described in #SCENARIO DEPTH above, exhausting
-whatever the actual Project Analysis supports; these examples are
-trimmed short purely to show the pattern clearly. For the actual screen
-you are generating a feature for, always look at THAT screen's own
-Project Analysis — both for navigation arity and for whether
-screen_sections means this is a Case A or Case B screen.
+3-level navigation path is phrased, how every scenario is a Scenario Outline
+whose Examples table has Condition / field columns / ExpectedResult, how the
+columns are aligned, and how Rule blocks are used for a tabbed screen versus
+omitted for a direct one. Field names ("DomainCode", "ItemCode"...) are
+data-cy names for illustration only; always use the real data-cy names of THE
+screen you are given. A real feature file carries the full depth described in
+#SAVE AND FORM COVERAGE MATRIX and #SCENARIO DEPTH; these are trimmed short
+only to show the pattern.
 
 
-#EXAMPLE — Case A: direct screen, 2-level navigation (Module -> Screen,
-no intermediate menu shown, no screen_sections, so no Rule blocks)
+#EXAMPLE — Case A: direct screen, 2-level navigation (no screen_sections,
+so no Rule blocks)
 
 
 Feature: Skill Domain Management
@@ -395,32 +500,32 @@ Feature: Skill Domain Management
   Background:
     And I navigate through the following path "Skill Management" -> "Skill Domain"
 
-  Scenario Outline: Validate required fields
-    When I enter "<DomainCode>" in the "DomainCode" field
-    And I enter "<DomainName>" in the "DomainName" field
-    And I click the Save button
-    Then I should see the validation message "<ValidationMessage>"
+  Scenario Outline: Validate Skill Domain required fields - "<Condition>"
+    When I enter "<DomainCode>" in the "DomainCode" input field
+    And I enter "<DomainName>" in the "DomainName" input field
+    And I click the save button
+    Then I should see a confirmation message "<ExpectedResult>"
 
     Examples:
-      | Condition      | DomainCode | DomainName | ValidationMessage |
-      | Missing code   |            |            | Code Required     |
-      | Missing name   | SD001      |            | Name Required     |
+      | Condition          | DomainCode | DomainName | ExpectedResult                                        |
+      | All required empty |            |            | Code* Should not be Empty , Name* Should not be Empty |
+      | Missing DomainCode |            | Technology | Code* Should not be Empty                             |
+      | Missing DomainName | SD001      |            | Name* Should not be Empty                             |
 
-  Scenario Outline: Create Skill Domain
-    When I enter "<DomainCode>" in the "DomainCode" field
-    And I enter "<DomainName>" in the "DomainName" field
-    And I click the Save button
-    Then I should see the confirmation message "<Message>"
+  Scenario Outline: Create Skill Domain - "<Condition>"
+    When I enter "<DomainCode>" in the "DomainCode" input field
+    And I enter "<DomainName>" in the "DomainName" input field
+    And I click the save button
+    Then I should see a confirmation message "<ExpectedResult>"
 
     Examples:
-      | Condition         | DomainCode | DomainName | Message                    |
-      | Technology domain  | SD001      | Technology | Details Saved Successfully |
-      | Safety domain       | SD002      | Safety     | Details Saved Successfully |
+      | Condition                  | DomainCode | DomainName | ExpectedResult             |
+      | Basic Save                 | SD001      | Technology | Details Saved Successfully |
+      | Special characters in name | SD002      | Safety #1  | Details Saved Successfully |
 
 
-#EXAMPLE — Case B: tabbed screen, 3-level navigation (Module -> Menu/
-Submenu -> Screen, screen_sections has entries, so scenarios are grouped
-under one Rule block per section)
+#EXAMPLE — Case B: tabbed screen, 3-level navigation (screen_sections has
+entries, so scenarios are grouped under one Rule block per section)
 
 
 Feature: Item Master Management
@@ -431,40 +536,35 @@ Feature: Item Master Management
   Background:
     And I navigate through the following path "Inventory" -> "Item Menu" -> "Item Master"
 
-  Scenario Outline: Validate required header fields
-    When I enter "<ItemCode>" in the "Item Code" field
-    And I enter "<ItemName>" in the "Item Name" field
-    And I click the Save button
-    Then I should see the validation message "<ValidationMessage>"
+  Scenario Outline: Validate required header fields - "<Condition>"
+    When I enter "<ItemCode>" in the "ItemCode" input field
+    And I enter "<ItemName>" in the "ItemName" input field
+    And I click the save button
+    Then I should see a confirmation message "<ExpectedResult>"
 
     Examples:
-      | Condition        | ItemCode | ItemName | ValidationMessage |
-      | Missing code     |          | Item One | Item Code Required |
-      | Missing name     | ITEM001  |          | Item Name Required |
+      | Condition     | ItemCode | ItemName | ExpectedResult      |
+      | Missing code  |          | Item One | Item Code Required  |
+      | Missing name  | ITEM001  |          | Item Name Required  |
 
   Rule: Classification
-    Scenario Outline: Set item classification
-      When I select "<ItemType>" in the "Item Type" field
-      And I click the Save button
-      Then I should see the confirmation message "Details Saved Successfully"
+    Scenario Outline: Set item classification - "<Condition>"
+      When I select "<ItemType>" in the "ItemTypeName" picklist field
+      And I click the save button
+      Then I should see a confirmation message "<ExpectedResult>"
 
       Examples:
-        | Condition          | ItemType |
-        | Standard item type | Standard |
-        | Service item type  | Service  |
+        | Condition           | ItemType | ExpectedResult             |
+        | Standard item type  | Standard | Details Saved Successfully |
+        | Service item type   | Service  | Details Saved Successfully |
 
   Rule: Purchase
-    Scenario: Enable item as purchasable
-      When I check the "Is Purchasable" checkbox
-      And I click the Save button
-      Then I should see the confirmation message "Details Saved Successfully"
-
-    Scenario Outline: Validate purchase rate boundary
-      When I enter "<PurchaseRate>" in the "Purchase Rate" field
-      And I click the Save button
-      Then I should see the validation message "<ValidationMessage>"
+    Scenario Outline: Validate purchase rate boundary - "<Condition>"
+      When I enter "<PurchaseRate>" in the "PurchaseRate" input field
+      And I click the save button
+      Then I should see a confirmation message "<ExpectedResult>"
 
       Examples:
-        | Condition            | PurchaseRate | ValidationMessage        |
-        | Negative rate rejected | -1         | Purchase Rate must be positive |
-        | Zero rate accepted     | 0          | Details Saved Successfully     |
+        | Condition               | PurchaseRate | ExpectedResult                 |
+        | Negative rate rejected  | -1           | Purchase Rate must be positive |
+        | Zero rate accepted      | 0            | Details Saved Successfully     |

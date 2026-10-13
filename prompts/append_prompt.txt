@@ -33,6 +33,82 @@ YOU RECEIVE:
   the error shape (see OUTPUT FORMAT) explaining the ambiguity.
 
 
+#FEATURE FORMAT AND TEMPLATE RULES (APPLY TO EVERY ADDITION AND MODIFICATION)
+
+The feature file is made of "Scenario Outline:" blocks, each with an "Examples:"
+table. The Examples table has a "Condition" column first, one column per
+"<Placeholder>" used in the steps, and an "ExpectedResult" column last, with
+every cell padded so the "|" characters line up.
+
+- Every NEW scenario you write must be a "Scenario Outline:" with an aligned
+  Examples table in exactly that shape — never a plain "Scenario:".
+- Steps use ONLY the fixed vocabulary already used in the file:
+    I select "<Value>" in the "<FieldName>" picklist field
+    I enter "<Value>" in the "<FieldName>" input field
+    I should see a confirmation message "<ExpectedResult>"
+    I click the Delete button
+    I click the save button   (plus the navigation / Add New / Update / Edit
+                               steps already present in the file)
+  <FieldName> is the data-cy base name (no -PickListDrop / -Input suffix), taken
+  from field names already used in the existing file. Never use a display label
+  and never invent a field. Validation messages and success messages both use
+  "I should see a confirmation message".
+- Never leave a cell empty for a value used by a "... picklist field" step (the
+  picklist step would pick the first list item). Empty cells are fine for input
+  steps.
+- If the addition is just one more data case for something an existing Scenario
+  Outline already tests (same steps, same columns), add a NEW ROW to that
+  outline's Examples table instead of creating a second outline. Keep the
+  table's Condition and ExpectedResult columns filled in. The one allowed
+  exception to "do not touch existing lines": when a new or changed cell makes a
+  column wider, re-pad the whitespace of THAT Examples table's lines so the
+  "|" characters stay aligned — change no text.
+- Never add a second Scenario Outline whose title is identical to an existing
+  one.
+- The script already contains the QC team's template block (the four template
+  steps above, `beforeEach`, `loginSession`, and the `creds` line). NEVER edit,
+  move, duplicate or re-add any of it, and never write another step definition
+  that could also match a template step. Steps covered by the template need no
+  new definition. Only if an OLDER script is missing one of the four template
+  step definitions that your new scenarios use, add that one definition
+  verbatim, once, from this reference (never add `beforeEach` or a login):
+
+  Then("I select {string} in the {string} picklist field", (value, field) => {
+    cy.get(`[data-cy="${field}-PickListDrop"]`).click({ force: true });
+    cy.wait(500);
+    cy.get("[data-cy='PicklistSearchBar']").click().clear().type(value);
+    cy.wait(2000);
+    cy.get('.ag-row-even > .ag-column-first').click({ force: true });
+  });
+
+  Then("I enter {string} in the {string} input field", (value, field) => {
+    if (!value) {
+      return;
+    }
+    cy.wait(1000);
+    cy.get(`[data-cy="${field}-Input"]`)
+      .focus()
+      .click({ force: true })
+      .clear()
+      .type(value, { delay: 100 });
+    cy.wait(3000);
+  });
+
+  Then("I should see a confirmation message {string}", (value) => {
+    cy.contains(value).should('be.visible');
+    cy.get('.mat-mdc-dialog-component-host > .mat-icon').click();
+  });
+
+  Then("I click the Delete button", () => {
+    cy.wait(5000);
+    cy.get('[data-cy="DeleteForm"]').click();
+    cy.get('div.alertbutton').click();
+    cy.wait(5000);
+  });
+
+- Never register a step expression that already exists in the script.
+
+
 #ADDITION MODE
 
 - If (a): insert the user's scenario(s) into the feature file, adjusting
@@ -44,8 +120,9 @@ YOU RECEIVE:
 - Preserve every existing scenario, step, and line in both files EXACTLY
   as given — do not edit, reorder, delete, or "improve" anything that
   already exists. Only ADD new content.
-- New scenarios go inside the same Feature block, after the last existing
-  scenario. New step definitions go in the same script file, reusing any
+- New scenarios go inside the same Feature block (inside the same Rule: block
+  when the addition is about a tab/section that already has one), after the
+  last existing scenario of that block. New step definitions go in the same script file, reusing any
   existing helper functions / data-cy selectors already used in the
   script wherever the new steps overlap with existing ones; only
   introduce new selectors or helpers if the addition genuinely needs
@@ -73,6 +150,10 @@ YOU RECEIVE:
   touch, reformat, reorder, or "clean up" anything else nearby, in the
   same scenario, or anywhere else in either file — a modification request
   is scoped to exactly the one thing asked about, nothing broader.
+- A value inside an Examples row is one cell of one row: change only that cell
+  (re-pad that table's whitespace only if the column width changed). If the
+  same value appears in several rows or tables and the request does not say
+  which, use the error shape.
 - Most values live in the feature file's Examples table, with the script
   referencing them only through {string}/{int} parameters — in that case,
   changing the Examples table value alone is sufficient; the script needs

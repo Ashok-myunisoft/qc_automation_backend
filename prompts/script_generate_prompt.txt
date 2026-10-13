@@ -17,6 +17,111 @@ has no implementation anywhere, and the whole feature fails to run.
 Do NOT explain the code. Do NOT use markdown fences. Return ONLY the raw
 .js file content.
 
+The QC team's own working step definitions (picklist, input, confirmation
+message, Delete, `beforeEach` and `loginSession`) are given below in
+#QC TEAM TEMPLATES. You must copy them into every file VERBATIM. They are fixed:
+you never rewrite, "improve", reformat, rename or re-derive them. You only write
+the screen-specific steps that come beyond them.
+
+#QC TEAM TEMPLATES (VERBATIM — HIGHEST PRIORITY, OVERRIDES EVERYTHING BELOW)
+
+Every generated file starts with exactly this header and template block, in this
+order, copied CHARACTER FOR CHARACTER (same quotes, same backticks, same
+`cy.wait` values, same selectors, same order of statements):
+
+import { Given, When, Then } from "@badeball/cypress-cucumber-preprocessor";
+const creds = Cypress.env('TestConnections').UILogin;
+
+Then("I select {string} in the {string} picklist field", (value, field) => {
+  cy.get(`[data-cy="${field}-PickListDrop"]`).click({ force: true });
+  cy.wait(500);
+  cy.get("[data-cy='PicklistSearchBar']").click().clear().type(value);
+  cy.wait(2000);
+  cy.get('.ag-row-even > .ag-column-first').click({ force: true });
+});
+
+Then("I enter {string} in the {string} input field", (value, field) => {
+  if (!value) {
+    return;
+  }
+  cy.wait(1000);
+  cy.get(`[data-cy="${field}-Input"]`)
+    .focus()
+    .click({ force: true })
+    .clear()
+    .type(value, { delay: 100 });
+  cy.wait(3000);
+});
+
+Then("I should see a confirmation message {string}", (value) => {
+  cy.contains(value).should('be.visible');
+  cy.get('.mat-mdc-dialog-component-host > .mat-icon').click();
+});
+
+Then("I click the Delete button", () => {
+  cy.wait(5000);
+  cy.get('[data-cy="DeleteForm"]').click();
+  cy.get('div.alertbutton').click();
+  cy.wait(5000);
+});
+
+beforeEach(() => {
+  loginSession();
+});
+
+function loginSession() {
+  cy.visit(Cypress.config('baseUrl'), {
+    timeout: 120000,
+    failOnStatusCode: false,
+  });
+  cy.get('body').then($body => {
+    if ($body.find('[data-cy="Database-Input"]').length === 0) {
+      cy.get('.login-btn', { timeout: 60000 }).click();
+    }
+  });
+  cy.get('[data-cy="Database-Input"]', { timeout: 30000 })
+    .should('be.visible')
+    .type(creds.dbName);
+  cy.get('.btn-submit').click();
+  cy.get('[data-cy="Username-Input"]', { timeout: 90000 })
+    .should('be.visible')
+    .type(creds.userName);
+  cy.get('[data-cy="Password-Input"]')
+    .type(creds.password, { log: false });
+  cy.get('.signin-button').click();
+  cy.wait(5000);
+}
+
+Rules for the templates:
+
+- The two header lines (the import and `const creds = ...`) are part of the
+  template. `creds` is supplied by the test runner through
+  Cypress.env('TestConnections').UILogin — do not load it any other way.
+- Emit the template block ONCE, at the top of the file, before any helper or
+  other step. Never emit a second `beforeEach`, a second `loginSession`, or a
+  second copy of any of the four steps — duplicates cause ambiguous-step errors.
+- Do not write your own select / enter / confirmation-message / Delete step in
+  any wording. The feature's steps
+    I select "<value>" in the "<field>" picklist field
+    I enter "<value>" in the "<field>" input field
+    I should see a confirmation message "<value>"
+    I click the Delete button
+  are ALREADY implemented by the template. Never touch them, wrap them, add
+  another definition that could also match them, or build selectors for them
+  from the Automation Contract / Known Locators / resolvedControls. The feature
+  already carries the exact data-cy name in the {string} field argument.
+- The templates are exempt from every other rule in this prompt that would
+  otherwise forbid something in them (for example the fixed `cy.wait(<ms>)`
+  values, the missing `.should()` waits, or the login flow that does not wait
+  for `.welcome-title`). Do not "fix" them.
+- Never add a second login path. The template `beforeEach` + `loginSession` is
+  the only login, so the "explicit alternate login" exception described in
+  older conventions no longer applies.
+- Everything AFTER the template block is yours: navigation step(s), the
+  screen-specific button steps (for example "I click the save button"), and any
+  cleanup helper. Write these in the same plain style.
+
+
 #SOURCE-DERIVED AUTOMATION CONTRACT (AUTHORITATIVE WHEN SUPPLIED)
 
 The Automation Contract is the source-of-truth supplement to the feature. It
@@ -86,79 +191,16 @@ items. Apply it as follows:
   an already-asserted state, for a UI animation/transition with no
   observable completion signal — never as the primary wait strategy for
   page loads, navigation, or async data fetches.
+  (The #QC TEAM TEMPLATES contain fixed `cy.wait(<ms>)` calls; they are verbatim and exempt. This rule applies only to the code YOU write.)
 
 
-#LOGIN (MANDATORY, DEFAULT)
+#LOGIN (MANDATORY — PROVIDED BY THE QC TEMPLATES)
 
-Login is NOT a Gherkin concern under this project's convention — the
-feature's Background will almost never mention it, by design, and that is
-never a signal to omit it. Every generated script must handle login itself,
-via an unconditional `beforeEach`, using this exact default flow (as a
-plain function, per #REAL PROJECT CONVENTIONS above) unless the EXCEPTION
-below applies.
-
-Do NOT wrap login in `cy.session()`. This app's authentication is not
-fully restorable from a plain page reload (confirmed: `cy.session()`'s
-mandatory `validate()` re-check fails — a fresh `cy.visit()` after a
-successful login redirects back to the login page instead of showing
-`.welcome-title`, even though the session was just created correctly
-seconds earlier). Every scenario must run the full login UI flow itself,
-via the unconditional `beforeEach` below:
-
-  const creds = Cypress.env('TestConnections').UILogin;
-
-  beforeEach(() => {
-      loginSession()
-  })
-
-  function loginSession() {
-      cy.visit(Cypress.config('baseUrl'), {
-          timeout: 120000,
-          failOnStatusCode: false,
-      });
-
-      cy.get('body').then($body => {
-          if ($body.find('[data-cy="Database-Input"]').length === 0) {
-              cy.get('.login-btn', { timeout: 60000 }).click();
-          }
-      });
-
-      cy.get('[data-cy="Database-Input"]', { timeout: 30000 })
-          .should('be.visible')
-          .type(creds.dbName);
-
-      cy.get('.btn-submit').click();
-
-      cy.get('[data-cy="Username-Input"]', { timeout: 90000 })
-          .should('be.visible')
-          .type(creds.userName);
-
-      cy.get('[data-cy="Password-Input"]')
-          .type(creds.password, { log: false });
-
-      cy.get('.signin-button').click();
-
-      cy.get('.welcome-title', { timeout: 60000 })
-          .should('be.visible');
-  }
-
-This is REQUIRED in every script, no exceptions, unless the EXCEPTION
-below applies. Do not skip it just because the feature never asks for it
-in words — it never will, and that is expected, not a gap for you to leave.
-The `.login-btn` and `cy.visit()` timeouts here are intentionally generous
-— this environment sits behind a Cloudflare managed challenge that needs
-real time to resolve before the login form becomes reachable; a shorter
-timeout here will produce a flaky/failing login that has nothing to do
-with the app itself.
-
-EXCEPTION — explicit alternate login: if the feature's Background contains
-its own distinct login step (something like "Given I am logged in as
-<someone>", separate from the navigation step), implement THAT step
-instead, following the same real shape (visit, database/username/password,
-submit, wait for a real post-login element) as its own plain function with
-a clearly distinct name (e.g. `loginSessionE479()`), called from that
-step's handler. In this case do NOT also add the generic default
-`beforeEach` above — a script has exactly one login path, never both.
+Login is not a Gherkin concern. The `beforeEach(() => { loginSession(); });` and
+`function loginSession() { ... }` in #QC TEAM TEMPLATES are the script's one and
+only login. Copy them verbatim as described there. Do NOT write another login
+function, do NOT add a second `beforeEach`, and do NOT wrap login in
+`cy.session()`.
 
 
 #NAVIGATION STEP
@@ -191,69 +233,22 @@ inside it) and must stay two separate {string} parameters feeding two
 separate clicks, exactly as shown above, never merged into one.
 
 
-#RESOLVED FIELD-CONTROL LOOKUP (WHEN SUPPLIED)
+#FIELD STEPS (HANDLED BY THE QC TEMPLATES)
 
-When a `Resolved field-control lookup` is supplied, it maps Gherkin field
-wording to exact verified `data_cy` values and interaction types. Emit one
-literal JavaScript `resolvedControls` object containing those values and have
-every parameterized field handler use that object. Never construct a selector
-by appending a suffix to `field`, `checkbox`, `action`, or another label
-parameter. For example, `resolvedControls[field].dataCy` is valid while a
-template such as `${field}-PickList` is forbidden. The lookup keys are
-exactly `dataCy`, `interactionType`, and `target`.
+The feature selects picklist values and enters input values only through the
+two template steps ("... picklist field" / "... input field"). You write NO
+code for them. The `{string}` field argument is already the real data-cy name
+(without the -PickListDrop / -Input suffix, which the template adds).
 
-If you are asked to repair an existing script, the resolvedControls object
-must be copied into the repaired output EXACTLY as it appeared in the
-invalid script — same keys, same dataCy values, same interactionType values.
-Do not add, remove, or rename any entry. Do not rewrite any step definition
-that is not directly named in the violations list. Only the specific
-violation must be fixed; everything else must be preserved verbatim.
+If a `Resolved field-control lookup` / Automation Contract is supplied, use it
+ONLY for the screen-specific steps you write yourself (for example a button, a
+section activator, a grid row action, or a dialog). When a repair request tells
+you to preserve a `resolvedControls` object that already exists in the script,
+keep it exactly; but never create a `resolvedControls` object just for the
+template steps.
 
-#DROPDOWN / PICKLIST / COMBOBOX FIELDS
-
-Angular Material dropdowns (mat-select), and this project's custom
-combobox/picklist components, are NOT native HTML <select> elements —
-using Cypress's `.select(value)` command against one will fail at
-runtime, since that command only works on a real <select>. The interaction
-pattern depends on the verified `interactionType`:
-
-  material_option:
-    cy.get(`[data-cy="${control.dataCy}"]`).click();
-    cy.get('.cdk-overlay-container').contains('mat-option', optionText).click({ force: true });
-
-  picklist:
-    cy.get(`[data-cy="${control.dataCy}"]`).click();
-    cy.get(`[data-cy="${control.dataCy}"]`).find('input').clear().type(optionText);
-    cy.get('.ng-dropdown-panel').contains('.ng-option', optionText).click({ force: true });
-
-Use `material_option` only for verified Material controls and `picklist`
-only for verified `ng-select` controls. Never use `mat-option` for a
-verified `picklist`, and never use `.select()` unless the exact contract
-explicitly says `native_select`.
-
-
-Treat selection wording as a dropdown signal:
-
-- phrases like "select", "choose", "pick", "from the dropdown", "from the
-  list", or "from the ComboBox" must use the verified interaction type in
-  `resolvedControls`, not the wording alone
-- do not use `.type()` for those fields unless the source explicitly
-  shows a searchable input and the feature step is describing the search
-  text itself
-- do not use `.select(value)` for custom picklists or comboboxes
-
-
-#TEXT INPUT FIELDS
-
-Treat entry wording as a free-text signal:
-
-- phrases like "enter", "type", "fill in", or "input" should use `.type()`
-  into the resolved field selector
-- do not convert text-entry fields into dropdown interaction just because
-  their label starts with "Select"
-- if a step is ambiguous, prefer the source's field kind and known
-  locator context; do not guess a select interaction for an input field or
-  a typing interaction for a dropdown
+Do not use `.select()` for anything except a verified native select. Never
+build a selector by appending a suffix to a label parameter.
 
 
 #KNOWN LOCATORS (WHEN SUPPLIED)
@@ -308,7 +303,16 @@ verified source-derived locator always wins, even when it differs from a
 product default.
 
 
-#TEST DATA CLEANUP (REQUIRED WHENEVER THE FEATURE CREATES RECORDS)
+#TEST DATA CLEANUP (ONLY WHEN THE FEATURE ITSELF HAS A CLEANUP STEP)
+
+The feature generator no longer writes a cleanup step by default. Implement a
+cleanup helper ONLY if the feature file actually contains a cleanup step (for
+example "I clean up any leftover test data from a previous run"). In that case
+follow the pattern below. If the feature has no such step, add NO cleanup, NO
+`before()`/`after()` hook and NO extra `beforeEach` — the template `beforeEach`
+is the only hook in the file. The rest of this section applies only when a
+cleanup step exists.
+
 
 Feature files in this project now commonly carry many Scenario Outline
 rows (see the upstream TestCaseAgent's scenario-depth requirement) —
@@ -335,12 +339,7 @@ literal codes actually present in this specific feature file
    screen's real delete row action and confirms any resulting dialog —
    mirroring the same row-action and dialog-confirmation patterns you're
    already implementing elsewhere in this same file for that screen.
-3. Call this cleanup helper from a step invoked at the start of the
-   feature's execution (either as the first step of the Background, if
-   the feature's own Background already has such a step, or via a
-   scenario-scoped call at the beginning of the first scenario that
-   creates data) — so leftover records from a prior run are removed
-   before this run's Create scenarios execute, not after.
+3. Register the feature's own cleanup step so it calls this helper.
 
 Do NOT build this cleanup logic if the feature file's scenarios don't
 actually create identifiable records (e.g. a pure read-only/report
@@ -362,7 +361,9 @@ only applies when there is real leftover-data risk to guard against.
   exception (a short buffer after an already-asserted state, for a
   transition with no observable completion signal).
 - Do NOT wrap login in `cy.session()` — see #LOGIN above.
-- Do NOT leave any step from the input feature unimplemented.
+- Do NOT leave any step from the input feature unimplemented. (Steps covered by the QC templates count as implemented — never re-implement them.)
+- Do NOT register any step expression more than once, including the four template steps.
+- Do NOT alter, reorder, reformat or omit any part of the #QC TEAM TEMPLATES block.
 - Do NOT copy literal screen names, field names, selectors, test codes, reset
   assertions, or cleanup logic from examples in this prompt. Examples illustrate
   JavaScript shape only; every emitted selector and behavior must come from the
@@ -373,230 +374,102 @@ only applies when there is real leftover-data risk to guard against.
   list should you derive the data-cy value from the field/button name
   given in the step's own {string} parameter or the step's literal
   wording.
-- Do NOT skip #TEST DATA CLEANUP when the feature's Examples tables
-  contain code/identifier values for created records — see that section
-  for exactly when it applies and how to build it.
+- Do NOT add cleanup logic unless the feature file contains its own cleanup step — see #TEST DATA CLEANUP.
 
 
-#EXAMPLE (illustrative shape only — including a generalized cleanup
-helper following #TEST DATA CLEANUP above; the actual TEST_CODES list
-you generate must reflect the real codes in the feature you were given,
-not this sample's codes)
+#EXAMPLE (illustrative shape only — the QC template block first, verbatim,
+then screen-specific steps. Codes, names and selectors below are NOT
+defaults and must never be copied unless they appear in the feature you
+were given)
 
 import { Given, When, Then } from "@badeball/cypress-cucumber-preprocessor";
 const creds = Cypress.env('TestConnections').UILogin;
 
-beforeEach(() => {
-    loginSession()
-})
+Then("I select {string} in the {string} picklist field", (value, field) => {
+  cy.get(`[data-cy="${field}-PickListDrop"]`).click({ force: true });
+  cy.wait(500);
+  cy.get("[data-cy='PicklistSearchBar']").click().clear().type(value);
+  cy.wait(2000);
+  cy.get('.ag-row-even > .ag-column-first').click({ force: true });
+});
 
-function selectControl(control, optionText) {
-    if (!optionText) return;
-    dismissSuggestionDropdown();
-  cy.get(`[data-cy="${control.dataCy}"]`).click();
-  if (control.interactionType === 'picklist') {
-    cy.get(`[data-cy="${control.dataCy}"]`).find('input').clear().type(optionText);
-    cy.get('.ng-dropdown-panel').contains('.ng-option', optionText).click({ force: true });
+Then("I enter {string} in the {string} input field", (value, field) => {
+  if (!value) {
     return;
   }
-  cy.get('.cdk-overlay-container').contains('mat-option', optionText).click({ force: true });
-}
+  cy.wait(1000);
+  cy.get(`[data-cy="${field}-Input"]`)
+    .focus()
+    .click({ force: true })
+    .clear()
+    .type(value, { delay: 100 });
+  cy.wait(3000);
+});
 
-function clickCheckBox(dataCy) {
-    dismissSuggestionDropdown();
-  cy.get(`[data-cy="${dataCy}"] input[type="checkbox"]`)
-        .scrollIntoView()
-        .click({ force: true });
-}
+Then("I should see a confirmation message {string}", (value) => {
+  cy.contains(value).should('be.visible');
+  cy.get('.mat-mdc-dialog-component-host > .mat-icon').click();
+});
+
+Then("I click the Delete button", () => {
+  cy.wait(5000);
+  cy.get('[data-cy="DeleteForm"]').click();
+  cy.get('div.alertbutton').click();
+  cy.wait(5000);
+});
+
+beforeEach(() => {
+  loginSession();
+});
 
 function loginSession() {
-    cy.visit(Cypress.config('baseUrl'), {
-        timeout: 120000,
-        failOnStatusCode: false,
-    });
-
-    cy.get('body').then($body => {
-        if ($body.find('[data-cy="Database-Input"]').length === 0) {
-            cy.get('.login-btn', { timeout: 60000 }).click();
-        }
-    });
-
-    cy.get('[data-cy="Database-Input"]', { timeout: 30000 })
-        .should('be.visible')
-        .type(creds.dbName);
-
-    cy.get('.btn-submit').click();
-
-    cy.get('[data-cy="Username-Input"]', { timeout: 90000 })
-        .should('be.visible')
-        .type(creds.userName);
-
-    cy.get('[data-cy="Password-Input"]')
-        .type(creds.password, { log: false });
-
-    cy.get('.signin-button').click();
-
-    cy.get('.welcome-title', { timeout: 60000 })
-        .should('be.visible');
-}
-
-function openNewDomainModalIfNeeded() {
-    cy.get('body').then($body => {
-        if ($body.find('[data-cy="DomainCode-PickList"]:visible').length === 0) {
-            cy.get('.btn-add').first().click({ force: true });
-        }
-    });
-}
-
-function dismissSuggestionDropdown() {
-    cy.get('body').then($body => {
-        if ($body.find('.ag-center-cols-container:visible').length > 0) {
-            cy.get('.modal-title').first().click({ force: true });
-            cy.get('body').should($b => {
-                expect($b.find('.ag-center-cols-container:visible').length).to.eq(0);
-            });
-        }
-    });
-}
-
-function enterCodeValue(value, field) {
-    openNewDomainModalIfNeeded();
-    if (!value) return;
-    cy.get(`[data-cy="${resolvedControls[field].dataCy}"]`)
-        .should('be.visible')
-        .clear()
-        .type(value);
-    dismissSuggestionDropdown();
-}
-
-function enterNameValue(value, field) {
-    if (!value) return;
-    cy.get(`[data-cy="${resolvedControls[field].dataCy}"]`)
-        .should('be.visible')
-        .clear()
-        .type(value);
-    dismissSuggestionDropdown();
+  cy.visit(Cypress.config('baseUrl'), {
+    timeout: 120000,
+    failOnStatusCode: false,
+  });
+  cy.get('body').then($body => {
+    if ($body.find('[data-cy="Database-Input"]').length === 0) {
+      cy.get('.login-btn', { timeout: 60000 }).click();
+    }
+  });
+  cy.get('[data-cy="Database-Input"]', { timeout: 30000 })
+    .should('be.visible')
+    .type(creds.dbName);
+  cy.get('.btn-submit').click();
+  cy.get('[data-cy="Username-Input"]', { timeout: 90000 })
+    .should('be.visible')
+    .type(creds.userName);
+  cy.get('[data-cy="Password-Input"]')
+    .type(creds.password, { log: false });
+  cy.get('.signin-button').click();
+  cy.wait(5000);
 }
 
 Then("I navigate through the following path {string} -> {string}", (module, screen) => {
-    cy.get('.theme > :nth-child(1)').should('be.visible').click()
     cy.get('[data-cy="ModuleList"] > .mat-icon').should('be.visible').and('not.be.disabled').dblclick()
     cy.get(`[data-cy="${module}-Module"] > .card-image`).scrollIntoView().should('be.visible').click()
     cy.get(`[data-cy="${screen}-MenuData0"] > .menu-item`).scrollIntoView().should('be.visible').click()
 })
 
 Then("I navigate through the following path {string} -> {string} -> {string}", (module, menu, screen) => {
-    cy.get('.theme > :nth-child(1)').should('be.visible').click()
     cy.get('[data-cy="ModuleList"] > .mat-icon').should('be.visible').and('not.be.disabled').dblclick()
     cy.get(`[data-cy="${module}-Module"] > .card-image`).scrollIntoView().should('be.visible').click()
     cy.get(`[data-cy="${menu}-MenuFolder0"]`).scrollIntoView().should('be.visible').click({ force: true })
     cy.get(`[data-cy="${screen}-MenuData1"] > .menu-item`).scrollIntoView().should('be.visible').click({ force: true })
 })
 
-Then("I enter {string} in the {string} code field", (value, field) => {
-    enterCodeValue(value, field)
+Then("I click the Add New button", () => {
+    cy.get('[data-cy="AddNewForm"]').should('be.visible').click()
 })
 
-Then("I enter {string} in the {string} name field", (value, field) => {
-    enterNameValue(value, field)
+Then("I click the save button", () => {
+    cy.get('[data-cy="SaveForm"]').should('be.visible').click()
 })
 
-function clickRowAction(code, buttonIndex) {
-    cy.contains('tr', code).find('button').eq(buttonIndex).click();
-}
+(In the real output include ONLY the navigation arity the feature uses, and
+ONLY the screen-specific button steps the feature actually contains. A
+cleanup helper is added only when #TEST DATA CLEANUP applies.)
 
-function closeAnyDialog() {
-    cy.get('.mat-mdc-dialog-component-host > .mat-icon').then(($closeButton) => {
-        if ($closeButton.length && $closeButton.is(':visible')) {
-            cy.wrap($closeButton).click();
-        }
-    });
-}
-
-const TEST_CODES = ['SD-001', 'SD-002', 'SD-003', 'SD-004', 'SD-007', 'SD-101', 'SD-102', 'SD-103', 'SD-104', 'SD-998', 'SD-999'];
-
-function cleanupLeftoverTestData() {
-    TEST_CODES.forEach((code) => {
-        cy.get('body').then($body => {
-            if ($body.find(`table tr:contains("${code}")`).length > 0) {
-                clickRowAction(code, 1);
-                cy.get('.cdk-overlay-container').contains('Yes').click();
-                cy.contains('successfully', { timeout: 15000, matchCase: false }).should('be.visible');
-                closeAnyDialog();
-            }
-        });
-    });
-}
-
-Then("I clean up any leftover test data from a previous run", () => {
-    cleanupLeftoverTestData();
-})
-
-Then("I click the edit icon for the {string} row", (code) => {
-    clickRowAction(code, 0);
-})
-
-Then("I click the delete icon for the {string} row", (code) => {
-    clickRowAction(code, 1);
-})
-
-Then("I confirm the delete", () => {
-    cy.get('.cdk-overlay-container').contains('Yes').click();
-})
-
-Then("the {string} checkbox should be checked", (value) => {
-  cy.get(`[data-cy="${resolvedControls[value].dataCy}"] input[type="checkbox"]`).should('be.checked');
-})
-
-Then("I close the edit modal", () => {
-    cy.get('span.closeicon').click();
-})
-
-Then('I click the {string} button', (button) => {
-    if (button === 'Save' || button === 'Update') {
-        dismissSuggestionDropdown();
-        cy.get('span.save').click();
-    }
-})
-
-Then("I should see the validation message {string}", (messages) => {
-    cy.get("gb-dialogbox", { timeout: 10000 }).should("be.visible");
-    cy.get("gb-dialogbox").within(() => {
-        messages.split(/\s*,\s*/).forEach((message) => {
-            cy.contains(message.trim()).should("be.visible");
-        });
-    });
-    cy.get('.mat-mdc-dialog-component-host > .mat-icon').then(($closeButton) => {
-        if ($closeButton.is(':visible')) {
-            cy.wrap($closeButton).click();
-        }
-    });
-});
-
-Then("I should see the confirmation message {string}", (value) => {
-    cy.contains(value).should('be.visible')
-    cy.get('.mat-mdc-dialog-component-host > .mat-icon').click()
-})
-
-Then("I select {string} from the {string} ComboBox field", (option, field) => {
-  selectControl(resolvedControls[field], option)
-})
-
-Then("I enter {string} in the {string} textarea field", (value, field) => {
-    if (!value) return;
-    cy.get(`[data-cy="${resolvedControls[field].dataCy}"]`).click({ force: true }).should('be.visible').type(value)
-})
-
-When("I check the {string} checkbox", (value) => {
-  clickCheckBox(resolvedControls[value].dataCy)
-})
-
-Then("the Skill Domain form should be reset to empty", () => {
-    cy.get('[data-cy="DomainCode-PickList"]').should('have.value', '')
-    cy.get('[data-cy="DomainName-PickList"]').should('have.value', '')
-    cy.get('[data-cy="DomainType-ComboBox"]').should('have.value', '')
-    cy.get('[data-cy="Description-Textarea"]').should('have.value', '')
-})
 
 #FINAL ANTI-ANCHOR RULE
 
@@ -612,12 +485,15 @@ suggestion from the example.
 
 Return executable JavaScript source and nothing else. Your response must:
 
-- start directly with a JavaScript statement such as `import`, `const`,
-  `function`, or `beforeEach`;
+- start with the `import { Given, When, Then } ...` line followed by
+  `const creds = Cypress.env('TestConnections').UILogin;`, then the
+  #QC TEAM TEMPLATES block copied verbatim;
 - contain no Markdown fence marker (no triple-backtick sequence), heading,
   explanation, feature text, `Scenario`, `Scenario Outline`, `Examples`, or
   Gherkin table;
-- contain every required helper and step definition as JavaScript only; and
+- contain every required helper and step definition as JavaScript only;
+- contain each template step, `beforeEach` and `loginSession` exactly once and
+  unaltered; and
 - register each exact Cucumber step-expression only once. Reuse the same
   handler/helper for repeated feature wording instead of declaring duplicate
   `Given`/`When`/`Then` patterns. This applies to tabbed screens too — even
