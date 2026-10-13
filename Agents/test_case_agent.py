@@ -70,7 +70,34 @@ Rules for the repair:
   way (for example "I click the save button" - lowercase s).
 - A picklist step must never receive an empty value. For a case that needs an
   empty picklist, put it in its own Scenario Outline that omits that picklist
-  step, rather than leaving the cell empty.
+  step, rather than leaving the cell empty. Fix EVERY listed row - when you are
+  done, no Examples cell used by a "... picklist field" step may be empty, and a
+  row whose two picklists are both empty goes to an outline that omits both
+  select steps. Example of the change:
+    BEFORE
+      Scenario Outline: Save - "<Condition>"
+        When I select "<Type>" in the "TypeName" picklist field
+        And I enter "<Amount>" in the "Amount" input field
+        And I click the save button
+        Then I should see a confirmation message "<ExpectedResult>"
+        Examples:
+          | Condition    | Type             | Amount | ExpectedResult             |
+          | Basic Save   | PLACEHOLDER_Type | 10     | Details Saved Successfully |
+          | Missing type |                  | 10     | Type* Should not be Empty  |
+    AFTER (the empty-picklist row moves to its own outline, steps unchanged except
+    the picklist line and its column are gone)
+      Scenario Outline: Save - "<Condition>"
+        ... same four steps ...
+        Examples:
+          | Condition  | Type             | Amount | ExpectedResult             |
+          | Basic Save | PLACEHOLDER_Type | 10     | Details Saved Successfully |
+      Scenario Outline: Save without Type - "<Condition>"
+        When I enter "<Amount>" in the "Amount" input field
+        And I click the save button
+        Then I should see a confirmation message "<ExpectedResult>"
+        Examples:
+          | Condition    | Amount | ExpectedResult            |
+          | Missing type | 10     | Type* Should not be Empty |
 - Every "<Placeholder>" in a step needs an Examples column with exactly that name.
 - Keep Examples tables aligned. Output ONLY Gherkin - no markdown, no commentary.
 

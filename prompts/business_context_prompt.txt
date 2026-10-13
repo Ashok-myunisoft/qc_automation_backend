@@ -64,3 +64,13 @@ On failure: {"error": "<short reason>"}
 Keep the result small and focused — only fields you're confident are real
 test-data inputs for this screen, not every column of every table you
 looked at.
+
+RESULT RULES (CRITICAL — a wrong value list produces wrong test data):
+- Use as the key a field name that appears in source_hints. Put a column's
+  values under a key ONLY if that column truly holds that field's data. Never
+  reuse one column's values for a different field, and never put reference
+  numbers under a checkbox or flag field.
+- Leave out placeholder or junk values: empty strings, "0", "NONE", "N/A",
+  "null". If a column only has junk values, leave that field out.
+- If a tool returns {"error": ...}, treat that column as unknown and leave the
+  field out. Never fill a field from a guess after a tool error.

@@ -472,14 +472,18 @@ def check_steps(feature_text: str, script_text: str) -> list[Finding]:
     def check_text(sc: _Scenario, template: str, text: str) -> None:
         matched = [d for d in defs if d.matches(text)]
         if not matched:
+            # Only a pure letter-case / spacing difference is safe to fix in the
+            # feature. A different word ("Update" vs "Delete") is a different
+            # action: never reword it into another step - the script needs a
+            # definition for it instead.
             closest, ratio, only_case = _closest_definition(text, defs)
-            if closest is not None and (only_case or ratio >= 0.8):
-                hint = (f'closest defined step is "{closest.expression}"'
-                        + (" (differs only in letter case)" if only_case else "")
-                        + " - reword the feature step to match it exactly")
+            if closest is not None and only_case:
+                hint = (f'closest defined step is "{closest.expression}" (differs only in letter case)'
+                        " - reword the feature step to match it exactly")
                 fix_in = FIX_FEATURE
             else:
-                hint = "no similar step definition exists - the script needs a definition for it"
+                hint = ("no step definition matches this text - add one whose expression matches it exactly "
+                        "(do not reword the step into a different action)")
                 fix_in = FIX_SCRIPT
             col.add(("undef", template), Finding(
                 CRITICAL, "undefined_step", text, scenario=sc.name, fix_in=fix_in, hint=hint,
