@@ -217,11 +217,45 @@ actual readiness of each element via `.should('be.visible')` /
 `.should('not.be.disabled')` before interacting with it — do NOT insert a
 fixed `cy.wait(<ms>)` before or between these steps; the `.should(...)`
 assertions already retry until the element is ready, which is both faster
-and more reliable than a flat sleep:
+and more reliable than a flat sleep (the only wait allowed here is the quiet
+period inside the `dismissPopups` helper below):
 
+The application shows error / info popups after a module or a screen opens,
+and which popups appear differs per screen, so they cannot be scripted. ALWAYS
+include this helper once in the script and call `dismissPopups();` at the start
+of the navigation step and after EVERY click in it (module, menu folder,
+screen). Copy it exactly:
+
+function dismissPopups({ quietMs = 1500, max = 15 } = {}) {
+  const CLOSERS = [
+    '.mat-mdc-dialog-component-host > .mat-icon',
+    'div.alertbutton',
+  ];
+  const next = (n) => {
+    if (n >= max) return;
+    cy.wait(quietMs);
+    cy.get('body').then(($body) => {
+      for (const sel of CLOSERS) {
+        const $el = $body.find(sel).filter(':visible');
+        if ($el.length) {
+          const msg = $body.find('.mat-mdc-dialog-component-host').first().text().replace(/\s+/g, ' ').trim().slice(0, 200);
+          Cypress.log({ name: 'popup', message: msg || sel });
+          cy.wrap($el.first()).click({ force: true });
+          next(n + 1);
+          return;
+        }
+      }
+    });
+  };
+  next(0);
+}
+
+  dismissPopups()
   cy.get('[data-cy="ModuleList"] > .mat-icon').should('be.visible').and('not.be.disabled').dblclick()
   cy.get(`[data-cy="${module}-Module"] > .card-image`).scrollIntoView().should('be.visible').click()
+  dismissPopups()
   cy.get(`[data-cy="${screen}-MenuData0"] > .menu-item`).scrollIntoView().should('be.visible').click()
+  dismissPopups()
 
 (insert an intermediate menu-expand step between module and screen clicks
 if the feature's navigation step has 3 parameters instead of 2.)
@@ -445,17 +479,54 @@ function loginSession() {
   cy.wait(5000);
 }
 
+// The ERP shows error / info popups after opening a module or a screen. Which
+// popups appear (and how many) differs per screen, so none can be scripted in
+// advance. This closes whatever is visible, repeatedly, until a quiet period
+// passes with nothing on screen - so it does nothing on a screen with no popups
+// and copes with a screen that shows many. Each popup's text is logged, never
+// hidden: a popup on load usually means a failed API call.
+function dismissPopups({ quietMs = 1500, max = 15 } = {}) {
+  const CLOSERS = [
+    '.mat-mdc-dialog-component-host > .mat-icon',   // dialog close icon
+    'div.alertbutton',                              // OK / confirm button
+  ];
+  const next = (n) => {
+    if (n >= max) return;
+    cy.wait(quietMs);                               // popups arrive late: wait for a quiet moment
+    cy.get('body').then(($body) => {
+      for (const sel of CLOSERS) {
+        const $el = $body.find(sel).filter(':visible');
+        if ($el.length) {
+          const msg = $body.find('.mat-mdc-dialog-component-host').first().text().replace(/\s+/g, ' ').trim().slice(0, 200);
+          Cypress.log({ name: 'popup', message: msg || sel });
+          cy.wrap($el.first()).click({ force: true });
+          next(n + 1);                              // check again: another popup may have appeared
+          return;
+        }
+      }
+    });
+  };
+  next(0);
+}
+
 Then("I navigate through the following path {string} -> {string}", (module, screen) => {
+    dismissPopups()
     cy.get('[data-cy="ModuleList"] > .mat-icon').should('be.visible').and('not.be.disabled').dblclick()
     cy.get(`[data-cy="${module}-Module"] > .card-image`).scrollIntoView().should('be.visible').click()
+    dismissPopups()
     cy.get(`[data-cy="${screen}-MenuData0"] > .menu-item`).scrollIntoView().should('be.visible').click()
+    dismissPopups()
 })
 
 Then("I navigate through the following path {string} -> {string} -> {string}", (module, menu, screen) => {
+    dismissPopups()
     cy.get('[data-cy="ModuleList"] > .mat-icon').should('be.visible').and('not.be.disabled').dblclick()
     cy.get(`[data-cy="${module}-Module"] > .card-image`).scrollIntoView().should('be.visible').click()
+    dismissPopups()
     cy.get(`[data-cy="${menu}-MenuFolder0"]`).scrollIntoView().should('be.visible').click({ force: true })
+    dismissPopups()
     cy.get(`[data-cy="${screen}-MenuData1"] > .menu-item`).scrollIntoView().should('be.visible').click({ force: true })
+    dismissPopups()
 })
 
 Then("I click the Add New button", () => {

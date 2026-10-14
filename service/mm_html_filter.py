@@ -1,34 +1,3 @@
-"""Shrinks the shared MaterialManagement source files for ONE screen.
-
-Why this exists
----------------
-Every MM screen (Purchase Requisition, Sales Invoice, ...) is rendered by the
-SAME Angular component. The template shows or hides fields, columns and
-buttons with conditions such as
-
-    *ngIf="MenuRights.BizTransactionClassId == -1799999919"
-
-Sending the whole template for all ~134 screens is too big for the AI, so the
-HTML used to be dropped entirely -- and without the HTML the AI sees almost no
-fields, buttons or locators (that is the thin Purchase Requisition analysis).
-
-This module keeps the HTML but removes only the blocks that are PROVABLY not
-shown for the screen being tested. It is deliberately conservative: anything
-it does not fully understand is kept.
-
-What it removes
----------------
-An element is removed only when its *ngIf is built purely from comparisons of
-`MenuRights.BizTransactionClassId` with number literals, and the target
-ClassId can never satisfy it:
-  * "A == 1 || A == 2"        -> removed unless target is 1 or 2
-  * "A == 1 && something"     -> removed unless target is 1   (no || / ? / | allowed)
-The same test is applied to two more ways an element can be hidden:
-  * [style.display]="COND ? 'flex' : 'none'"   -> removed when COND can never be true
-  * [hidden]="COND"                            -> removed when COND is certainly true
-Everything else (negations, other ternaries, pipes, constants such as
-BIZ_CLASS_IDS.X, ...) is kept untouched.
-"""
 from __future__ import annotations
 
 import re

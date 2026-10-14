@@ -1,38 +1,3 @@
-"""Deterministic Cypress step-definition builder (no AI).
-
-Why this exists
----------------
-The script used to be written by the AI. The QC team's template steps only know
-two control types - "<Field>-PickListDrop" and "<Field>-Input" - so every other
-control (combobox, date, radio, checkbox, textarea) was typed with the wrong
-selector, and the real data-cy values read by the live scan (datacy_scan.py)
-never reached the script at all.
-
-This module builds the whole script in code from the (scan-merged) analysis:
-
-  1. the QC team's template block, copied verbatim (4 steps, beforeEach,
-     loginSession);
-  2. a CONTROLS table holding the EXACT verified data-cy of every field;
-  3. step definitions for the other control types, which read their selector
-     from CONTROLS;
-  4. navigation and button steps.
-
-Nothing in it is guessed by a model, and it is identical for every screen except
-the CONTROLS / ACTIONS tables, so a fix made here is a fix for all screens.
-
-The feature file must use the matching step sentence for each control type;
-normalize_feature() rewrites the generic "picklist"/"input" steps to the right
-sentence using the same CONTROLS table, so the two files cannot drift apart.
-
-Public API
-----------
-controls_from_analysis(project_analysis) -> dict
-actions_from_analysis(project_analysis)  -> dict
-build_script(project_analysis)           -> str
-controls_from_script(script)             -> dict   (read back from a built script)
-is_generated(script)                     -> bool
-normalize_feature(feature_text, controls) -> str
-"""
 from __future__ import annotations
 
 import json
@@ -295,18 +260,56 @@ function clickAction(name) {
   cy.get(`[data-cy="${ACTIONS[name]}"]`).should('be.visible').click();
 }
 
+// ---- popup handling ----
+// The ERP shows error / info popups after opening a module or a screen. Which
+// popups appear (and how many) differs per screen, so none can be scripted in
+// advance. This closes whatever is visible, repeatedly, until a quiet period
+// passes with nothing on screen - so it does nothing on a screen with no popups
+// and copes with a screen that shows many. Each popup's text is logged, never
+// hidden: a popup on load usually means a failed API call.
+function dismissPopups({ quietMs = 1500, max = 15 } = {}) {
+  const CLOSERS = [
+    '.mat-mdc-dialog-component-host > .mat-icon',   // dialog close icon
+    'div.alertbutton',                              // OK / confirm button
+  ];
+  const next = (n) => {
+    if (n >= max) return;
+    cy.wait(quietMs);                               // popups arrive late: wait for a quiet moment
+    cy.get('body').then(($body) => {
+      for (const sel of CLOSERS) {
+        const $el = $body.find(sel).filter(':visible');
+        if ($el.length) {
+          const msg = $body.find('.mat-mdc-dialog-component-host').first().text().replace(/\s+/g, ' ').trim().slice(0, 200);
+          Cypress.log({ name: 'popup', message: msg || sel });
+          cy.wrap($el.first()).click({ force: true });
+          next(n + 1);                              // check again: another popup may have appeared
+          return;
+        }
+      }
+    });
+  };
+  next(0);
+}
+
 // ---- navigation ----
 Then("I navigate through the following path {string} -> {string}", (module, screen) => {
+  dismissPopups();                                  // popups left over from login
   cy.get('[data-cy="ModuleList"] > .mat-icon').should('be.visible').and('not.be.disabled').dblclick();
   cy.get(`[data-cy="${module}-Module"] > .card-image`).scrollIntoView().should('be.visible').click();
+  dismissPopups();                                  // popups after opening the module
   cy.get(`[data-cy="${screen}-MenuData0"] > .menu-item`).scrollIntoView().should('be.visible').click();
+  dismissPopups();                                  // popups after opening the screen
 });
 
 Then("I navigate through the following path {string} -> {string} -> {string}", (module, menu, screen) => {
+  dismissPopups();                                  // popups left over from login
   cy.get('[data-cy="ModuleList"] > .mat-icon').should('be.visible').and('not.be.disabled').dblclick();
   cy.get(`[data-cy="${module}-Module"] > .card-image`).scrollIntoView().should('be.visible').click();
+  dismissPopups();                                  // popups after opening the module
   cy.get(`[data-cy="${menu}-MenuFolder0"]`).scrollIntoView().should('be.visible').click({ force: true });
+  dismissPopups();                                  // popups after opening the menu folder
   cy.get(`[data-cy="${screen}-MenuData1"] > .menu-item`).scrollIntoView().should('be.visible').click({ force: true });
+  dismissPopups();                                  // popups after opening the screen
 });
 
 // ---- buttons ----

@@ -1,48 +1,3 @@
-"""Live data-cy scan for NORMAL and MM (Material Management) screens.
-
-Why this exists
----------------
-The analysis agent has to GUESS each field's data-cy attribute by reading
-Angular source. Shared controls (gb-newpicklist, ...) build the final value at
-runtime, so the guess is often "Unknown" or wrong. This module asks the REAL
-app instead: it logs in with the credentials from .env, opens the screen and
-reads every [data-cy] attribute that is actually on the page. Those real values
-are merged into the analysis BEFORE the test cases are written.
-
-MM screens (sales / purchase / inventory / jobwork / subcontract) show most of
-their fields only after a Biz Transaction Type is chosen, so for those the scan
-also clicks Add New (if present) and picks the FIRST Biz Transaction Type in
-the picklist before reading the page.
-
-It is strictly best-effort. If anything is missing or goes wrong (no .env
-settings, Cypress not installed, login fails, wrong menu path, timeout ...)
-the scan is skipped with one log line and Generate carries on exactly as it
-did before.
-
-What the scan changes in the analysis (only when it succeeds):
-  * the navigation path becomes the REAL menu path found on the page, with the
-    exact names (e.g. SkillManagement > SkillTaxonomy > SkillDomain), not the
-    source-folder guess the analysis started with;
-  * every field whose data-cy is on the page gets that real value;
-  * a field whose data-cy is NOT on the page is marked "Unknown" so no test step
-    is written for it. It never raises into the caller (except a closed WebSocket coming
-from the `log` callback, which the caller handles).
-
-.env settings (all optional except the first three):
-    SCAN_DB_NAME=...                 login database name
-    SCAN_USERNAME=...                login user
-    SCAN_PASSWORD=...                login password
-    SCAN_BASE_URL=https://...        app URL (default: baseUrl of cypress.config.js)
-    SCAN_ENABLED=1                   set 0 to switch the scan off
-    SCAN_ONLY_WHEN_UNRESOLVED=0      0 = scan every screen (default - the scan also finds the REAL
-                                         menu path to the screen, which the generated test needs)
-                                     1 = scan only when some field has no verified data-cy
-    SCAN_TIMEOUT_SECONDS=240         hard limit for one scan
-    SCAN_CACHE_HOURS=168             reuse a saved scan for this long (0 = never reuse)
-    SCAN_FORCE_REFRESH=0             1 = ignore saved scans
-    SCAN_FAIL_COOLDOWN_MINUTES=30    after a failed scan of a screen, do not retry for this long
-    SCAN_CACHE_DIR=...               where scans are saved (default: <backend>/cache/datacy_scan)
-"""
 from __future__ import annotations
 
 import asyncio
@@ -216,6 +171,37 @@ function scanFind(suffix, label) {
   });
 }
 
+// ---- popup handling ----
+// The ERP shows error / info popups after opening a module or a screen. Which
+// popups appear (and how many) differs per screen, so none can be scripted in
+// advance. This closes whatever is visible, repeatedly, until a quiet period
+// passes with nothing on screen - so it does nothing on a screen with no popups
+// and copes with a screen that shows many. Each popup's text is logged, never
+// hidden: a popup on load usually means a failed API call.
+function dismissPopups({ quietMs = 1500, max = 15 } = {}) {
+  const CLOSERS = [
+    '.mat-mdc-dialog-component-host > .mat-icon',   // dialog close icon
+    'div.alertbutton',                              // OK / confirm button
+  ];
+  const next = (n) => {
+    if (n >= max) return;
+    cy.wait(quietMs);                               // popups arrive late: wait for a quiet moment
+    cy.get('body').then(($body) => {
+      for (const sel of CLOSERS) {
+        const $el = $body.find(sel).filter(':visible');
+        if ($el.length) {
+          const msg = $body.find('.mat-mdc-dialog-component-host').first().text().replace(/\s+/g, ' ').trim().slice(0, 200);
+          Cypress.log({ name: 'popup', message: msg || sel });
+          cy.wrap($el.first()).click({ force: true });
+          next(n + 1);                              // check again: another popup may have appeared
+          return;
+        }
+      }
+    });
+  };
+  next(0);
+}
+
 // ---- finding the screen in the REAL menu ---------------------------------------
 // The menu is a tree. Its nodes carry data-cy values like "Advance-MenuFolder0"
 // (a folder) and "AdvancePayment-MenuData1" (a screen); the number is the depth.
@@ -253,6 +239,7 @@ function clickNode(el) {
   const $el = Cypress.$(el);
   const $item = $el.children(".menu-item");
   cy.wrap($item.length ? $item.first() : $el.first()).scrollIntoView().should('be.visible').click({ force: true });
+  dismissPopups({ quietMs: 800 });   // a popup here would hide the menu / the form that is read next
 }
 
 function findAndOpen(screen, hints, st) {
@@ -296,11 +283,13 @@ function findAndOpen(screen, hints, st) {
 }
 
 Then("I open the screen {string} in the module {string} via {string}", (screen, module, via) => {
+  dismissPopups();   // popups left over from login
   cy.get('[data-cy="ModuleList"] > .mat-icon').should('be.visible').and('not.be.disabled').dblclick()
   scanFind("-Module", module).then(($m) => {
     navState.module = String($m.attr("data-cy")).slice(0, -"-Module".length);
     cy.wrap($m).children('.card-image').scrollIntoView().should('be.visible').click();
   });
+  dismissPopups();   // popups after opening the module, before the menu is read
   // wait for the side menu to be drawn (this is the wait the old step had)
   cy.get('[data-cy*="-MenuFolder"], [data-cy*="-MenuData"]', { timeout: 60000 }).should('have.length.greaterThan', 0);
   cy.wait(1000);

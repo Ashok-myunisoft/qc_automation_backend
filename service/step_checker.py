@@ -1,32 +1,3 @@
-"""Deterministic step checker for a generated Cucumber .feature + step-definition .js.
-
-No AI, no network, standard library only. It answers the questions the AI
-validate agent keeps getting wrong:
-
-  undefined_step           a feature step matches no step definition
-  ambiguous_step           a feature step matches several definitions, or the
-                           same expression is defined twice in the script
-  quote_in_cell            an Examples value used in a step contains a double
-                           quote (the step text becomes  ""Value""  and matches
-                           no {string})
-  empty_picklist_value     an empty value reaches a "... picklist field" step
-                           (the QC picklist template calls .type(""), which
-                           Cypress rejects)
-  missing_example_column   a <Placeholder> in a step has no Examples column
-  inconsistent_examples_row  an Examples row has a different number of cells
-                           than its header (Cucumber refuses to parse the file)
-
-Matching follows cucumber-js: a Cucumber expression must match the WHOLE step
-text, and {string} is a double- or single-quoted string with backslash escapes.
-
-Public API
-----------
-check_steps(feature_text, script_text) -> list[Finding]
-findings_to_validation_entries(findings) -> list[dict]   (validate-agent shape)
-has_critical(findings) / critical_count(findings)
-qc_template_intact(original_script, new_script) -> bool
-count_outlines(feature_text) -> int
-"""
 from __future__ import annotations
 
 import difflib

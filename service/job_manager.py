@@ -1,20 +1,3 @@
-"""Background jobs that keep running after the browser tab is closed.
-
-Analogy: the WebSocket is the service window, not the kitchen. A job is an
-order the kitchen finishes by itself. While the window is open, updates are
-passed through to the browser exactly as before; once it closes, updates are
-simply not delivered and the kitchen carries on.
-
-Three pieces live here:
-  * JobSocket - a stand-in for the WebSocket that never fails when the
-    browser has gone away, and also copies every log line into the backend
-    log and the job's SQL Server row (via job_store).
-  * Job       - one queued/running background run.
-  * A concurrency gate (MAX_CONCURRENT_RUNS, default 1) - Cypress is heavy
-    and all runs still share one Cypress workspace, so extra runs wait their
-    turn in the queue.
-"""
-
 import asyncio
 import itertools
 import logging

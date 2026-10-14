@@ -1,5 +1,3 @@
-"""PostgreSQL storage for completed QC runs and their downloadable artifacts."""
-
 import json
 import threading
 

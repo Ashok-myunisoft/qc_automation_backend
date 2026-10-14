@@ -1,15 +1,3 @@
-"""Fixed test-data lookup for MM screens (no AI involved).
-
-Why: for MM screens the AI "business context" agent wandered through the
-database, picked an empty table (RAWPURCHASE) and then invented values such as
-INVOICE001 / ITEM A. Here each header field is mapped to its master table and
-column directly. The six tables below were confirmed by successful queries in
-your earlier run log (MPARTY, MDEPARTMENT, MSTORE, MPAYMENTTERM, MCURRENCY).
-
-Left out on purpose: the Biz Transaction Type list. Its values must belong to
-the screen's own ClassId and the screen normally preselects one, so a blind
-list could be wrong.
-"""
 from __future__ import annotations
 
 import logging

@@ -1,12 +1,3 @@
-"""PostgreSQL connection for the History / Jobs stores.
-
-Kept separate from db_service.py on purpose: db_service.py talks to the real
-application SQL Server (DATABASE_URL) for the business-context agent, using
-SQL Server-only queries. History and Jobs live in their own PostgreSQL
-database, configured with HISTORY_DATABASE_URL, e.g.
-
-    HISTORY_DATABASE_URL=postgresql+psycopg2://user:password@host:5432/qc_db
-"""
 import logging
 import os
 from contextlib import contextmanager
