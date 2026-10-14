@@ -12,7 +12,7 @@ load_dotenv()
 class TestCaseAgent:
     def __init__(self):
         self.client = OpenAIChatClient(
-            model=os.getenv("OPENAI_MODEL")
+            model=os.getenv("AI_MODEL")
         )
 
         self.instructions = Path(

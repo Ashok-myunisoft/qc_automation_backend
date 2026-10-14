@@ -148,9 +148,9 @@ the Business Context. A row built on a guess fails on the real application.
 - Picklist and lookup values (employee, item, type, number ...) come from the
   Business Context only. When none is supplied use PLACEHOLDER_ values; never
   write names like "Employee 01", "John Doe" or "Standard" as if they were real.
-- The picklist step always clicks the first matching row, so never write a
-  scenario that selects a value that does not exist or expects a "not found"
-  result.
+- The picklist step selects the row that contains the given value (a
+  PLACEHOLDER_ value selects the first row), so never write a scenario that
+  selects a value that does not exist or expects a "not found" result.
 
 
 #SCREEN STRUCTURE — TABBED VS. DIRECT (CRITICAL — READ FIRST)
@@ -248,6 +248,68 @@ ROW CAP: one Examples table holds at most 25 rows. If a theme needs more,
 split it into a second Scenario Outline for the next theme (e.g. "Numeric
 boundaries" and "Text boundaries") instead of growing one table. Keep every
 row distinct — no two rows may test the same thing in the same way.
+
+#TEST DESIGN RULES (CRITICAL — confirmed real failures, do not repeat)
+
+These rules apply to every screen. They decide HOW scenarios are written; the
+screen decides WHICH ones exist.
+
+1. ONLY WHAT THE SCREEN HAS. Write Create / Update / Delete / Edit scenarios
+   only for actions that appear in the Project Analysis (business_actions,
+   buttons, or the save/delete behaviour it describes). A screen with no Delete
+   action gets no Delete scenarios; a screen that only saves gets Create and
+   validation scenarios. Never copy a CRUD pattern onto a screen that does not
+   support it.
+
+2. EVERY VALIDATION OUTLINE FILLS THE FORM. A mandatory-field or validation
+   Scenario Outline must contain a field step for EVERY mandatory field, then
+   the save step. An outline whose only step is "I click the save button" is
+   WRONG - it cannot isolate any field. To test one missing field, fill every
+   other mandatory field with valid data and leave only that field empty (an
+   empty cell for a combobox / date / radio / checkbox / textarea / input step;
+   for a picklist use a separate outline that omits that picklist step).
+     BAD   Scenario Outline: Mandatory validation "<Condition>"
+             When I click the save button
+             Then I should see a confirmation message "<ExpectedResult>"
+     GOOD  Scenario Outline: Mandatory validation "<Condition>"
+             When I enter "<Code>" in the "ItemCode" input field
+             And I enter "<Name>" in the "ItemName" input field
+             And I click the save button
+             Then I should see a confirmation message "<ExpectedResult>"
+             Examples: one row per mandatory field, each with exactly that cell
+             empty, plus one row with all of them empty.
+
+3. UPDATE AND DELETE USE RECORDS THIS FILE CREATED. The scenarios run in file
+   order, so an Update or Delete row must use the exact code / name that an
+   earlier Create row of the same file saved - spelled identically (never
+   "DEC2023" in one place and "DEC 2023" in another). Never update or delete a
+   record that no scenario in the file created, unless the Business Context
+   supplies a real existing record.
+
+4. UNIQUE CREATE DATA. Every Create row saves a different code / number / name
+   (add a distinguishing suffix such as _01, _02). Two rows saving the same
+   unique value would fail as duplicates - write a duplicate row only on
+   purpose, with the real duplicate message from the Project Analysis, and put
+   it AFTER the row that saved that value.
+
+5. RADIO AND COMBOBOX VALUES ARE WHAT THE USER SEES. Use the visible option
+   text (for example Standard, Weighted Average), not an internal code, whenever
+   the Project Analysis lists the option labels. Use a numeric code only when
+   the Project Analysis shows that the screen itself displays that number.
+
+6. MINIMUM BREADTH, NEVER PADDING. For every screen, write one Scenario Outline
+   for each of these themes the Project Analysis supports, each with at least
+   3 distinct Examples rows where distinct rows exist:
+     a. Create - valid data (basic and full)
+     b. Mandatory-field validation (rule 2)
+     c. Field format / length / boundary validation (only where a rule exists)
+     d. Update (only if the screen has update or edit)
+     e. Delete (only if the screen has delete)
+     f. Dropdown / picklist / radio / checkbox variants and dependent fields
+     g. Duplicate or business-rule checks (only where the analysis states one)
+   Aim for at least 5 Scenario Outlines per screen. If the screen genuinely
+   supports fewer themes, write all that it supports and stop - never invent a
+   theme or a row to reach the number.
 
 #SCENARIO DEPTH (CRITICAL — NO FIXED SCENARIO COUNT)
 

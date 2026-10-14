@@ -189,11 +189,22 @@ _TEMPLATE_BLOCK = r"""import { Given, When, Then } from "@badeball/cypress-cucum
 const creds = Cypress.env('TestConnections').UILogin;
 
 Then("I select {string} in the {string} picklist field", (value, field) => {
+  if (!value || !String(value).trim()) {
+    return; // nothing to select - the field stays empty
+  }
   cy.get(`[data-cy="${field}-PickListDrop"]`).click({ force: true });
-  cy.wait(500);
-  cy.get("[data-cy='PicklistSearchBar']").click().clear().type(value);
-  cy.wait(2000);
-  cy.get('.ag-row-even > .ag-column-first').click({ force: true });
+  cy.get("[data-cy='PicklistSearchBar']").should('be.visible').click().clear().type(value);
+  cy.get('.ag-row', { timeout: 15000 }).should('exist');
+  if (/^PLACEHOLDER_/i.test(String(value))) {
+    // no real test data was supplied for this value: take the first row of the list
+    cy.get('.ag-row-even > .ag-column-first', { timeout: 15000 }).first().click({ force: true });
+  } else {
+    // pick the row that really contains the requested value, never just "the first row"
+    cy.contains('.ag-row', String(value).trim(), { timeout: 15000 })
+      .find('.ag-column-first')
+      .first()
+      .click({ force: true });
+  }
 });
 
 Then("I enter {string} in the {string} input field", (value, field) => {
@@ -210,8 +221,14 @@ Then("I enter {string} in the {string} input field", (value, field) => {
 });
 
 Then("I should see a confirmation message {string}", (value) => {
-  cy.contains(value).should('be.visible');
-  cy.get('.mat-mdc-dialog-component-host > .mat-icon').click();
+  cy.contains(value, { timeout: 15000 }).should('be.visible');
+  // close the message dialog only when it has a close icon (inline / toast messages have none)
+  cy.get('body').then(($body) => {
+    const $close = $body.find('.mat-mdc-dialog-component-host > .mat-icon');
+    if ($close.length) {
+      cy.wrap($close.first()).click();
+    }
+  });
 });
 
 Then("I click the Delete button", () => {
@@ -338,7 +355,24 @@ Then("I select {string} in the {string} radio field", (value, field) => {
   }
   controlOf(field, '-RadioBox').then(($el) => {
     const $group = $el.closest('mat-radio-group, gb-radiobutton, .mat-radio-group, .mat-mdc-radio-group');
-    cy.wrap($group.length ? $group : $el.parent()).contains('mat-radio-button, label', value).click({ force: true });
+    const $scope = $group.length ? $group : $el.parent();
+    const wanted = String(value).trim().toLowerCase();
+    const $buttons = $scope.find('mat-radio-button, label');
+    // 1) the option whose visible label is exactly the value, 2) a label that contains it,
+    // 3) the option whose underlying radio value is the value (for codes such as 0 / 1)
+    let $hit = $buttons.filter((i, e) => Cypress.$(e).text().trim().toLowerCase() === wanted);
+    if (!$hit.length) {
+      $hit = $buttons.filter((i, e) => Cypress.$(e).text().toLowerCase().includes(wanted));
+    }
+    if (!$hit.length) {
+      const $byValue = $scope.find('input[type="radio"]').filter((i, e) => String(e.value).trim().toLowerCase() === wanted);
+      $hit = $byValue.closest('mat-radio-button, label');
+      if (!$hit.length) {
+        $hit = $byValue;
+      }
+    }
+    expect($hit.length, `a radio option "${value}" in ${field}`).to.be.greaterThan(0);
+    cy.wrap($hit.first()).click({ force: true });
   });
 });
 
