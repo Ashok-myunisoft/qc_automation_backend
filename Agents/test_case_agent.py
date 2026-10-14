@@ -47,7 +47,9 @@ Business Context:
 Reminder: every scenario must be a "Scenario Outline" with an aligned Examples table
 (Condition column, one column per field, ExpectedResult column, at most 25 rows per table),
 use the fixed step vocabulary, and cover the Save/form coverage matrix using only fields
-present in the Project Analysis.
+present in the Project Analysis. Every step line must start with Given, When, Then or And.
+Choose each field's step sentence (picklist / input / combobox / date / radio / checkbox /
+textarea) from the suffix of that field's verified data-cy.
 """
 
         response = await self.agent.run(user_message)
@@ -67,7 +69,10 @@ Rules for the repair:
   requires it. Keep every Scenario Outline, Rule, Background and Examples table.
 - Examples values must never contain double quotes - remove them from the values.
 - Use the exact step vocabulary from your instructions, spelled exactly the same
-  way (for example "I click the save button" - lowercase s).
+  way (for example "I click the save button" - lowercase s). Keep each field on the
+  step sentence for its control type (picklist / input / combobox / date / radio /
+  checkbox / textarea) - never change a combobox, date or radio step into a picklist
+  or input step. Every step line starts with Given, When, Then or And.
 - A picklist step must never receive an empty value. For a case that needs an
   empty picklist, put it in its own Scenario Outline that omits that picklist
   step, rather than leaving the cell empty. Fix EVERY listed row - when you are

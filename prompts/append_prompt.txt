@@ -45,10 +45,18 @@ every cell padded so the "|" characters line up.
 - Steps use ONLY the fixed vocabulary already used in the file:
     I select "<Value>" in the "<FieldName>" picklist field
     I enter "<Value>" in the "<FieldName>" input field
+    I select "<Value>" in the "<FieldName>" combobox field
+    I enter "<Value>" in the "<FieldName>" date field
+    I select "<Value>" in the "<FieldName>" radio field
+    I set "<Checked or Unchecked>" in the "<FieldName>" checkbox field
+    I enter "<Value>" in the "<FieldName>" textarea field
     I should see a confirmation message "<ExpectedResult>"
     I click the Delete button
     I click the save button   (plus the navigation / Add New / Update / Edit
                                steps already present in the file)
+  For a field that the existing file already uses, keep the SAME step sentence
+  (picklist / input / combobox / date / radio / checkbox / textarea) it uses there.
+  Every step line starts with Given, When, Then or And.
   <FieldName> is the data-cy base name (no -PickListDrop / -Input suffix), taken
   from field names already used in the existing file. Never use a display label
   and never invent a field. Validation messages and success messages both use
@@ -65,6 +73,8 @@ every cell padded so the "|" characters line up.
   "|" characters stay aligned — change no text.
 - Never add a second Scenario Outline whose title is identical to an existing
   one.
+- If the script starts with the line "// QC-AUTO-GENERATED SCRIPT", it is built by
+  code and is locked: return it UNCHANGED in the "script" field.
 - The script already contains the QC team's template block (the four template
   steps above, `beforeEach`, `loginSession`, and the `creds` line). NEVER edit,
   move, duplicate or re-add any of it, and never write another step definition

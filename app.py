@@ -31,6 +31,7 @@ from Agents.business_context_agent import BusinessContextAgent
 from service import report_builder
 from service import datacy_scan  # datacyscan
 from service import step_checker
+from service import script_builder
 from service import chunk_analysis
 from service import history_store
 from service import job_manager
@@ -1060,6 +1061,15 @@ async def _append_one_screen(existing_feature: str, existing_script: str,
     except Exception as e:
         logger.exception("append pipeline failed for %s", label)
         return {"error": str(e)}
+    # The script is built by code (service/script_builder.py) and is never edited
+    # by the AI or by hand: keep the existing one, and make the appended
+    # scenarios use the step sentence that matches each field's real control type.
+    if (isinstance(result, dict) and "error" not in result
+            and script_builder.is_generated(existing_script)):
+        result["script"] = existing_script
+        if isinstance(result.get("feature_file"), str):
+            result["feature_file"] = script_builder.normalize_feature(
+                result["feature_file"], script_builder.controls_from_script(existing_script))
     return result
 
 
@@ -1189,7 +1199,8 @@ def _log_step_findings(tag: str, findings, heading: str) -> None:
 
 
 async def _step_check_and_repair(tag: str, test_cases: str, generated_script: str,
-                                 automation_contract: dict | None):
+                                 automation_contract: dict | None,
+                                 controls: dict | None = None, script_locked: bool = False):
     """Runs the step checker on the generated pair, logs every finding to the
     backend log, and - only when there are critical findings - makes ONE repair
     attempt per agent (test_case_agent for feature defects, script_generate_agent
@@ -1208,6 +1219,16 @@ async def _step_check_and_repair(tag: str, test_cases: str, generated_script: st
 
     _log_step_findings(tag, findings, "initial")
 
+    if script_locked:
+        # The script is built by code and has exactly one definition per step
+        # sentence. A step with no definition therefore means the FEATURE used a
+        # sentence outside the fixed vocabulary - fix the feature, never the script.
+        for f in findings:
+            if f.fix_in == step_checker.FIX_SCRIPT and f.kind == "undefined_step":
+                f.fix_in = step_checker.FIX_FEATURE
+                f.hint = ("no step definition matches this text - rewrite it using ONLY the sentences "
+                          "from the fixed step vocabulary (keep the same meaning)")
+
     if step_checker.has_critical(findings):
         # 1) feature-side defects -> test_case_agent
         feature_side = [f for f in findings if f.fix_in == step_checker.FIX_FEATURE and f.severity != step_checker.MINOR]
@@ -1216,6 +1237,8 @@ async def _step_check_and_repair(tag: str, test_cases: str, generated_script: st
                 new_feature = await test_case_agent.repair_test_cases(
                     test_cases, step_checker.format_for_prompt(feature_side),
                 )
+                if controls is not None:
+                    new_feature = script_builder.normalize_feature(new_feature, controls)
                 after = _safe_step_check(new_feature, generated_script)
                 reasons = []
                 if after is None:
@@ -1242,7 +1265,10 @@ async def _step_check_and_repair(tag: str, test_cases: str, generated_script: st
 
         # 2) script-side defects -> script_generate_agent (re-evaluated after the feature repair)
         script_side = [f for f in findings if f.fix_in == step_checker.FIX_SCRIPT and f.severity != step_checker.MINOR]
-        if script_side and step_checker.has_critical(script_side):
+        if script_locked and script_side:
+            logger.warning("%sstep check: %d script-side finding(s) left alone - the script is code-built and locked.",
+                           tag, len(script_side))
+        elif script_side and step_checker.has_critical(script_side):
             try:
                 new_script = await script_generate_agent.repair_script(
                     generated_script, test_cases, step_checker.format_for_prompt(script_side), automation_contract,
@@ -1423,22 +1449,41 @@ async def _generate_one_screen(ws: WebSocket, src: GitLabService, module: str,
             business_context=business_context, tag=tag, ws=ws,
         )
 
-        locator_map = _build_locator_map(project_analysis)
-        shared_component_locators = _build_shared_component_locator_map(project_context)
-        # ProjectAnalysisAgent's verified automation contract is authoritative.
-        # The lightweight direct-source scanner can only supplement a missing
-        # entry; it must never replace the agent's component-aware conclusion.
-        _add_missing_locator_fallbacks(locator_map, shared_component_locators)
         automation_contract = _build_automation_contract(project_analysis)
-        await send_log(ws, f"{tag}running script generate agent ({len(locator_map)} known locator(s), {len(shared_component_locators)} resolved from shared component source)...", "secondary")
-        generated_script = await script_generate_agent.generate_script(
-            test_cases=test_cases,
-            locator_map=locator_map,
-            automation_contract=automation_contract,
-        )
+        # The script is built by code from the verified (scan-merged) data-cy values -
+        # see service/script_builder.py. The feature is first made to use the step
+        # sentence that matches each field's real control type, so the two files agree.
+        controls = script_builder.controls_from_analysis(project_analysis)
+        script_locked = False
+        generated_script = ""
+        try:
+            test_cases = script_builder.normalize_feature(test_cases, controls)
+            generated_script = script_builder.build_script(project_analysis)
+            script_locked = True
+            kinds: dict[str, int] = {}
+            for info in controls.values():
+                kinds[info["kind"]] = kinds.get(info["kind"], 0) + 1
+            summary = ", ".join(f"{n} {k}" for k, n in sorted(kinds.items())) or "none"
+            await send_log(ws, f"{tag}script built from {len(controls)} verified control(s) ({summary}).", "success")
+            if not controls:
+                await send_log(ws, f"{tag}no verified data-cy found for this screen - field steps will use the QC naming convention.", "muted")
+        except Exception:
+            logger.exception("%sscript builder failed - falling back to the script agent", tag)
+            await send_log(ws, f"{tag}code-built script failed - falling back to the script agent...", "muted")
+        if not script_locked:
+            locator_map = _build_locator_map(project_analysis)
+            shared_component_locators = _build_shared_component_locator_map(project_context)
+            _add_missing_locator_fallbacks(locator_map, shared_component_locators)
+            await send_log(ws, f"{tag}running script generate agent ({len(locator_map)} known locator(s), {len(shared_component_locators)} resolved from shared component source)...", "secondary")
+            generated_script = await script_generate_agent.generate_script(
+                test_cases=test_cases,
+                locator_map=locator_map,
+                automation_contract=automation_contract,
+            )
 
         test_cases, generated_script, step_findings, step_repaired = await _step_check_and_repair(
             tag, test_cases, generated_script, automation_contract,
+            controls=controls if script_locked else None, script_locked=script_locked,
         )
 
         await send_log(ws, f"{tag}running validate agent...", "secondary")
@@ -1899,8 +1944,7 @@ async def handle_approve(ws: WebSocket, session: dict, msg: dict | None = None):
         entry = screens_list[index]
         if isinstance(msg.get("feature"), str):
             entry["feature"] = msg["feature"]
-        if isinstance(msg.get("script"), str):
-            entry["script"] = msg["script"]
+        # msg["script"] is deliberately ignored: the script is built by code and is not editable.
 
         resolved = entry["resolved"]
         await send_status(ws, "running")
@@ -1929,11 +1973,9 @@ async def handle_approve(ws: WebSocket, session: dict, msg: dict | None = None):
         return
 
     edited_feature = msg.get("feature")
-    edited_script  = msg.get("script")
+    # msg["script"] is deliberately ignored: the script is built by code and is not editable.
     if isinstance(edited_feature, str):
         session["feature"] = edited_feature
-    if isinstance(edited_script, str):
-        session["script"] = edited_script
 
     resolved = session["resolved"]
     await send_status(ws, "running")

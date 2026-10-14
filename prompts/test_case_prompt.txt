@@ -44,10 +44,16 @@ two wordings for the same real action.
 
 Match the action wording to the field type shown in Project Analysis:
 
-- dropdowns, picklists, comboboxes, lookups and select-style fields use the
+- picklists and lookups (data-cy ends in -PickList / -PickListDrop) use the
   "select ... picklist field" step
-- free-text inputs, numbers, dates, textareas and fields whose placeholders
-  indicate entry use the "enter ... input field" step
+- comboboxes (data-cy ends in -ComboBox) use the "select ... combobox field" step
+- date fields (data-cy ends in -DatePicker) use the "enter ... date field" step
+- radio buttons (data-cy ends in -RadioBox) use the "select ... radio field" step
+- checkboxes (data-cy ends in -CheckBox / -UnCheckBox) use the
+  "set ... checkbox field" step, with the value Checked or Unchecked
+- textareas (data-cy ends in -Textarea) use the "enter ... textarea field" step
+- free-text inputs and numbers (data-cy ends in -Input) and fields whose
+  placeholders indicate entry use the "enter ... input field" step
 - do not describe dropdown-style fields as if the user types into them
 - do not describe free-text fields as if the user selects from them
 - if the field classification is ambiguous, follow the component kind
@@ -56,18 +62,30 @@ Match the action wording to the field type shown in Project Analysis:
 
 #FIXED STEP VOCABULARY (QC TEAM TEMPLATES — CRITICAL, NEVER REPHRASE)
 
-These four steps already have definitions owned by the QC team. Use exactly
-these sentences, with the quotes and the placeholders as shown:
+These steps already have definitions (the first four are owned by the QC team,
+the field steps after them are generated from the real data-cy of the screen).
+Use exactly these sentences, with the quotes and the placeholders as shown:
 
   I select "<Value>" in the "<FieldName>" picklist field
   I enter "<Value>" in the "<FieldName>" input field
+  I select "<Value>" in the "<FieldName>" combobox field
+  I enter "<Value>" in the "<FieldName>" date field
+  I select "<Value>" in the "<FieldName>" radio field
+  I set "<Checked or Unchecked>" in the "<FieldName>" checkbox field
+  I enter "<Value>" in the "<FieldName>" textarea field
   I should see a confirmation message "<ExpectedResult>"
   I click the Delete button
 
+Pick the field sentence from the field's REAL data-cy suffix in Project Analysis
+(see the list above). Using a picklist or input sentence for a combobox, date,
+radio, checkbox or textarea field makes the test fail on the real screen.
+
 <FieldName> is the field's REAL data-cy name from Project Analysis, with the
-control suffix removed. The definitions add the suffix themselves:
+control suffix removed. For the two QC steps the definitions add the suffix
+themselves:
   picklist field  -> "<FieldName>-PickListDrop"
   input field     -> "<FieldName>-Input"
+(the other field steps look up the exact verified data-cy of that field).
 So a field whose data_cy / automation_locator.value is
 "BizTransactionTypeName-PickListDrop" is written as "BizTransactionTypeName",
 and "MMDetailTransactionQuantity0-Input" is written as
@@ -90,6 +108,9 @@ same way, so one definition can serve every scenario:
   I click the save button
   I click the Update button
   I click the Edit button
+
+Empty values: the combobox, date, radio, checkbox and textarea steps, like the
+input step, simply skip an empty value, so an empty cell is allowed for them.
 
 Picklist caution: the picklist step has no empty-value guard — an empty value
 would select the first row of the list. NEVER leave a picklist cell empty in an

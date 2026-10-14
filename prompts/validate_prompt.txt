@@ -135,7 +135,11 @@ b) NO DUPLICATES — each template step expression, `beforeEach` and
    expression could also match a template step (for example another
    "I select {string} in the {string} ..." or "I enter {string} in the
    {string} ..." step, or a second confirmation-message / Delete step) is
-   CRITICAL (ambiguous step). A second `beforeEach` or a second login function
+   CRITICAL (ambiguous step). EXCEPTION: the code-built field steps
+   "... in the {string} combobox field", "... date field", "... radio field",
+   "... checkbox field" and "... textarea field" are distinct, fully-specified
+   expressions that cannot match the picklist / input template steps - they are
+   NOT ambiguous and must not be reported. A second `beforeEach` or a second login function
    is CRITICAL.
 c) EVERY FEATURE STEP HAS A DEFINITION — list every distinct step sentence in
    the feature (after removing the Given/When/Then/And/But keyword, with each
@@ -147,9 +151,12 @@ c) EVERY FEATURE STEP HAS A DEFINITION — list every distinct step sentence in
 d) STEP WORDING — feature steps that perform the template actions must use the
    template wording exactly ("I select ... in the ... picklist field",
    "I enter ... in the ... input field", "I should see a confirmation message",
-   "I click the Delete button"). A near-miss wording (for example "validation
-   message", "... ComboBox field", "... name field", "... code field") is
-   CRITICAL, because it has no definition.
+   "I click the Delete button"). The code-built field steps are also valid
+   wording: "I select ... combobox field", "I enter ... date field",
+   "I select ... radio field", "I set ... checkbox field" and
+   "I enter ... textarea field". A near-miss wording (for example "validation
+   message", "... name field", "... code field") is CRITICAL, because it has
+   no definition.
 e) FIELD ARGUMENT — the "{string}" field argument of the select/enter steps must
    be a data-cy base name (no spaces, no -PickListDrop / -Input suffix, not a
    display label). If Known Real Locators were supplied, it must equal the
