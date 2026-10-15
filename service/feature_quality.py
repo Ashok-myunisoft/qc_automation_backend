@@ -17,13 +17,25 @@ not depend on the model following a long prompt perfectly:
   6. Delete is split into two scenarios: confirm (Yes) and cancel (No), with the
      delete prompt checked before it is answered.
 
+  7. A Create row that leaves a REQUIRED field empty expects the "X* Should not be Empty"
+     messages (it never expects "Details Saved Successfully"); validation rows run first.
+  8. Empty / duplicate generic scenarios (smoke test, "save with nothing" that expects success,
+     update that changes nothing) are removed.
+  9. Update / Delete scenarios that sit before the Rule blocks that create their records are
+     moved behind them, so the file always runs Create -> Update -> Delete.
+ 10. Update rows expect the confirmed "Updated" message and the Yes-delete scenario checks the
+     confirmed "deleted" message (both read from config/expected_messages.json, never guessed).
+ 11. Examples tables are re-aligned.
+
 Everything is best-effort: refine_feature() never raises, and any step that
 fails leaves the feature exactly as it was before that step.
 """
 from __future__ import annotations
 
+import json
 import logging
 import re
+from pathlib import Path
 
 from service import script_builder
 
@@ -649,6 +661,9 @@ def _split_delete(o: Outline, controls: dict) -> list[Outline] | None:
             prompt = e
         elif not _PROMPT_RE.search(e) and not success:
             success = e
+    confirmed_delete = _pick_message(("delet",))
+    if confirmed_delete:
+        success = confirmed_delete        # the message the QC team confirmed beats the model's guess
     base = _title_base(o)
     indent, ti = o.indent, o.table_indent
     step_indent = o.steps[0][0] if o.steps else indent + "  "
@@ -670,9 +685,10 @@ def _split_delete(o: Outline, controls: dict) -> list[Outline] | None:
         if confirm:
             st.append([step_indent, "When", "I confirm the delete"])
             if success:
+                # checking the message also closes its pop-up, so the next step is never blocked
                 st.append([step_indent, "Then", 'I should see a confirmation message "<ExpectedResult>"'])
-            else:
-                st.append([step_indent, "Then", f'I should no longer see the record "<{key_ph}>" using the "{field}" field'])
+            st.append([step_indent, "Then" if not success else "And",
+                       f'I should no longer see the record "<{key_ph}>" using the "{field}" field'])
         else:
             st.append([step_indent, "When", "I cancel the delete"])
             st.append([step_indent, "Then", f'I should still see the record "<{key_ph}>" using the "{field}" field'])
@@ -708,6 +724,7 @@ def _rewrite_records(items, controls: dict, report: dict) -> None:
             if _is_update(obj):
                 if _rewrite_update(obj, controls, report):
                     upd += 1
+                    _use_update_message(obj)
             elif obj.is_delete:
                 pair = _split_delete(obj, controls)
                 if pair:
@@ -723,6 +740,280 @@ def _rewrite_records(items, controls: dict, report: dict) -> None:
         report["notes"].append(f"{upd} update scenario(s) now open the record by search / picklist")
     if dele:
         report["notes"].append(f"{dele} delete scenario(s) split into confirm (Yes) and cancel (No)")
+
+
+# ---------------------------------------------------------------------------
+# confirmed messages (config/expected_messages.json, key "all")
+# ---------------------------------------------------------------------------
+_CONFIG_PATH = Path(__file__).resolve().parent.parent / "config" / "expected_messages.json"
+_VALIDATION_RE = re.compile(r"should not be empty", re.IGNORECASE)
+
+
+def _confirmed_messages() -> list[str]:
+    """Messages the QC team confirmed on the real application (raw text)."""
+    try:
+        data = json.loads(_CONFIG_PATH.read_text(encoding="utf-8"))
+        return [m.strip() for m in (data.get("all") or []) if isinstance(m, str) and m.strip()]
+    except Exception:
+        return []
+
+
+def _pick_message(words: tuple[str, ...]) -> str:
+    for m in _confirmed_messages():
+        low = m.lower()
+        if "success" in low and all(w in low for w in words):
+            return m
+    return ""
+
+
+# ---------------------------------------------------------------------------
+# step 2b - required fields left empty on a Create row
+# ---------------------------------------------------------------------------
+def required_from_analysis(project_analysis: dict | None) -> set[str]:
+    """Base names of fields the analysis marks required (required flag, or a * on the label)."""
+    out: set[str] = set()
+    try:
+        for page in script_builder._pages(project_analysis or {}):
+            fields = []
+            for form in page.get("forms") or []:
+                if isinstance(form, dict):
+                    fields.extend(f for f in form.get("fields") or [] if isinstance(f, dict))
+            for field in fields:
+                data_cy = script_builder._verified_data_cy(field)
+                if not data_cy:
+                    continue
+                if field.get("required") is True or "*" in str(field.get("label") or ""):
+                    base, _kind = script_builder._split_data_cy(data_cy, field)
+                    out.add(base)
+    except Exception:
+        logger.exception("could not read required fields from the analysis")
+    return out
+
+
+_EMPTYISH_COND_RE = re.compile(r"empty|missing|without|blank|no value|omit", re.IGNORECASE)
+
+
+def _mandatory_fields(outlines: list[Outline], fields: _Fields, required: set[str]) -> set[str]:
+    mandatory = {b for b in required if b in fields.labels or fields.by_norm.get(_n(b)) == b}
+    for o in outlines:
+        if not o.simple or o.expected_col < 0:
+            continue
+        for row in o.rows:
+            m = _row_missing(o, row, fields)
+            if m:
+                mandatory |= m
+    return {b for b in mandatory if fields.label_of(b)}
+
+
+def _is_validation_row(o: Outline, row: list[str]) -> bool:
+    return bool(o.expected_col >= 0 and _VALIDATION_RE.search(row[o.expected_col] or ""))
+
+
+def _fix_required_empty(outlines: list[Outline], fields: _Fields, required: set[str], report: dict) -> None:
+    mandatory = _mandatory_fields(outlines, fields, required)
+    if not mandatory:
+        return
+    fixed = 0
+    for o in outlines:
+        if not o.simple or not o.is_create or not o.has_save or o.is_delete or o.expected_col < 0:
+            continue
+        ec = o.expected_col
+        cols = o.field_columns()
+        cond_c = o.col("Condition")
+        bare = not o.field_steps()
+        for row in o.rows:
+            if _is_validation_row(o, row) or not _SUCCESS_RE.search(row[ec] or ""):
+                continue
+            wording_empty = cond_c >= 0 and bool(_EMPTYISH_COND_RE.search(row[cond_c] or ""))
+            empty = []
+            for base in sorted(mandatory):
+                key = _n(base)
+                if key in cols:
+                    if row[o.col(cols[key][0])].strip() == "":
+                        empty.append(base)
+                elif bare or wording_empty:
+                    empty.append(base)       # no step fills it: it stays empty
+            if not empty:
+                continue
+            row[ec] = ", ".join(f"{fields.label_of(b)}* Should not be Empty" for b in empty)
+            if cond_c >= 0 and not wording_empty:
+                names = " and ".join(fields.label_of(b) for b in empty)
+                row[cond_c] = f"Save with {names} empty"
+            o.modified = True
+            fixed += 1
+    if fixed:
+        report["notes"].append(f"{fixed} row(s) that leave a required field empty now expect the validation message(s)")
+
+
+def _all_required_empty_row_exists(outlines: list[Outline], fields: _Fields, mandatory: set[str]) -> bool:
+    for o in outlines:
+        if not o.simple or not o.is_create or not o.field_steps():
+            continue
+        cols = o.field_columns()
+        for row in o.rows:
+            if not _is_validation_row(o, row):
+                continue
+            if all(_n(b) in cols and row[o.col(cols[_n(b)][0])].strip() == "" for b in mandatory):
+                return True
+    return False
+
+
+# ---------------------------------------------------------------------------
+# step 3b - generic scenarios that test nothing
+# ---------------------------------------------------------------------------
+_CONFIRM_PREFIX = "I should see a confirmation message"
+
+
+def _drop_empty_scenarios(items, fields: _Fields, required: set[str], report: dict) -> None:
+    outlines = [obj for kind, obj in items if kind == "outline" and obj.simple]
+    mandatory = _mandatory_fields(outlines, fields, required)
+    full_update_exists = any(
+        _is_update(o) and len(o.field_steps()) > 1 for o in outlines)
+    covered = bool(mandatory) and _all_required_empty_row_exists(outlines, fields, mandatory)
+    dropped = 0
+    survivors = []
+    for kind, obj in items:
+        if kind != "outline" or not obj.simple:
+            survivors.append((kind, obj))
+            continue
+        o = obj
+        texts = o.step_texts()
+        ec = o.expected_col
+        drop = False
+        # smoke / "nothing happens" scenario: only a confirmation step, empty expected result
+        if texts and all(t.startswith(_CONFIRM_PREFIX) for t in texts) and ec >= 0 \
+                and all(not r[ec].strip() for r in o.rows):
+            drop = True
+        # "Add + Save with nothing filled": its all-empty case is already a row elsewhere
+        elif o.is_create and o.has_save and not o.field_steps() and covered \
+                and ec >= 0 and all(_is_validation_row(o, r) for r in o.rows):
+            drop = True
+        # an update that changes nothing, while a real update scenario exists
+        elif _is_update(o) and len(o.field_steps()) == 1 and full_update_exists:
+            drop = True
+        if drop:
+            dropped += 1
+            continue
+        survivors.append((kind, o))
+    items[:] = survivors
+    if dropped:
+        report["notes"].append(f"{dropped} empty / repeated generic scenario(s) removed")
+
+
+def _validation_rows_first(outlines: list[Outline], report: dict) -> None:
+    """Inside a Create table the rows that expect a validation error go first: nothing is saved
+    yet, so a picklist value cannot load an existing record and turn the row into an update."""
+    moved = 0
+    for o in outlines:
+        if not o.simple or not o.is_create or o.expected_col < 0:
+            continue
+        first = [r for r in o.rows if _is_validation_row(o, r)]
+        rest = [r for r in o.rows if not _is_validation_row(o, r)]
+        if first and rest and (first + rest) != o.rows:
+            o.rows = first + rest
+            o.modified = True
+            moved += 1
+    if moved:
+        report["notes"].append("validation rows placed before the rows that save a record")
+
+
+# ---------------------------------------------------------------------------
+# step 4b - record scenarios before the creating Rule blocks
+# ---------------------------------------------------------------------------
+def _move_record_scenarios(items, report: dict) -> None:
+    rule_idx = [i for i, it in enumerate(items) if _is_rule(it)]
+    if not rule_idx:
+        return
+    first_rule = rule_idx[0]
+    def saves_record(o: Outline) -> bool:
+        return o.is_create and o.expected_col >= 0 and any(
+            _SUCCESS_RE.search(r[o.expected_col] or "") and not _is_validation_row(o, r) for r in o.rows)
+
+    pre_has_create = any(k == "outline" and o.simple and saves_record(o) for k, o in items[:first_rule])
+    later_has_create = any(k == "outline" and o.simple and saves_record(o) for k, o in items[first_rule:])
+    if pre_has_create or not later_has_create:
+        return
+    moving = [(k, o) for k, o in items[:first_rule]
+              if k == "outline" and o.simple and (_is_update(o) or o.is_delete)]
+    if not moving:
+        return
+    ids = {id(o) for _k, o in moving}
+    kept = [(k, o) for k, o in items if not (k == "outline" and id(o) in ids)]
+    kept.append(("raw", [""]))
+    for k, o in moving:
+        kept.append((k, o))
+        kept.append(("raw", [""]))
+    items[:] = kept
+    report["notes"].append(f"{len(moving)} update / delete scenario(s) moved behind the scenarios that create their records")
+
+
+# ---------------------------------------------------------------------------
+# step 7 - confirmed update message + table alignment
+# ---------------------------------------------------------------------------
+def _use_update_message(o: Outline) -> int:
+    msg = _pick_message(("updated",))
+    if not msg or o.expected_col < 0:
+        return 0
+    n = 0
+    for row in o.rows:
+        e = row[o.expected_col]
+        if re.search(r"saved successfully", e or "", re.IGNORECASE) and e.strip() != msg:
+            row[o.expected_col] = msg
+            n += 1
+    if n:
+        o.modified = True
+    return n
+
+
+def _merge_split_deletes(items, report: dict) -> None:
+    """One cancel (No) and one confirm (Yes) scenario per file: delete scenarios that came from
+    several places (top level and Rule blocks) are merged into the first one's table."""
+    first_of: dict = {}
+    drop: set[int] = set()
+    merged = 0
+    for idx, (kind, o) in enumerate(items):
+        if kind != "outline" or not o.simple or len(o.header) < 2:
+            continue
+        if not any(t.startswith("I request to delete the record") for t in o.step_texts()):
+            continue
+        sig = (tuple(o.step_texts()), tuple(h.strip().lower() for h in o.header))
+        if sig not in first_of:
+            first_of[sig] = idx
+            continue
+        keeper = items[first_of[sig]][1]
+        have = {r[1].strip().lower() for r in keeper.rows}
+        for r in o.rows:
+            if r[1].strip().lower() not in have and r[1].strip():
+                keeper.rows.append(r)
+                have.add(r[1].strip().lower())
+        keeper.modified = True
+        drop.add(idx)
+        merged += 1
+    if drop:
+        items[:] = [it for i, it in enumerate(items) if i not in drop]
+        report["notes"].append(f"{merged} repeated delete scenario(s) merged into one confirm (Yes) / one cancel (No)")
+
+
+def _table_aligned(o: Outline) -> bool:
+    bars = None
+    for line in o.raw:
+        if line.strip().startswith("|"):
+            pos = [i for i, ch in enumerate(line) if ch == "|"]
+            if bars is None:
+                bars = pos
+            elif pos != bars:
+                return False
+    return True
+
+
+def _align_tables(items, report: dict) -> None:
+    fixed = 0
+    for kind, obj in items:
+        if kind == "outline" and obj.simple and not obj.modified and not _table_aligned(obj):
+            obj.modified = True
+            fixed += 1
+    if fixed:
+        report["notes"].append(f"{fixed} Examples table(s) re-aligned")
 
 
 # ---------------------------------------------------------------------------
@@ -745,13 +1036,21 @@ def refine_feature(feature_text: str, project_analysis: dict | None, controls: d
         def outlines():
             return [obj for kind, obj in items if kind == "outline" and obj.simple]
 
+        required = required_from_analysis(project_analysis)
+
         for name, fn in (
             ("labels", lambda: _fix_labels(outlines(), fields, report)),
+            ("required empty", lambda: _fix_required_empty(outlines(), fields, required, report)),
+            ("empty scenarios", lambda: _drop_empty_scenarios(items, fields, required, report)),
             ("missing rows", lambda: _fix_missing_rows(outlines(), fields, controls, report)),
             ("duplicates", lambda: _dedupe(items, report)),
+            ("validation first", lambda: _validation_rows_first(outlines(), report)),
+            ("move records", lambda: _move_record_scenarios(items, report)),
             ("order", lambda: _delete_last(items, report)),
             ("records", lambda: _records(items, report)),
             ("update / delete", lambda: _rewrite_records(items, controls, report)),
+            ("merge deletes", lambda: _merge_split_deletes(items, report)),
+            ("alignment", lambda: _align_tables(items, report)),
         ):
             try:
                 fn()

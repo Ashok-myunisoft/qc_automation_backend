@@ -349,6 +349,9 @@ function clickAction(name) {
 function expectMessages(value) {
   const squash = (t) => String(t || '').replace(/\s+/g, ' ').trim();
   const whole = squash(value);
+  if (!whole) {
+    return;                                         // no message expected: nothing to look for
+  }
   const parts = whole.split(/\s*[,;]\s*/).map(squash).filter(Boolean);
   cy.get('body', { timeout: 15000 }).should(($body) => {
     const text = squash($body.text());
@@ -702,21 +705,47 @@ Then("I should see the delete prompt {string}", (value) => {
 });
 
 const DIALOG_BUTTONS = 'div.alertbutton, [role="dialog"] button, [role="alertdialog"] button, mat-dialog-container button, .mat-mdc-dialog-container button, .cdk-overlay-pane button';
+const DIALOG_BOX = '.cdk-overlay-container, [role="dialog"], [role="alertdialog"], mat-dialog-container, .mat-mdc-dialog-container, [class*="dialog"], [class*="modal"], [class*="confirm"], [class*="alert"], [class*="popup"]';
 
+// The Yes / No (OK / Cancel) button of the open prompt. First the usual dialog buttons are
+// searched; when the prompt draws its buttons some other way (a div, a span), any visible
+// element inside a dialog-like box whose whole text is the label is used.
 function dialogButton($body, re) {
-  return $body.find(DIALOG_BUTTONS).filter(':visible').filter((i, e) => re.test(squashText(Cypress.$(e).text()))).first();
+  const $hit = $body.find(DIALOG_BUTTONS).filter(':visible').filter((i, e) => re.test(squashText(Cypress.$(e).text()))).first();
+  if ($hit.length) {
+    return $hit;
+  }
+  return $body.find('button, div, span, a, p, label').filter(':visible').filter((i, e) => {
+    return e.children.length === 0 && re.test(squashText(e.textContent)) && Cypress.$(e).closest(DIALOG_BOX).length > 0;
+  }).last();
 }
+
+// Tries the labels in order of preference ("Yes" before "OK" ...), so a prompt that carries
+// both an affirmative and a negative button always gets the right one.
+function dialogChoice($body, labels) {
+  for (const re of labels) {
+    const $b = dialogButton($body, re);
+    if ($b.length) {
+      return $b;
+    }
+  }
+  return Cypress.$();
+}
+
+const CONFIRM_LABELS = [/^yes$/i, /^(ok|confirm|proceed|delete)$/i];
+const CANCEL_LABELS = [/^no$/i, /^(cancel|close)$/i];
 
 Then("I confirm the delete", () => {
   cy.get('body', { timeout: 15000 }).should(($b) => {
-    const any = dialogButton($b, /^(yes|ok|confirm|delete|proceed)$/i).length > 0 || $b.find('div.alertbutton').filter(':visible').length > 0;
+    const any = dialogChoice($b, CONFIRM_LABELS).length > 0 || $b.find('div.alertbutton').filter(':visible').length > 0;
     expect(any, 'a visible Yes / OK button on the delete prompt').to.equal(true);
   });
   cy.get('body').then(($b) => {
-    let $btn = dialogButton($b, /^(yes|ok|confirm|delete|proceed)$/i);
+    let $btn = dialogChoice($b, CONFIRM_LABELS);
     if (!$btn.length) {
       $btn = $b.find('div.alertbutton').filter(':visible').first();
     }
+    Cypress.log({ name: 'delete', message: `answered the delete prompt with "${squashText($btn.text())}"` });
     cy.wrap($btn).click({ force: true });
   });
   cy.wait(2000);
@@ -724,15 +753,16 @@ Then("I confirm the delete", () => {
 
 Then("I cancel the delete", () => {
   cy.get('body', { timeout: 15000 }).should(($b) => {
-    const any = dialogButton($b, /^(no|cancel|close)$/i).length > 0
+    const any = dialogChoice($b, CANCEL_LABELS).length > 0
       || $b.find('.mat-mdc-dialog-component-host > .mat-icon').filter(':visible').length > 0;
     expect(any, 'a visible No / Cancel button (or close icon) on the delete prompt').to.equal(true);
   });
   cy.get('body').then(($b) => {
-    let $btn = dialogButton($b, /^(no|cancel|close)$/i);
+    let $btn = dialogChoice($b, CANCEL_LABELS);
     if (!$btn.length) {
       $btn = $b.find('.mat-mdc-dialog-component-host > .mat-icon').filter(':visible').first();
     }
+    Cypress.log({ name: 'delete', message: `answered the delete prompt with "${squashText($btn.text()) || 'close icon'}"` });
     cy.wrap($btn).click({ force: true });
   });
   cy.wait(1500);
@@ -764,8 +794,9 @@ Then("I should no longer see the record {string} using the {string} field", (val
   withRecordMode(field, v,
     () => recordInPicklist(field, v, false),
     () => {
+      cy.wait(1500);                                // the list refreshes a moment after the delete
       searchList(v);
-      cy.contains(v, { timeout: 5000 }).should('not.exist');
+      cy.contains(v, { timeout: 15000 }).should('not.exist');
     });
 });
 """
