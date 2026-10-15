@@ -33,6 +33,7 @@ from service import datacy_scan  # datacyscan
 from service import step_checker
 from service import script_builder
 from service import expected_results
+from service import feature_quality  # deterministic feature clean-up
 from service import chunk_analysis
 from service import history_store
 from service import job_manager
@@ -1468,6 +1469,20 @@ async def _generate_one_screen(ws: WebSocket, src: GitLabService, module: str,
             raise
         except Exception:
             logger.exception("%sexpected-result check failed - keeping the feature as generated", tag)
+
+        # Deterministic clean-up of the generated feature (service/feature_quality.py): real field
+        # labels in messages, correct "field missing" rows, no duplicate rows, update / delete
+        # scenarios that use records this file created, delete split into confirm / cancel.
+        # Best-effort: on any problem the feature is kept exactly as it was.
+        try:
+            _fq_controls = script_builder.controls_from_analysis(project_analysis)
+            test_cases, _fq_report = feature_quality.refine_feature(test_cases, project_analysis, _fq_controls)
+            for _fq_note in _fq_report["notes"]:
+                await send_log(ws, f"{tag}{_fq_note}.", "secondary")
+        except WebSocketDisconnect:
+            raise
+        except Exception:
+            logger.exception("%sfeature clean-up failed - keeping the feature as generated", tag)
 
         automation_contract = _build_automation_contract(project_analysis)
         # The script is built by code from the verified (scan-merged) data-cy values -

@@ -186,7 +186,7 @@ Then("I enter {string} in the {string} input field", (value, field) => {
 });
 
 Then("I should see a confirmation message {string}", (value) => {
-  cy.contains(value, { timeout: 15000 }).should('be.visible');
+  expectMessages(value);
   // close the message box (close icon OR OK button) so the next step is never blocked by it;
   // inline / toast messages have no box, so nothing is clicked for them
   closeOpenDialogs();
@@ -253,7 +253,7 @@ function controlOf(field, suffix) {
 }
 
 // Product default data-cy of every action button (used when no verified one is in ACTIONS).
-const DEFAULT_ACTIONS = { addNew: 'AddNewForm', save: 'SaveForm', update: 'UpdateForm', edit: 'EditForm' };
+const DEFAULT_ACTIONS = { addNew: 'AddNewForm', save: 'SaveForm', update: 'UpdateForm', edit: 'EditForm', delete: 'DeleteForm' };
 
 // Save and Update share one place on the form, so a screen shows only one of them
 // depending on whether the record is new or already open: try the asked one first,
@@ -271,22 +271,94 @@ function actionCandidates(name) {
   return list;
 }
 
+// Some screens are still being built and an action button has no data-cy yet. The verified
+// data-cy is always tried first; only when none of the candidates is on screen, a button is
+// looked for by a screen-specific class (btn-add-domain ...), by its title / aria-label, or
+// by its visible text. Every use of a fallback is written to the Cypress log.
+const ACTION_TEXT = {
+  addNew: /^\s*\+?\s*add(\s+new)?\b/i,
+  save: /^\s*save\s*$/i,
+  update: /^\s*update\s*$/i,
+  edit: /^\s*edit\s*$/i,
+  delete: /^\s*delete\s*$/i,
+};
+const ACTION_CLASS = {
+  addNew: '[class*="btn-add"], [class*="add-btn"], [class*="btn-new"], [class*="add-new"]',
+  save: '[class*="savebutton"], [class*="btn-save"]',
+  update: '[class*="updatebutton"], [class*="btn-update"]',
+  edit: '[class*="editbutton"], [class*="btn-edit"]',
+  delete: '[class*="deletebutton"], [class*="btn-delete"], [class*="delete-btn"]',
+};
+const CLICKABLE = 'button, [role="button"], a, span.formbuttons, div.btn, span.btn, [class*="btn"]';
+
+function fallbackAction($body, name) {
+  const order = name === 'save' ? ['save', 'update'] : name === 'update' ? ['update', 'save'] : [name];
+  for (const key of order) {
+    if (!ACTION_TEXT[key]) {
+      continue;
+    }
+    let $hit = $body.find(ACTION_CLASS[key]).filter(':visible');
+    if ($hit.length) {
+      return $hit.first();
+    }
+    $hit = $body.find('[title], [aria-label]').filter(':visible').filter((i, e) => ACTION_TEXT[key].test(String(e.getAttribute('title') || e.getAttribute('aria-label') || '').trim()));
+    if ($hit.length) {
+      return $hit.first();
+    }
+    $hit = $body.find(CLICKABLE).filter(':visible').filter((i, e) => ACTION_TEXT[key].test(Cypress.$(e).text()));
+    if ($hit.length) {
+      return $hit.first();
+    }
+  }
+  return Cypress.$();
+}
+
 function clickAction(name) {
   closeOpenDialogs();                               // a box left open by an earlier step would block this click
   const candidates = actionCandidates(name);
   const visibleOf = ($body, dataCy) => $body.find(`[data-cy="${dataCy}"]`).filter(':visible');
   cy.get('body', { timeout: 30000 }).should(($body) => {
-    const hit = candidates.find((v) => visibleOf($body, v).length > 0);
-    expect(hit, `a visible "${name}" button (${candidates.join(' / ')})`).to.be.a('string');
+    const hit = candidates.find((v) => visibleOf($body, v).length > 0)
+      || (fallbackAction($body, name).length > 0 ? 'fallback' : undefined);
+    expect(hit, `a visible "${name}" button (${candidates.join(' / ')}, or one found by class / title / text)`).to.be.a('string');
   });
   cy.get('body').then(($body) => {
-    const dataCy = candidates.find((v) => visibleOf($body, v).length > 0) || candidates[0];
+    const found = candidates.find((v) => visibleOf($body, v).length > 0);
+    if (!found) {
+      const $fallback = fallbackAction($body, name);
+      if ($fallback.length) {
+        Cypress.log({ name: 'fallback', message: `no data-cy found for "${name}" - clicked a button found by class / title / text` });
+        cy.wrap($fallback).scrollIntoView().should('not.be.disabled').click();
+        return;
+      }
+    }
+    const dataCy = found || candidates[0];
     cy.get(`[data-cy="${dataCy}"]`)
       .filter(':visible')
       .first()
       .scrollIntoView()
       .should('not.be.disabled')
       .click();
+  });
+}
+
+// Checks a message on screen. A message that is shown as one text is checked as before; a
+// combined expectation such as "A* Should not be Empty, B* Should not be Empty" is also
+// accepted when each part is on screen separately (the app lists them one per line, in its
+// own order).
+function expectMessages(value) {
+  const squash = (t) => String(t || '').replace(/\s+/g, ' ').trim();
+  const whole = squash(value);
+  const parts = whole.split(/\s*[,;]\s*/).map(squash).filter(Boolean);
+  cy.get('body', { timeout: 15000 }).should(($body) => {
+    const text = squash($body.text());
+    const ok = text.includes(whole) || (parts.length > 1 && parts.every((p) => text.includes(p)));
+    expect(ok, `message "${whole}" (or each of its parts) on screen`).to.equal(true);
+  });
+  cy.get('body').then(($body) => {
+    const text = squash($body.text());
+    const targets = text.includes(whole) ? [whole] : parts;
+    targets.forEach((t) => cy.contains(t, { timeout: 15000 }).should('be.visible'));
   });
 }
 
@@ -500,6 +572,201 @@ Then("I enter {string} in the {string} textarea field", (value, field) => {
     const $area = $el.is('textarea') ? $el : $el.find('textarea').first();
     cy.wrap($area).click({ force: true }).clear({ force: true }).type(value, { force: true, delay: 20 });
   });
+});
+
+// ---- existing records: picklist screens and list screens ----
+// Screens differ in how an existing record is reached. Some select it in a picklist
+// ("<field>-PickListDrop"); others show a list with a search box and an edit / delete icon on
+// each row (the search box and the icons usually have no data-cy). These steps work out which
+// kind of screen is open and do the matching thing.
+const squashText = (t) => String(t || '').replace(/\s+/g, ' ').trim();
+const ROW_ACTIONS = 'button, [role="button"], a, mat-icon, .mat-icon, [class*="btn"], [class*="icon"], i, svg';
+
+function findSearchBox($body) {
+  return $body.find('input').filter(':visible').filter((i, e) => {
+    const dc = String(e.getAttribute('data-cy') || '');
+    if (dc === 'PicklistSearchBar') {
+      return false;
+    }
+    if (String(e.getAttribute('type') || '').toLowerCase() === 'search') {
+      return true;
+    }
+    return /search/i.test([dc, e.getAttribute('placeholder'), e.getAttribute('aria-label'), e.getAttribute('name'), e.id].join(' '));
+  }).first();
+}
+
+function pickFromPicklist(field, value) {
+  cy.get(`[data-cy="${field}-PickListDrop"]`, { timeout: 30000 }).click({ force: true });
+  cy.get("[data-cy='PicklistSearchBar']").should('be.visible').click().clear().type(value);
+  cy.get('.ag-row', { timeout: 15000 }).should('exist');
+  if (/^PLACEHOLDER_/i.test(String(value))) {
+    cy.get('.ag-row-even > .ag-column-first', { timeout: 15000 }).first().click({ force: true });
+  } else {
+    cy.contains('.ag-row', String(value).trim(), { timeout: 15000 })
+      .find('.ag-column-first')
+      .first()
+      .click({ force: true });
+  }
+}
+
+function withRecordMode(field, value, ifPicklist, ifList) {
+  const picklistOn = ($b) => $b.find(`[data-cy="${field}-PickListDrop"]`).filter(':visible').length > 0;
+  cy.get('body', { timeout: 20000 }).should(($b) => {
+    expect(picklistOn($b) || findSearchBox($b).length > 0 || squashText($b.text()).includes(value),
+      `the "${field}" picklist, a search box or the record "${value}" on the screen`).to.equal(true);
+  });
+  cy.get('body').then(($b) => {
+    if (picklistOn($b)) {
+      ifPicklist();
+    } else {
+      ifList();
+    }
+  });
+}
+
+function searchList(value) {
+  cy.get('body').then(($b) => {
+    const $box = findSearchBox($b);
+    if ($box.length) {
+      cy.wrap($box).click({ force: true }).clear({ force: true }).type(value, { force: true, delay: 50 });
+      cy.wait(1500);
+    }
+  });
+}
+
+// the row of a list that holds the value: climb from the text until an element holds the
+// row's action icons
+function rowOf($text) {
+  let $el = $text;
+  for (let i = 0; i < 10 && $el.length; i += 1) {
+    if ($el.find(ROW_ACTIONS).length >= 2) {
+      return $el;
+    }
+    $el = $el.parent();
+  }
+  return $text.parent();
+}
+
+function rowButton($row, word) {
+  const re = word === 'edit' ? /edit|pencil|modify/i : /delete|trash|remove|bin/i;
+  const skip = /drag|handle|grip|status|badge|chip|toggle/i;
+  const hayOf = (e) => [e.getAttribute('data-cy'), e.getAttribute('title'), e.getAttribute('aria-label'), e.className && e.className.baseVal === undefined ? e.className : '', Cypress.$(e).text()].join(' ');
+  const $all = $row.find(ROW_ACTIONS).filter(':visible').filter((i, e) => !skip.test(hayOf(e)));
+  const $named = $all.filter((i, e) => re.test(hayOf(e)));
+  if ($named.length) {
+    return $named.first();
+  }
+  const $tops = $all.filter((i, e) => Cypress.$(e).parents(ROW_ACTIONS).filter((j, p) => $row.has(p).length > 0).length === 0);
+  return word === 'edit' ? $tops.first() : $tops.last();
+}
+
+function rowAction(value, word) {
+  cy.contains(value, { timeout: 15000 }).then(($text) => {
+    const $btn = rowButton(rowOf($text), word);
+    expect($btn.length, `a ${word} icon on the row of "${value}"`).to.be.greaterThan(0);
+    Cypress.log({ name: 'row', message: `${word} icon of the row "${value}"` });
+    cy.wrap($btn).scrollIntoView().click({ force: true });
+  });
+  cy.wait(1500);
+}
+
+Then("I open the existing record {string} using the {string} field", (value, field) => {
+  const v = String(value || '').trim();
+  expect(v, 'a record to open').to.not.equal('');
+  withRecordMode(field, v,
+    () => pickFromPicklist(field, v),
+    () => {
+      searchList(v);
+      rowAction(v, 'edit');
+    });
+});
+
+Then("I request to delete the record {string} using the {string} field", (value, field) => {
+  const v = String(value || '').trim();
+  expect(v, 'a record to delete').to.not.equal('');
+  withRecordMode(field, v,
+    () => {
+      pickFromPicklist(field, v);
+      cy.wait(2000);
+      clickAction('delete');
+    },
+    () => {
+      searchList(v);
+      rowAction(v, 'delete');
+    });
+});
+
+// the delete prompt is only checked here - it is NOT closed, so the next step can answer it
+Then("I should see the delete prompt {string}", (value) => {
+  cy.contains(squashText(value), { timeout: 15000 }).should('be.visible');
+});
+
+const DIALOG_BUTTONS = 'div.alertbutton, [role="dialog"] button, [role="alertdialog"] button, mat-dialog-container button, .mat-mdc-dialog-container button, .cdk-overlay-pane button';
+
+function dialogButton($body, re) {
+  return $body.find(DIALOG_BUTTONS).filter(':visible').filter((i, e) => re.test(squashText(Cypress.$(e).text()))).first();
+}
+
+Then("I confirm the delete", () => {
+  cy.get('body', { timeout: 15000 }).should(($b) => {
+    const any = dialogButton($b, /^(yes|ok|confirm|delete|proceed)$/i).length > 0 || $b.find('div.alertbutton').filter(':visible').length > 0;
+    expect(any, 'a visible Yes / OK button on the delete prompt').to.equal(true);
+  });
+  cy.get('body').then(($b) => {
+    let $btn = dialogButton($b, /^(yes|ok|confirm|delete|proceed)$/i);
+    if (!$btn.length) {
+      $btn = $b.find('div.alertbutton').filter(':visible').first();
+    }
+    cy.wrap($btn).click({ force: true });
+  });
+  cy.wait(2000);
+});
+
+Then("I cancel the delete", () => {
+  cy.get('body', { timeout: 15000 }).should(($b) => {
+    const any = dialogButton($b, /^(no|cancel|close)$/i).length > 0
+      || $b.find('.mat-mdc-dialog-component-host > .mat-icon').filter(':visible').length > 0;
+    expect(any, 'a visible No / Cancel button (or close icon) on the delete prompt').to.equal(true);
+  });
+  cy.get('body').then(($b) => {
+    let $btn = dialogButton($b, /^(no|cancel|close)$/i);
+    if (!$btn.length) {
+      $btn = $b.find('.mat-mdc-dialog-component-host > .mat-icon').filter(':visible').first();
+    }
+    cy.wrap($btn).click({ force: true });
+  });
+  cy.wait(1500);
+});
+
+function recordInPicklist(field, value, shouldExist) {
+  cy.get(`[data-cy="${field}-PickListDrop"]`, { timeout: 30000 }).click({ force: true });
+  cy.get("[data-cy='PicklistSearchBar']").should('be.visible').click().clear().type(value);
+  cy.wait(2000);
+  cy.get('body', { timeout: 15000 }).should(($b) => {
+    const has = $b.find('.ag-row').filter((i, e) => squashText(e.textContent).includes(value)).length > 0;
+    expect(has, `the record "${value}" ${shouldExist ? 'is' : 'is not'} in the "${field}" picklist`).to.equal(shouldExist);
+  });
+}
+
+Then("I should still see the record {string} using the {string} field", (value, field) => {
+  const v = String(value || '').trim();
+  withRecordMode(field, v,
+    () => recordInPicklist(field, v, true),
+    () => {
+      searchList(v);
+      cy.contains(v, { timeout: 15000 }).should('be.visible');
+    });
+});
+
+Then("I should no longer see the record {string} using the {string} field", (value, field) => {
+  const v = String(value || '').trim();
+  closeOpenDialogs();
+  withRecordMode(field, v,
+    () => recordInPicklist(field, v, false),
+    () => {
+      searchList(v);
+      cy.contains(v, { timeout: 5000 }).should('not.exist');
+    });
 });
 """
 

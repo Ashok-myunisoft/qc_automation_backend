@@ -244,6 +244,9 @@ _RULE_RE = re.compile(r"^Rule\s*:", re.IGNORECASE)
 _FEATURE_RE = re.compile(r"^Feature\s*:", re.IGNORECASE)
 _PLACEHOLDER_RE = re.compile(r"<([^<>]+)>")
 _PICKLIST_RE = re.compile(r"\bpicklist\s+field\b", re.IGNORECASE)
+# True when the script's own picklist step returns early on an empty value. In that case an empty
+# picklist cell is a legal "field left empty" test row and must not be reported.
+_PICKLIST_GUARD_RE = re.compile(r'picklist\s+field["\']\s*,\s*\(\s*value\s*,\s*field\s*\)\s*=>\s*\{\s*if\s*\(\s*!\s*value')
 
 
 @dataclass
@@ -414,6 +417,7 @@ class _Collector:
 
 def check_steps(feature_text: str, script_text: str) -> list[Finding]:
     col = _Collector()
+    picklist_guarded = bool(_PICKLIST_GUARD_RE.search(script_text or ""))
     defs = parse_step_definitions(script_text)
     scenarios = parse_feature(feature_text)
 
@@ -530,7 +534,7 @@ def check_steps(feature_text: str, script_text: str) -> list[Finding]:
                                 scenario=sc.name, fix_in=FIX_FEATURE,
                                 hint="Examples values must not contain double quotes - remove them",
                             ))
-                        if is_picklist and val.strip() == "":
+                        if is_picklist and not picklist_guarded and val.strip() == "":
                             col.add(("emptypick", sc.name, ph, row["__row__"]), Finding(
                                 CRITICAL, "empty_picklist_value",
                                 f'Examples row {row["__row__"]}, column "{ph}" is empty but is used in: {step.text}',
@@ -541,7 +545,7 @@ def check_steps(feature_text: str, script_text: str) -> list[Finding]:
                             ))
                     text = _PLACEHOLDER_RE.sub(
                         lambda m: row.get(m.group(1), m.group(0)) if row is not None else m.group(0), step.text)
-                elif is_picklist and re.search(r'"\s*"', step.text):
+                elif is_picklist and not picklist_guarded and re.search(r'"\s*"', step.text):
                     col.add(("emptypick-lit", sc.name, step.text), Finding(
                         CRITICAL, "empty_picklist_value", step.text, scenario=sc.name, fix_in=FIX_FEATURE,
                         hint="the picklist step cannot take an empty value",

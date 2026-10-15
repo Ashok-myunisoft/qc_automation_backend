@@ -170,9 +170,10 @@ f) SCENARIO OUTLINE FORMAT — every scenario in the feature must be a
    with no column, or a column no step uses, is MAJOR), all rows must have the
    same number of cells as the header, and no table may exceed 25 rows
    (MINOR). Columns not aligned with padding is MINOR.
-g) EMPTY PICKLIST CELLS — the picklist template has no empty-value guard. An
-   empty cell for a value used by an "... picklist field" step is MAJOR (it
-   would select the first row instead of testing an empty field).
+g) EMPTY PICKLIST CELLS — the picklist template skips an empty value (it has an
+   empty-value guard), so an empty cell for a value used by an "... picklist field"
+   step is a valid "field left empty" row. Report it only if the script's picklist
+   step has NO such guard.
 
 
 ## 1. Test Coverage Validation

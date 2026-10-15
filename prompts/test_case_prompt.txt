@@ -112,11 +112,10 @@ same way, so one definition can serve every scenario:
 Empty values: the combobox, date, radio, checkbox and textarea steps, like the
 input step, simply skip an empty value, so an empty cell is allowed for them.
 
-Picklist caution: the picklist step has no empty-value guard — an empty value
-would select the first row of the list. NEVER leave a picklist cell empty in an
-Examples table. To test "mandatory picklist left empty", write a separate
-Scenario Outline whose steps simply do not include the select step for that
-field. (The input step does skip empty values, so an empty input cell is fine.)
+Picklist values: the picklist step, like every other field step, skips an empty value (the
+field simply stays empty), so an empty Examples cell is allowed for a picklist too. To test
+"mandatory picklist left empty", keep the picklist step AND its column in the outline and leave
+that one cell empty in that row. Never remove a column or a step just because a cell is empty.
 
 AUTOMATIC STEP CHECK (CRITICAL): after you answer, a code checker compares every
 step in your feature with the step definitions. A step that breaks one of these
@@ -128,8 +127,7 @@ rules has no definition, so its scenario cannot run:
   Travel Expenses, not "Travel Expenses". Each "<Placeholder>" in a step is
   already wrapped in quotes, so a value with its own quotes becomes
   ""Travel Expenses"", which matches no step.
-- A missing / empty picklist case needs its own Scenario Outline that omits that
-  picklist step. Never leave a picklist cell empty.
+- A "field missing" row keeps that field's step and column; only its cell is empty.
 - Every "<Placeholder>" used in a step needs an Examples column with exactly
   that name.
 
@@ -222,8 +220,9 @@ the backend source it summarises. Never invent a field, limit or message.
   2. Full Save — every mandatory AND optional field filled.
   3. Mandatory-field-empty — one row per mandatory field, left empty one at a
      time with all other fields valid, ExpectedResult = that field's real
-     validation message (see the picklist caution above for picklists). Also
-     one row with ALL mandatory fields empty.
+     validation message, written with the field's visible LABEL exactly as the screen shows it
+     ("Domain Code* Should not be Empty", with the space - not the data-cy name "DomainCode").
+     Also one row with ALL mandatory fields empty.
   4. Numeric boundaries — for each numeric field that has limits or a numeric
      validation: minimum, maximum, zero, negative, just over the limit, and
      decimals (only the ones that make sense for that field).
@@ -257,7 +256,9 @@ screen decides WHICH ones exist.
 1. ONLY WHAT THE SCREEN HAS. Write Create / Update / Delete / Edit scenarios
    only for actions that appear in the Project Analysis (business_actions,
    buttons, or the save/delete behaviour it describes). A screen with no Delete
-   action gets no Delete scenarios; a screen that only saves gets Create and
+   action gets no Delete scenarios (when it has one, write ONE delete outline for a record
+   this file created, with ExpectedResult = the delete confirmation prompt text when the
+   Project Analysis gives it, e.g. "Do you want to Delete Domain?"); a screen that only saves gets Create and
    validation scenarios. Never copy a CRUD pattern onto a screen that does not
    support it.
 
@@ -265,9 +266,9 @@ screen decides WHICH ones exist.
    Scenario Outline must contain a field step for EVERY mandatory field, then
    the save step. An outline whose only step is "I click the save button" is
    WRONG - it cannot isolate any field. To test one missing field, fill every
-   other mandatory field with valid data and leave only that field empty (an
-   empty cell for a combobox / date / radio / checkbox / textarea / input step;
-   for a picklist use a separate outline that omits that picklist step).
+   other mandatory field with valid data and leave only that field's cell empty -
+   for every field type, picklists included. The column of the missing field must
+   still exist in the Examples table; its cell is simply empty in that row.
      BAD   Scenario Outline: Mandatory validation "<Condition>"
              When I click the save button
              Then I should see a confirmation message "<ExpectedResult>"
