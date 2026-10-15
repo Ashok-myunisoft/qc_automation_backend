@@ -141,7 +141,7 @@ _MAX_MODULE_COMPONENT_TEMPLATES = 5
 # already used by architecture_resolver.filter_tree_by_module for the path
 # list sent to ArchitectureAgent. Tune against the model's real context
 # window; this is deliberately conservative.
-_MAX_SOURCE_CHARS = 150_000
+_MAX_SOURCE_CHARS = 500_000
 
 # Extensions ProjectAnalysisAgent actually gets value from. Kept in sync
 # with what ProjectReader used to accept for source_files (SOURCE_EXTENSIONS
