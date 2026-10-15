@@ -32,6 +32,7 @@ from service import report_builder
 from service import datacy_scan  # datacyscan
 from service import step_checker
 from service import script_builder
+from service import expected_results
 from service import chunk_analysis
 from service import history_store
 from service import job_manager
@@ -1449,6 +1450,25 @@ async def _generate_one_screen(ws: WebSocket, src: GitLabService, module: str,
             business_context=business_context, tag=tag, ws=ws,
         )
 
+        # Every ExpectedResult must be a message that really belongs to this screen;
+        # rows that cannot be verified are removed (see service/expected_results.py).
+        try:
+            test_cases, _er_report = expected_results.verify_feature(test_cases, project_analysis, screen_name)
+            if _er_report["dropped"]:
+                _er_preview = "; ".join(f'{c or "row"}: "{e}"' for c, e in _er_report["dropped"][:3])
+                await send_log(
+                    ws,
+                    f"{tag}removed {len(_er_report['dropped'])} test row(s) whose expected message could not be "
+                    f"verified for this screen ({_er_preview}{' ...' if len(_er_report['dropped']) > 3 else ''}).",
+                    "secondary",
+                )
+            elif _er_report["note"]:
+                await send_log(ws, f"{tag}{_er_report['note']}.", "muted")
+        except WebSocketDisconnect:
+            raise
+        except Exception:
+            logger.exception("%sexpected-result check failed - keeping the feature as generated", tag)
+
         automation_contract = _build_automation_contract(project_analysis)
         # The script is built by code from the verified (scan-merged) data-cy values -
         # see service/script_builder.py. The feature is first made to use the step
@@ -1480,6 +1500,13 @@ async def _generate_one_screen(ws: WebSocket, src: GitLabService, module: str,
                 locator_map=locator_map,
                 automation_contract=automation_contract,
             )
+            # the AI-written script can leave out a button step: make the feature use the exact
+            # button sentences and add any definition that is missing
+            try:
+                test_cases = script_builder.normalize_button_steps(test_cases)
+                generated_script = script_builder.ensure_button_steps(test_cases, generated_script)
+            except Exception:
+                logger.exception("%sbutton step safety net failed - keeping the script as generated", tag)
 
         test_cases, generated_script, step_findings, step_repaired = await _step_check_and_repair(
             tag, test_cases, generated_script, automation_contract,

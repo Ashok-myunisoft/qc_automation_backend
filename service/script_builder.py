@@ -187,13 +187,9 @@ Then("I enter {string} in the {string} input field", (value, field) => {
 
 Then("I should see a confirmation message {string}", (value) => {
   cy.contains(value, { timeout: 15000 }).should('be.visible');
-  // close the message dialog only when it has a close icon (inline / toast messages have none)
-  cy.get('body').then(($body) => {
-    const $close = $body.find('.mat-mdc-dialog-component-host > .mat-icon');
-    if ($close.length) {
-      cy.wrap($close.first()).click();
-    }
-  });
+  // close the message box (close icon OR OK button) so the next step is never blocked by it;
+  // inline / toast messages have no box, so nothing is clicked for them
+  closeOpenDialogs();
 });
 
 Then("I click the Delete button", () => {
@@ -256,8 +252,71 @@ function controlOf(field, suffix) {
     .scrollIntoView();
 }
 
+// Product default data-cy of every action button (used when no verified one is in ACTIONS).
+const DEFAULT_ACTIONS = { addNew: 'AddNewForm', save: 'SaveForm', update: 'UpdateForm', edit: 'EditForm' };
+
+// Save and Update share one place on the form, so a screen shows only one of them
+// depending on whether the record is new or already open: try the asked one first,
+// then its sibling.
+function actionCandidates(name) {
+  const order = name === 'save' ? ['save', 'update'] : name === 'update' ? ['update', 'save'] : [name];
+  const list = [];
+  order.forEach((key) => {
+    [ACTIONS[key], DEFAULT_ACTIONS[key]].forEach((v) => {
+      if (v && !list.includes(v)) {
+        list.push(v);
+      }
+    });
+  });
+  return list;
+}
+
 function clickAction(name) {
-  cy.get(`[data-cy="${ACTIONS[name]}"]`).should('be.visible').click();
+  closeOpenDialogs();                               // a box left open by an earlier step would block this click
+  const candidates = actionCandidates(name);
+  const visibleOf = ($body, dataCy) => $body.find(`[data-cy="${dataCy}"]`).filter(':visible');
+  cy.get('body', { timeout: 30000 }).should(($body) => {
+    const hit = candidates.find((v) => visibleOf($body, v).length > 0);
+    expect(hit, `a visible "${name}" button (${candidates.join(' / ')})`).to.be.a('string');
+  });
+  cy.get('body').then(($body) => {
+    const dataCy = candidates.find((v) => visibleOf($body, v).length > 0) || candidates[0];
+    cy.get(`[data-cy="${dataCy}"]`)
+      .filter(':visible')
+      .first()
+      .scrollIntoView()
+      .should('not.be.disabled')
+      .click();
+  });
+}
+
+// Closes every message box that is open (close icon or OK button), one after the other,
+// then checks that none is left. Used after a message was checked and before a button
+// is clicked, so a "Details Saved ..." box can never block the next step.
+function closeOpenDialogs({ settleMs = 600, max = 10 } = {}) {
+  const CLOSERS = [
+    '.mat-mdc-dialog-component-host > .mat-icon',   // dialog close icon
+    'div.alertbutton',                              // OK / confirm button
+  ];
+  const next = (n) => {
+    if (n >= max) return;
+    cy.get('body').then(($body) => {
+      for (const sel of CLOSERS) {
+        const $el = $body.find(sel).filter(':visible');
+        if ($el.length) {
+          cy.wrap($el.first()).click({ force: true });
+          cy.wait(settleMs);                        // let it close, and let a follow-up box appear
+          next(n + 1);                              // another box may be waiting behind it
+          return;
+        }
+      }
+    });
+  };
+  next(0);
+  cy.get('body', { timeout: 5000 }).should(($body) => {
+    const stillOpen = CLOSERS.filter((sel) => $body.find(sel).filter(':visible').length > 0);
+    expect(stillOpen, 'message boxes still open').to.have.length(0);
+  });
 }
 
 // ---- popup handling ----
@@ -329,6 +388,36 @@ Then("I click the Edit button", () => {
   clickAction('edit');
 });
 
+// ---- checkbox helpers ----
+// Lower-case names a checkbox can carry: <name>-CheckBox, <name>-UnCheckBox and its known data-cy.
+function checkboxNames(field) {
+  const known = CONTROLS[field];
+  const raw = String(known ? known.dataCy : field);
+  const base = raw.replace(/-(UnCheckBox|CheckBox)$/i, '');
+  return [`${base}-CheckBox`, `${base}-UnCheckBox`, raw].map((n) => n.toLowerCase());
+}
+
+// Finds the checkbox under whichever of its names is on the page right now and reads its
+// real state (the native input, else the checked class, else the name itself).
+function readCheckbox($body, names) {
+  const $hits = $body.find('[data-cy]').filter((i, e) => names.includes(String(e.getAttribute('data-cy')).toLowerCase()));
+  if ($hits.length === 0) {
+    return null;
+  }
+  const $el = $hits.first();
+  const name = String($el.attr('data-cy')).toLowerCase();
+  const $input = $el.is('input') ? $el : $el.find('input[type="checkbox"]').first();
+  let checked;
+  if ($input.length) {
+    checked = !!$input.prop('checked');
+  } else if ($el.hasClass('mat-mdc-checkbox-checked') || $el.hasClass('mat-checkbox-checked')) {
+    checked = true;
+  } else {
+    checked = !name.endsWith('-uncheckbox') && name.endsWith('-checkbox');
+  }
+  return { $el, $input, name, checked };
+}
+
 // ---- other field types (the picklist and input steps are in the QC template) ----
 Then("I select {string} in the {string} combobox field", (value, field) => {
   if (!value) {
@@ -384,11 +473,22 @@ Then("I set {string} in the {string} checkbox field", (value, field) => {
     return;
   }
   const wanted = /^(true|yes|checked|on|1)$/i.test(value.trim());
-  controlOf(field, '-CheckBox').then(($el) => {
-    const $box = $el.is('input') ? $el : $el.find('input[type="checkbox"]').first();
-    if ($box.length === 0 || $box.prop('checked') !== wanted) {
-      cy.wrap($el).click({ force: true });
+  const names = checkboxNames(field);
+  // the same checkbox carries <name>-UnCheckBox while unchecked and <name>-CheckBox while checked
+  cy.get('body', { timeout: 30000 }).should(($body) => {
+    expect(readCheckbox($body, names), `checkbox "${field}" (${names.join(' / ')})`).to.not.equal(null);
+  });
+  cy.get('body').then(($body) => {
+    const now = readCheckbox($body, names);
+    if (now.checked === wanted) {
+      return;                                       // already in the wanted state
     }
+    cy.wrap(now.$input.length ? now.$input : now.$el).scrollIntoView().click({ force: true });
+  });
+  cy.get('body', { timeout: 10000 }).should(($body) => {
+    const now = readCheckbox($body, names);
+    expect(now, `checkbox "${field}" still on the page`).to.not.equal(null);
+    expect(now.checked, `checkbox "${field}" is ${wanted ? 'checked' : 'unchecked'}`).to.equal(wanted);
   });
 });
 
@@ -453,6 +553,19 @@ _FIELD_STEP_RE = re.compile(
 _BARE_STEP_RE = re.compile(
     r'^(?P<indent>\s*)(?P<text>I (?:select|enter|set|click|navigate|should see)\b.*\S)\s*$'
 )
+_BUTTON_STEP_RE = re.compile(
+    r'^(?P<head>\s*(?:Given|When|Then|And|But|\*)\s+)I\s+click\s+(?:on\s+)?(?:the\s+)?'
+    r'(?P<name>save|add\s*new|update|edit|delete)(?:\s+button)?\s*$',
+    re.IGNORECASE,
+)
+# the exact button sentences the script defines (letter case matters to Cucumber)
+_BUTTON_SENTENCES = {
+    "save": "I click the save button",
+    "addnew": "I click the Add New button",
+    "update": "I click the Update button",
+    "edit": "I click the Edit button",
+    "delete": "I click the Delete button",
+}
 _KEYWORD_START_RE = re.compile(r"^\s*(?:Given|When|Then|And|But|\*)\s", re.IGNORECASE)
 _BLOCK_START_RE = re.compile(r"^\s*(?:Scenario(?:\s+Outline|\s+Template)?|Example|Background)\s*:", re.IGNORECASE)
 _EXAMPLES_START_RE = re.compile(r"^\s*(?:Examples|Scenarios)\s*:", re.IGNORECASE)
@@ -515,6 +628,9 @@ def normalize_feature(feature_text: str, controls: dict[str, dict] | None) -> st
         if _KEYWORD_START_RE.match(line):
             steps_in_block += 1
 
+        # 1b) a button step worded a little differently ("Save", "save button", "delete button")
+        line = _canonical_button_line(line)
+
         # 2) a field step for a control we know
         m = _FIELD_STEP_RE.match(line)
         if m:
@@ -530,6 +646,71 @@ def normalize_feature(feature_text: str, controls: dict[str, dict] | None) -> st
 
     text = "\n".join(out)
     return text + "\n" if feature_text.endswith("\n") else text
+
+
+def _canonical_button_line(line: str) -> str:
+    """Rewrites a save / add new / update / edit / delete button step to the exact
+    sentence the script defines. Any other line is returned unchanged."""
+    m = _BUTTON_STEP_RE.match(line)
+    if not m:
+        return line
+    key = re.sub(r"\s+", "", m.group("name").lower())
+    sentence = _BUTTON_SENTENCES.get(key)
+    return f"{m.group('head')}{sentence}" if sentence else line
+
+
+def normalize_button_steps(feature_text: str) -> str:
+    """Button wording only (no field rewriting). Used when the code-built script
+    could not be used, so the feature still matches the step definitions."""
+    if not feature_text:
+        return feature_text
+    out = [_canonical_button_line(ln) for ln in feature_text.splitlines()]
+    text = "\n".join(out)
+    return text + "\n" if feature_text.endswith("\n") else text
+
+
+_BUTTON_FALLBACK_DEFS = {
+    "I click the save button": "SaveForm",
+    "I click the Add New button": "AddNewForm",
+    "I click the Update button": "UpdateForm",
+    "I click the Edit button": "EditForm",
+}
+
+
+def ensure_button_steps(feature_text: str, script_text: str) -> str:
+    """Safety net for a script that was NOT built by code (the AI fallback): when
+    the feature uses a button step the script has no definition for, a plain,
+    self-contained definition is appended. A script that already defines the
+    sentence is returned unchanged."""
+    if not feature_text or not script_text:
+        return script_text
+    extra: list[str] = []
+    for sentence, data_cy in _BUTTON_FALLBACK_DEFS.items():
+        used = re.search(r"^\s*(?:Given|When|Then|And|But|\*)\s+" + re.escape(sentence) + r"\s*$",
+                         feature_text, re.MULTILINE)
+        defined = re.search(r"(?:Given|When|Then)\(\s*[\"']" + re.escape(sentence) + r"[\"']", script_text)
+        if used and not defined:
+            extra.append(
+                f'Then("{sentence}", () => {{\n'
+                f"  cy.get('[data-cy=\"{data_cy}\"]').filter(':visible').first().scrollIntoView()"
+                f".should('not.be.disabled').click();\n"
+                f"}});\n"
+            )
+    used_delete = re.search(r"^\s*(?:Given|When|Then|And|But|\*)\s+I click the Delete button\s*$",
+                            feature_text, re.MULTILINE)
+    defined_delete = re.search(r"(?:Given|When|Then)\(\s*[\"']I click the Delete button[\"']", script_text)
+    if used_delete and not defined_delete:
+        extra.append(
+            'Then("I click the Delete button", () => {\n'
+            "  cy.wait(5000);\n"
+            "  cy.get('[data-cy=\"DeleteForm\"]').click();\n"
+            "  cy.get('div.alertbutton').click();\n"
+            "  cy.wait(5000);\n"
+            "});\n"
+        )
+    if not extra:
+        return script_text
+    return script_text.rstrip("\n") + "\n\n// ---- button steps added because the feature uses them ----\n" + "\n".join(extra)
 
 
 def _inside_block(already_out: list[str]) -> bool:

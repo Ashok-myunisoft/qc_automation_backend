@@ -1,0 +1,13 @@
+{
+  "_meta": {
+    "note": "Optional. Messages the QC team has CONFIRMED on the real application. Anything listed here always counts as a real ExpectedResult for the screen, so the generator never removes a test row that uses it. 'all' applies to every screen; 'screens' is keyed by the screen name as typed in the QC Test Console (capital letters and spaces do not matter).",
+    "example": {
+      "all": ["Details Saved Successfully"],
+      "screens": {
+        "Skill Domain": ["Code already exists"]
+      }
+    }
+  },
+  "all": [],
+  "screens": {}
+}
