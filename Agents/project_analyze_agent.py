@@ -11,6 +11,8 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+from service.screen_spec import rules_for as _spec_rules_for  # screen spec: extra rules only when a spec exists
+
 logger = logging.getLogger(__name__)
 
 # MM screens send ~100K+ tokens of source and ask for a very long JSON answer.
@@ -111,6 +113,8 @@ class ProjectAnalysisAgent:
         project_context: {json.dumps(project_context)}
         user_request: {user_request}
         """
+        if not is_mm and isinstance(project_context, dict) and project_context.get("screen_spec"):
+            user_message += "\n\n" + _spec_rules_for("ANALYSIS")
         if is_mm:
             user_message += _MM_OUTPUT_RULES.replace(
                 "__CLASS_ID__", str(project_context.get("biz_transaction_class_id")))

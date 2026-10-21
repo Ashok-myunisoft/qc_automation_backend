@@ -62,7 +62,7 @@ def get_sample_values(
 ) -> str:
     """Returns real, currently-valid distinct values for one column. Only call this AFTER describe_table has confirmed the table and column are the right ones."""
     try:
-        return json.dumps(db_service.get_sample_values(table_name, column_name, limit))
+        return json.dumps(db_service.get_sample_values(table_name, column_name, limit), default=str)
     except Exception as e:
         logger.warning("get_sample_values tool failed: %s", e)
         return json.dumps({"error": str(e)})

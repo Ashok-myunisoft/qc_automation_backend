@@ -35,6 +35,7 @@ from service import script_builder
 from service import expected_results
 from service import feature_quality  # deterministic feature clean-up
 from service import chunk_analysis
+from service import screen_spec, value_gen  # screen spec (USE_SCREEN_SPEC / USE_BACKEND_DIGEST)
 from service import history_store
 from service import job_manager
 from service import job_store
@@ -141,7 +142,7 @@ _MAX_MODULE_COMPONENT_TEMPLATES = 5
 # already used by architecture_resolver.filter_tree_by_module for the path
 # list sent to ArchitectureAgent. Tune against the model's real context
 # window; this is deliberately conservative.
-_MAX_SOURCE_CHARS = 500_000
+_MAX_SOURCE_CHARS = 150_000
 
 # Extensions ProjectAnalysisAgent actually gets value from. Kept in sync
 # with what ProjectReader used to accept for source_files (SOURCE_EXTENSIONS
@@ -1009,9 +1010,9 @@ async def handle_fetch(ws: WebSocket, session: dict, msg: dict):
         return
 
     if resolved.ambiguous:
-        await send_log(ws, f"more than one close match ({resolved.resolved_by}) — picked {resolved.dir} (confidence {resolved.confidence}). Double-check.", "accent")
+        await send_log(ws, f"more than one close match ({resolved.resolved_by}) — picked {resolved.dir}. Double-check.", "accent")
     else:
-        await send_log(ws, f"matched {resolved.dir} via {resolved.resolved_by} (confidence {resolved.confidence})", "success")
+        await send_log(ws, f"matched {resolved.dir} via {resolved.resolved_by}", "success")
 
     try:
         feature_content = await asyncio.to_thread(gl.fetch_file, resolved.feature_path)
@@ -1347,6 +1348,35 @@ async def _generate_one_screen(ws: WebSocket, src: GitLabService, module: str,
             project_context = await asyncio.to_thread(
                 _fetch_source_project_context, src, resolved_source, source_tree,
             )
+        # screenspec: build the screen spec by code (formjson + rendered HTML + labels, and with
+        # USE_BACKEND_DIGEST the entity's backend files). Off by default; any problem -> carry on as before.
+        screen_spec_data = None
+        screen_spec_backend_ok = False
+        if screen_spec.enabled() and not is_mm_screen:
+            try:
+                _spec_backend = None
+                if screen_spec.backend_digest_enabled():
+                    _spec_backend = await asyncio.to_thread(_backend_gitlab_service)
+                screen_spec_data = await asyncio.to_thread(
+                    screen_spec.build_screen_spec, src, project_context.get("primary_dir") or resolved_source.dir,
+                    project_context.get("source_files", []), source_tree, _spec_backend,
+                )
+                if screen_spec_data:
+                    screen_spec_data["screen_name"] = screen_name
+                    screen_spec_backend_ok = bool(screen_spec_data.get("backend"))
+                    project_context["screen_spec"] = screen_spec.compact(screen_spec_data)
+                    await send_log(ws, f"{tag}{screen_spec.summary_line(screen_spec_data)}.", "secondary")
+                else:
+                    await send_log(ws, f"{tag}no formjson found for this screen - using the normal analysis.", "muted")
+            except WebSocketDisconnect:
+                raise
+            except Exception as _spec_err:
+                logger.exception("%sscreen spec failed - continuing without it", tag)
+                screen_spec_data = None
+                screen_spec_backend_ok = False
+                project_context.pop("screen_spec", None)
+                await send_log(ws, f"{tag}screen spec skipped ({_spec_err}) - using the normal analysis.", "muted")
+
         # MM screens use a dedicated budget function, not the generic one.
         # Confirmed in prod logs 2026-10-07 (second occurrence, AFTER the
         # .ts-first ordering fix): the size-based skip-and-continue logic in
@@ -1379,7 +1409,7 @@ async def _generate_one_screen(ws: WebSocket, src: GitLabService, module: str,
         source_hints = _extract_source_hints(project_context)
         try:
             backend_src = await asyncio.to_thread(_backend_gitlab_service)
-            backend_files = await asyncio.to_thread(
+            backend_files = [] if screen_spec_backend_ok else await asyncio.to_thread(
                 fetch_backend_context, backend_src, screen_name, source_hints,
             )
             backend_files = fit_backend_files_to_budget(
@@ -1389,7 +1419,7 @@ async def _generate_one_screen(ws: WebSocket, src: GitLabService, module: str,
             if backend_files:
                 project_context["source_files"].extend(backend_files)
                 await send_log(ws, f"{tag}added {len(backend_files)} backend file(s) to the analysis input.", "secondary")
-            else:
+            elif not screen_spec_backend_ok:
                 await send_log(ws, f"{tag}no backend files matched (or no room in the size budget) - analysing frontend only.", "muted")
         except WebSocketDisconnect:
             raise  # loopfix: the browser is gone - not a backend-fetch problem
@@ -1445,11 +1475,58 @@ async def _generate_one_screen(ws: WebSocket, src: GitLabService, module: str,
             await send_log(ws, f"{tag}business context found: {preview} — spot-check one of these against the DB if unsure.", "success")
             business_context = business_context_result
 
+        if screen_spec_data and isinstance(project_analysis, dict) and "error" not in project_analysis:
+            try:
+                _sync = screen_spec.sync_spec_with_analysis(screen_spec_data, project_analysis)
+                if _sync.get("scan_worked"):
+                    await send_log(ws, f"{tag}live page check: {len(_sync['on_page'])} field(s) confirmed on the page"
+                                       + (f", {len(_sync['not_on_page'])} not on it ({', '.join(_sync['not_on_page'][:6])})." if _sync["not_on_page"] else "."), "secondary")
+                else:
+                    await send_log(ws, f"{tag}live page check unavailable (the scan did not resolve the page) - using the formjson only.", "muted")
+                _pool = value_gen.build_value_pool(screen_spec_data, business_context)
+                _plan = value_gen.build_scenario_plan(screen_spec_data, _pool)
+                project_analysis["screen_spec"] = screen_spec_data
+                project_analysis["value_pool"] = _pool
+                project_analysis["scenario_plan"] = _plan
+                await send_log(ws, f"{tag}scenario plan: {len(_plan)} planned row(s) from {len(_pool)} field(s) with real values.", "secondary")
+            except WebSocketDisconnect:
+                raise
+            except Exception:
+                logger.exception("%svalue pool / scenario plan failed - generating without them", tag)
+                for _k in ("screen_spec", "value_pool", "scenario_plan"):
+                    project_analysis.pop(_k, None)
+
         await send_log(ws, f"{tag}running test case agent...", "secondary")
         test_cases = await _run_test_cases_with_chunking(
             project_analysis=project_analysis, user_request=user_request,
             business_context=business_context, tag=tag, ws=ws,
         )
+
+        # screenspec: how many of the page's fields the scenarios really use (one repair pass is optional:
+        # USE_COVERAGE_REPAIR=1). Runs before the verification below, so any repaired rows are verified too.
+        if screen_spec_data and isinstance(project_analysis, dict) and project_analysis.get("screen_spec"):
+            try:
+                _cov = screen_spec.coverage_report(test_cases, screen_spec_data)
+                await send_log(
+                    ws, f"{tag}field coverage: {len(_cov['used'])}/{_cov['total']} page field(s) used in the scenarios"
+                        + (f" (missing: {', '.join(_cov['missing'])})." if _cov["missing"] else "."),
+                    "secondary" if not _cov["missing"] else "muted",
+                )
+                if _cov["missing"] and screen_spec.coverage_repair_enabled():
+                    _findings = "\n".join(
+                        f"- the field '{n}' is on the page but never used in any scenario: add it to the Examples "
+                        f"tables (with a value from the Project Analysis) and to the steps." for n in _cov["missing"])
+                    _repaired = await test_case_agent.repair_test_cases(test_cases, _findings)
+                    _cov2 = screen_spec.coverage_report(_repaired, screen_spec_data)
+                    if "Feature:" in _repaired and len(_cov2["missing"]) < len(_cov["missing"]):
+                        test_cases = _repaired
+                        await send_log(ws, f"{tag}coverage repair: {len(_cov2['used'])}/{_cov2['total']} page field(s) used now.", "secondary")
+                    else:
+                        await send_log(ws, f"{tag}coverage repair did not help - kept the first version.", "muted")
+            except WebSocketDisconnect:
+                raise
+            except Exception:
+                logger.exception("%scoverage check failed - keeping the feature as generated", tag)
 
         # Every ExpectedResult must be a message that really belongs to this screen;
         # rows that cannot be verified are removed (see service/expected_results.py).
@@ -1624,9 +1701,9 @@ async def handle_generate(ws: WebSocket, session: dict, msg: dict):
             await send_status(ws, "not_found")
             return
         if resolved_source.ambiguous:
-            await send_log(ws, f"more than one close match ({resolved_source.resolved_by}) — picked {resolved_source.dir} (confidence {resolved_source.confidence}). Double-check.", "accent")
+            await send_log(ws, f"more than one close match ({resolved_source.resolved_by}) — picked {resolved_source.dir}. Double-check.", "accent")
         else:
-            await send_log(ws, f"matched source {resolved_source.dir} via {resolved_source.resolved_by} (confidence {resolved_source.confidence})", "success")
+            await send_log(ws, f"matched source {resolved_source.dir} via {resolved_source.resolved_by}", "success")
 
     user_request = user_request or f"Generate Cypress tests for the {screen} screen in the {module} module."
 
@@ -1694,9 +1771,9 @@ async def handle_generate_decision(ws: WebSocket, session: dict, msg: dict):
                 session.pop("pending_generate", None)
                 return
             if resolved_source.ambiguous:
-                await send_log(ws, f"more than one close match ({resolved_source.resolved_by}) — picked {resolved_source.dir} (confidence {resolved_source.confidence}). Double-check.", "accent")
+                await send_log(ws, f"more than one close match ({resolved_source.resolved_by}) — picked {resolved_source.dir}. Double-check.", "accent")
             else:
-                await send_log(ws, f"matched source {resolved_source.dir} via {resolved_source.resolved_by} (confidence {resolved_source.confidence})", "success")
+                await send_log(ws, f"matched source {resolved_source.dir} via {resolved_source.resolved_by}", "success")
 
         request = user_request or f"Generate Cypress tests for the {screen} screen in the {module} module."
         outcome = await _generate_one_screen(ws, src, module, screen, resolved_source, request, source_tree=src_tree)
@@ -2482,9 +2559,9 @@ async def handle_auto_run(ws: WebSocket, session: dict, msg: dict):
                         await send_log(ws, f"[{module}] no source files found for '{single_screen}' — skipping.", "danger")
                         continue
                     if resolved_source.ambiguous:
-                        await send_log(ws, f"[{module}] more than one close match ({resolved_source.resolved_by}) — picked {resolved_source.dir} (confidence {resolved_source.confidence}).", "accent")
+                        await send_log(ws, f"[{module}] more than one close match ({resolved_source.resolved_by}) — picked {resolved_source.dir}.", "accent")
                     else:
-                        await send_log(ws, f"[{module}] matched source {resolved_source.dir} via {resolved_source.resolved_by} (confidence {resolved_source.confidence})", "success")
+                        await send_log(ws, f"[{module}] matched source {resolved_source.dir} via {resolved_source.resolved_by}", "success")
                 candidates = [(single_screen, resolved_source)]
             else:
                 await send_log(ws, f"[{module}] scanning source repo for screens...", "secondary")

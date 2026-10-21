@@ -1,0 +1,22 @@
+### ANALYSIS
+SCREEN SPEC MODE (this block only applies because project_context contains "screen_spec"; it overrides anything above that disagrees).
+- project_context.screen_spec was built by code from the screen's real formjson, the rendered HTML, the label file and, when present, the backend. It is AUTHORITATIVE.
+- The screen's fields are the entries of screen_spec.fields whose "candidate" is true (include "alternate_of" ones too: only one of them is shown, depending on the user's role or module, and the live scan decides which). Use their names, labels, kinds, types, required flags and max lengths as given. Do not add fields that are not in the spec. Fields marked "readonly" or kind "grid" are listed but never typed into.
+- NEVER set "verified": true and NEVER invent a data-cy: write data_cy "Unknown" and automation_locator.verified false for every field. Only the live app scan verifies locators; a locator you mark as verified stops the scan from checking it.
+- The formjson IS supplied (it is the spec). Do not add it to "unresolved" and do not guess other config files.
+- Ignore the "Frontend-only scope" section: when screen_spec.backend exists, backend facts (required fields, server-set fields, messages, rules) are supplied and may be used. Fields the server sets are never typed by a user.
+- screen_spec.buttons lists the data-cy values really present in the page template; use only buttons that exist there.
+- Dropdown options are the option TEXT the user sees, never the numeric key.
+
+### TEST_CASES
+SCREEN SPEC MODE (this block overrides any earlier rule that disagrees, including the PLACEHOLDER_ rule and "never invent a maximum").
+1. The SCREEN SPEC below was built by code from the real formjson, page and backend. Treat every value, length, option and message in it as true.
+2. In every step write the field NAME exactly as given in the spec (the first word of its line, e.g. ReasonName, TLeaveDetailLeaveDate), never its label or a shortened name. For every field use ONLY the values given for that field (valid, max-length value, options, invalid value). A date field takes the value today (it already shows today's date); never type another date. Do not write PLACEHOLDER_ for a field that has a value in the spec. Only a field whose value says PLACEHOLDER_ may keep it.
+3. Boundary rows ARE allowed because the spec states the max length: write the exact-max-length row for the fields that list a "max-length value". Do NOT write max-length-plus-one rows.
+4. Combobox and radio fields: use the visible option text, never its numeric key. Checkbox fields: Checked or Unchecked.
+5. A required field left empty expects exactly the message listed after "empty ->". A successful save expects the success fragment given in the plan (the text before the row-specific values), not the full message with the code and name.
+6. Duplicate and in-use messages come from the database; write the fragment given in the plan, never wording such as "already exists".
+7. Cover EVERY line of the SCENARIO PLAN, one Examples row per line, grouped into Scenario Outlines by theme (at most 25 rows per table). Update and Delete rows use the record created earlier in the file.
+8. Never fill or mention fields listed as "Not on the page", "never typed", "not shown for this user/module" or "set by the server". A record picker is left empty when creating a record. If a button list is given and it has no add/new button, write no Add New step.
+9. Update and Delete rows may only use a record that THIS file created. Never use a record number from Business Context: those are real records of the database. If the number of the record just created is not known, write no Update or Delete row.
+10. Backend rules are for reference only: write a row for a backend rule only when a user can actually produce that input on this screen (a dropdown cannot send a value that is not in its options).

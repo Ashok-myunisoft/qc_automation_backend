@@ -8,6 +8,8 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+from service import screen_spec as _screen_spec, value_gen as _value_gen  # screen spec (USE_SCREEN_SPEC)
+
 
 class TestCaseAgent:
     def __init__(self):
@@ -34,6 +36,17 @@ class TestCaseAgent:
         steps use the QC team's fixed vocabulary (see test_case_prompt.txt,
         #FIXED STEP VOCABULARY) so they match the template step definitions
         that ScriptGenerateAgent copies into every script."""
+        # Screen spec (only present when USE_SCREEN_SPEC=1): shown as its own block, not inside the analysis JSON.
+        spec = project_analysis.get("screen_spec") if isinstance(project_analysis, dict) else None
+        spec_block = ""
+        if spec:
+            spec_block = (
+                "\n\n" + _screen_spec.rules_for("TEST_CASES") + "\n\n"
+                + _value_gen.render_for_test_cases(
+                    spec, project_analysis.get("value_pool") or {}, project_analysis.get("scenario_plan") or [])
+            )
+            project_analysis = {k: v for k, v in project_analysis.items()
+                                if k not in ("screen_spec", "value_pool", "scenario_plan")}
         user_message = f"""
 User Request:
 {user_request}
@@ -49,7 +62,7 @@ Reminder: every scenario must be a "Scenario Outline" with an aligned Examples t
 use the fixed step vocabulary, and cover the Save/form coverage matrix using only fields
 present in the Project Analysis. Every step line must start with Given, When, Then or And.
 Choose each field's step sentence (picklist / input / combobox / date / radio / checkbox /
-textarea) from the suffix of that field's verified data-cy.
+textarea) from the suffix of that field's verified data-cy.{spec_block}
 """
 
         response = await self.agent.run(user_message)

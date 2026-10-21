@@ -287,11 +287,29 @@ def labels_from_analysis(project_analysis: dict | None) -> dict[str, str]:
     return out
 
 
+def _exact_required_messages(project_analysis) -> dict[str, str]:
+    """Screen spec only (USE_SCREEN_SPEC): the real required-field message of a field whose label has
+    no '*' (the frontend shows '<label> Should not be Empty' - the '*' is part of the label text).
+    Empty when there is no spec, so nothing changes."""
+    out: dict[str, str] = {}
+    try:
+        spec = (project_analysis or {}).get("screen_spec") or {}
+        for label_key, message in (spec.get("messages_by_label") or {}).items():
+            out[label_key] = message                  # written in the screen's own code
+        for f in spec.get("fields") or []:
+            if f.get("active") and f.get("required_message") and not str(f.get("label_text", "")).endswith("*"):
+                out.setdefault(_n(f.get("label", "")), f["required_message"])
+    except Exception:
+        logger.exception("could not read exact required messages from the screen spec")
+    return out
+
+
 class _Fields:
     """Maps a name or label used in a message to the field's base data-cy name."""
 
     def __init__(self, controls: dict, labels: dict[str, str]):
         self.labels = labels
+        self.exact: dict[str, str] = {}
         self.by_norm: dict[str, str] = {}
         for base in (controls or {}):
             self.by_norm[_n(base)] = base
@@ -304,6 +322,9 @@ class _Fields:
 
     def label_of(self, base: str) -> str | None:
         return self.labels.get(base)
+
+    def required_message(self, label: str) -> str:
+        return self.exact.get(_n(label)) or f"{label}* Should not be Empty"
 
 
 # ---------------------------------------------------------------------------
@@ -329,7 +350,7 @@ def _fix_labels(outlines: list[Outline], fields: _Fields, report: dict) -> None:
                 base = fields.field_of(m.group("name")) if m else None
                 label = fields.label_of(base) if base else None
                 if m and label:
-                    fixed = f"{label}* Should not be Empty"
+                    fixed = fields.required_message(label)
                     if fixed != p:
                         any_change = True
                     new_parts.append(fixed)
@@ -530,7 +551,9 @@ def _is_update(o: Outline) -> bool:
 def _records(items, report: dict) -> None:
     outlines = [obj for kind, obj in items if kind == "outline" and obj.simple]
     # key fields = the lookup field of every update / delete scenario
-    key_fields = {_n(_key_info(o)[1]) for o in outlines if _is_update(o) or o.is_delete}
+    # (a delete scenario can have no placeholder lookup field: _key_info is None -> not a keyed scenario)
+    key_fields = {_n(ki[1]) for ki in (_key_info(o) for o in outlines if _is_update(o) or o.is_delete)
+                  if ki is not None}
     if not key_fields:
         return
 
@@ -576,7 +599,7 @@ def _records(items, report: dict) -> None:
                 new_items.append((kind, o))
             continue
 
-        if (_is_update(o) or o.is_delete) and created:
+        if (_is_update(o) or o.is_delete) and created and _key_info(o) is not None:
             ci, field = _key_info(o)
             fk = _n(field)
             if fk not in created:
@@ -835,7 +858,7 @@ def _fix_required_empty(outlines: list[Outline], fields: _Fields, required: set[
                     empty.append(base)       # no step fills it: it stays empty
             if not empty:
                 continue
-            row[ec] = ", ".join(f"{fields.label_of(b)}* Should not be Empty" for b in empty)
+            row[ec] = ", ".join(fields.required_message(fields.label_of(b)) for b in empty)
             if cond_c >= 0 and not wording_empty:
                 names = " and ".join(fields.label_of(b) for b in empty)
                 row[cond_c] = f"Save with {names} empty"
@@ -1032,6 +1055,7 @@ def refine_feature(feature_text: str, project_analysis: dict | None, controls: d
     try:
         items = _parse(feature_text)
         fields = _Fields(controls, labels_from_analysis(project_analysis))
+        fields.exact = _exact_required_messages(project_analysis)
 
         def outlines():
             return [obj for kind, obj in items if kind == "outline" and obj.simple]
