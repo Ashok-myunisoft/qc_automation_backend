@@ -36,6 +36,7 @@ from service import expected_results
 from service import feature_quality  # deterministic feature clean-up
 from service import chunk_analysis
 from service import screen_spec, value_gen  # screen spec (USE_SCREEN_SPEC / USE_BACKEND_DIGEST)
+from service import behavior_facts, scenario_matrix, matrix_llm  # scenario matrix (USE_MATRIX_PLANNER)
 from service import history_store
 from service import job_manager
 from service import job_store
@@ -1181,6 +1182,10 @@ async def _run_test_cases_with_chunking(
 _STEP_CHECK_LOG_LIMIT = 25
 
 
+class _SkipPostProcessing(Exception):
+    """Internal: the matrix feature is kept exactly as built (see service/scenario_matrix.py)."""
+
+
 def _safe_step_check(feature: str, script: str):
     """Returns the findings list, or None if the checker itself crashed."""
     try:
@@ -1365,6 +1370,12 @@ async def _generate_one_screen(ws: WebSocket, src: GitLabService, module: str,
                     screen_spec_data["screen_name"] = screen_name
                     screen_spec_backend_ok = bool(screen_spec_data.get("backend"))
                     project_context["screen_spec"] = screen_spec.compact(screen_spec_data)
+                    if script_builder.matrix_steps_enabled():
+                        # matrix: what the screen DOES (buttons, dialogs, save branches, list features) from its TS / HTML
+                        screen_spec_data["behavior"] = behavior_facts.extract(
+                            project_context.get("source_files", []),
+                            project_context.get("primary_dir") or resolved_source.dir)
+                        await send_log(ws, f"{tag}screen behaviour: {behavior_facts.summary(screen_spec_data['behavior'])}.", "secondary")
                     await send_log(ws, f"{tag}{screen_spec.summary_line(screen_spec_data)}.", "secondary")
                 else:
                     await send_log(ws, f"{tag}no formjson found for this screen - using the normal analysis.", "muted")
@@ -1496,15 +1507,48 @@ async def _generate_one_screen(ws: WebSocket, src: GitLabService, module: str,
                 for _k in ("screen_spec", "value_pool", "scenario_plan"):
                     project_analysis.pop(_k, None)
 
-        await send_log(ws, f"{tag}running test case agent...", "secondary")
-        test_cases = await _run_test_cases_with_chunking(
-            project_analysis=project_analysis, user_request=user_request,
-            business_context=business_context, tag=tag, ws=ws,
-        )
+        matrix_mode = False
+        test_cases = None
+        if (script_builder.matrix_steps_enabled() and isinstance(project_analysis, dict)
+                and project_analysis.get("screen_spec")):
+            # matrix: the whole feature is built by code from the screen spec + the TS / HTML behaviour
+            # (service/scenario_matrix.py): full Examples data in every outline, many rows, no LLM call.
+            try:
+                _nav = datacy_scan._clean_path(datacy_scan._first_page(project_analysis).get("navigation_path")) or [module, screen_name]
+                _mx_llm = await matrix_llm.realistic_values(project_analysis["screen_spec"])   # {} unless USE_MATRIX_LLM_VALUES=1
+                test_cases, _mx_info = await asyncio.to_thread(
+                    scenario_matrix.build_feature, project_analysis["screen_spec"],
+                    project_analysis["screen_spec"].get("behavior"), _nav, screen_name, business_context, _mx_llm)
+                if test_cases and _mx_info["outlines"] >= 1:
+                    matrix_mode = True
+                    await send_log(ws, f"{tag}scenario matrix: {_mx_info['outlines']} scenario outline(s), "
+                                       f"{_mx_info['rows']} example row(s), built from the screen spec and its TS/HTML.", "success")
+                else:
+                    test_cases = None
+            except WebSocketDisconnect:
+                raise
+            except Exception:
+                logger.exception("%sscenario matrix failed - using the test case agent", tag)
+                test_cases = None
+        if not matrix_mode:
+            await send_log(ws, f"{tag}running test case agent...", "secondary")
+            test_cases = await _run_test_cases_with_chunking(
+                project_analysis=project_analysis, user_request=user_request,
+                business_context=business_context, tag=tag, ws=ws,
+            )
 
         # screenspec: how many of the page's fields the scenarios really use (one repair pass is optional:
         # USE_COVERAGE_REPAIR=1). Runs before the verification below, so any repaired rows are verified too.
-        if screen_spec_data and isinstance(project_analysis, dict) and project_analysis.get("screen_spec"):
+        if matrix_mode:
+            try:
+                _mc = scenario_matrix.coverage_summary(test_cases, screen_spec_data, screen_spec_data.get("behavior"))
+                await send_log(
+                    ws, f"{tag}coverage: {len(_mc['fields_used'])}/{_mc['fields_total']} field(s), "
+                        f"{len(_mc['covered'])} behaviour(s) covered ({', '.join(_mc['covered'])})"
+                        + (f"; not covered: {', '.join(_mc['missing'])}" if _mc["missing"] else "."), "secondary")
+            except Exception:
+                logger.exception("%smatrix coverage summary failed", tag)
+        elif screen_spec_data and isinstance(project_analysis, dict) and project_analysis.get("screen_spec"):
             try:
                 _cov = screen_spec.coverage_report(test_cases, screen_spec_data)
                 await send_log(
@@ -1531,6 +1575,8 @@ async def _generate_one_screen(ws: WebSocket, src: GitLabService, module: str,
         # Every ExpectedResult must be a message that really belongs to this screen;
         # rows that cannot be verified are removed (see service/expected_results.py).
         try:
+            if matrix_mode:
+                raise _SkipPostProcessing()   # matrix rows are already consistent: nothing may be dropped or rewritten
             test_cases, _er_report = expected_results.verify_feature(test_cases, project_analysis, screen_name)
             if _er_report["dropped"]:
                 _er_preview = "; ".join(f'{c or "row"}: "{e}"' for c, e in _er_report["dropped"][:3])
@@ -1544,6 +1590,8 @@ async def _generate_one_screen(ws: WebSocket, src: GitLabService, module: str,
                 await send_log(ws, f"{tag}{_er_report['note']}.", "muted")
         except WebSocketDisconnect:
             raise
+        except _SkipPostProcessing:
+            pass
         except Exception:
             logger.exception("%sexpected-result check failed - keeping the feature as generated", tag)
 
@@ -1552,12 +1600,16 @@ async def _generate_one_screen(ws: WebSocket, src: GitLabService, module: str,
         # scenarios that use records this file created, delete split into confirm / cancel.
         # Best-effort: on any problem the feature is kept exactly as it was.
         try:
+            if matrix_mode:
+                raise _SkipPostProcessing()
             _fq_controls = script_builder.controls_from_analysis(project_analysis)
             test_cases, _fq_report = feature_quality.refine_feature(test_cases, project_analysis, _fq_controls)
             for _fq_note in _fq_report["notes"]:
                 await send_log(ws, f"{tag}{_fq_note}.", "secondary")
         except WebSocketDisconnect:
             raise
+        except _SkipPostProcessing:
+            pass
         except Exception:
             logger.exception("%sfeature clean-up failed - keeping the feature as generated", tag)
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 
 SCRIPT_MARKER = (
@@ -802,6 +803,347 @@ Then("I should no longer see the record {string} using the {string} field", (val
 """
 
 
+# Extra steps of the scenario matrix (service/scenario_matrix.py). Added to the script ONLY when
+# USE_MATRIX_PLANNER=1, after the QC template and the generated block; nothing above them is changed.
+_MATRIX_STEPS = r"""
+// =====================================================================================
+// Scenario-matrix steps (added only when USE_MATRIX_PLANNER=1). They are ADDED to the
+// script; no QC-owned step above is changed. Selectors come from the screen's own
+// TS / HTML (BEHAVIOR), with generic fallbacks.
+// =====================================================================================
+const BEHAVIOR = __BEHAVIOR__;
+const LIST = BEHAVIOR.list || {};
+const ROLES = BEHAVIOR.roles || {};
+const MODAL_SEL = (BEHAVIOR.modal && BEHAVIOR.modal.selector) || '.modal, [class*="modal-content"]';
+
+const escRe = (t) => String(t).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+const dotted = (c) => (c ? '.' + String(c).trim().split(/\s+/)[0] : '');
+const aliasOf = (label) => 'counter_' + String(label).replace(/\W+/g, '_');
+
+// the first of these selectors that is visible is clicked (the form's own icons are searched inside the form first)
+function clickFirstVisible(label, selectors) {
+  cy.get('body', { timeout: 30000 }).should(($b) => {
+    const hit = selectors.some((s) => $b.find(s).filter(':visible').length > 0);
+    expect(hit, `a visible "${label}" control (${selectors.join(' | ')})`).to.equal(true);
+  });
+  cy.get('body').then(($b) => {
+    const sel = selectors.find((s) => $b.find(s).filter(':visible').length > 0);
+    cy.wrap($b.find(sel).filter(':visible').first()).scrollIntoView().click({ force: true });
+  });
+  cy.wait(1000);
+}
+
+function roleSelectors(role, extras) {
+  const r = ROLES[role] || {};
+  const list = [];
+  const scope = BEHAVIOR.modal && BEHAVIOR.modal.selector ? BEHAVIOR.modal.selector + ' ' : '';
+  if (r.class) {
+    list.push(`${scope}${dotted(r.class)}`);
+  }
+  if (r.title) {
+    list.push(`${scope}[title="${r.title}"]`);
+  }
+  return list.concat(extras);
+}
+
+// ---- a key field of a NEW record (an add-new picklist such as a code / name) ----
+Then("I enter {string} in the {string} new record field", (value, field) => {
+  if (!value) {
+    return;                                         // nothing to type - the field stays empty
+  }
+  const known = CONTROLS[field];
+  const names = [known && known.dataCy, `${field}-Input`, `${field}-PickList`, `${field}-PickListDrop`].filter(Boolean);
+  const found = ($b) => names.find((n) => $b.find(`[data-cy="${n}"]`).filter(':visible').length > 0);
+  cy.get('body', { timeout: 30000 }).should(($b) => {
+    expect(found($b), `the "${field}" control (${names.join(' / ')})`).to.be.a('string');
+  });
+  cy.get('body').then(($b) => {
+    const $el = $b.find(`[data-cy="${found($b)}"]`).filter(':visible').first();
+    const $input = $el.is('input, textarea') ? $el : $el.find('input, textarea').filter(':visible').first();
+    if ($input.length) {
+      cy.wrap($input).scrollIntoView().click({ force: true }).clear({ force: true }).type(value, { force: true, delay: 50 });
+      cy.wait(500);
+      return;
+    }
+    // the control is a picklist button: open it and type the new value in its search bar
+    Cypress.log({ name: 'new record', message: `"${field}" is a picklist button - typing the new value in the picklist search bar` });
+    cy.wrap($el).click({ force: true });
+    cy.get("[data-cy='PicklistSearchBar']").should('be.visible').click().clear().type(value);
+    cy.wait(1500);
+    cy.get('body').then(($b2) => {
+      const $new = $b2.find('[data-cy*="AddNew"], .addnew, [class*="add-new"]').filter(':visible').first();
+      if ($new.length) {
+        cy.wrap($new).click({ force: true });
+      }
+    });
+  });
+});
+
+Then("I clear the {string} field", (field) => {
+  const known = CONTROLS[field];
+  const names = [known && known.dataCy, `${field}-Textarea`, `${field}-Input`, `${field}-PickList`, `${field}-PickListDrop`].filter(Boolean);
+  const found = ($b) => names.find((n) => $b.find(`[data-cy="${n}"]`).filter(':visible').length > 0);
+  cy.get('body', { timeout: 30000 }).should(($b) => {
+    expect(found($b), `the "${field}" control (${names.join(' / ')})`).to.be.a('string');
+  });
+  cy.get('body').then(($b) => {
+    const $el = $b.find(`[data-cy="${found($b)}"]`).filter(':visible').first();
+    const $input = $el.is('input, textarea') ? $el : $el.find('input, textarea').filter(':visible').first();
+    expect($input.length, `an input inside "${field}"`).to.be.greaterThan(0);
+    cy.wrap($input).scrollIntoView().click({ force: true }).clear({ force: true });
+    cy.wait(300);
+  });
+});
+
+// ---- the form (modal) ----
+Then("I click the Reset button", () => {
+  clickFirstVisible('Reset', roleSelectors('reset', ['[data-cy="ResetForm"]', '[data-cy="ClearForm"]', '[title="Reset"]', '[title="Clear"]']));
+});
+
+Then("I click the Close button", () => {
+  clickFirstVisible('Close', roleSelectors('close', ['[data-cy="CloseForm"]', '[title="Close"]', '.closeicon']));
+});
+
+Then("I request to delete the open record", () => {
+  closeOpenDialogs();
+  clickFirstVisible('Delete', roleSelectors('delete', ['[data-cy="DeleteForm"]', '[title="Delete"]']));
+});
+
+Then("the form should be open", () => {
+  cy.get('body', { timeout: 15000 }).should(($b) => {
+    expect($b.find(MODAL_SEL).filter(':visible').length, 'a visible form').to.be.greaterThan(0);
+  });
+});
+
+Then("the form should still be open", () => {
+  cy.get('body', { timeout: 15000 }).should(($b) => {
+    expect($b.find(MODAL_SEL).filter(':visible').length, 'the form is still open').to.be.greaterThan(0);
+  });
+});
+
+Then("the form should be closed", () => {
+  cy.wait(800);
+  cy.get('body', { timeout: 15000 }).should(($b) => {
+    expect($b.find(MODAL_SEL).filter(':visible').length, 'visible forms').to.equal(0);
+  });
+});
+
+Then("the form fields should be empty", () => {
+  cy.get('body', { timeout: 15000 }).should(($b) => {
+    const $scope = $b.find(MODAL_SEL).filter(':visible').first();
+    expect($scope.length, 'an open form').to.be.greaterThan(0);
+    const $filled = $scope.find('input, textarea').filter(':visible').filter((i, e) => {
+      return !/^(checkbox|radio|button|submit|hidden)$/i.test(e.type)
+        && String(e.getAttribute('data-cy') || '') !== 'PicklistSearchBar'
+        && String(e.value || '').trim() !== '';
+    });
+    const names = $filled.map((i, e) => e.getAttribute('data-cy') || e.name || e.className).get().join(', ');
+    expect($filled.length, `fields still holding a value: ${names}`).to.equal(0);
+  });
+});
+
+Then("the {string} action should be {string}", (title, state) => {
+  const re = new RegExp('^\\s*' + escRe(title) + '\\s*$', 'i');
+  cy.get('body', { timeout: 10000 }).should(($b) => {
+    const $scope = $b.find(MODAL_SEL).filter(':visible').first();
+    expect($scope.length, 'an open form').to.be.greaterThan(0);
+    const $hit = $scope.find('*').filter(':visible').filter((i, e) => {
+      const t = String(e.getAttribute('title') || e.getAttribute('aria-label') || '').trim();
+      return re.test(t) || (e.children.length === 0 && re.test(Cypress.$(e).text()));
+    });
+    if (/^visible$/i.test(state)) {
+      expect($hit.length, `the "${title}" action is visible`).to.be.greaterThan(0);
+    } else {
+      expect($hit.length, `the "${title}" action is hidden`).to.equal(0);
+    }
+  });
+});
+
+Then("the {string} field should show {string}", (field, expected) => {
+  if (!expected) {
+    return;
+  }
+  if (/^(checked|unchecked)$/i.test(expected)) {
+    const names = checkboxNames(field);
+    cy.get('body', { timeout: 15000 }).should(($b) => {
+      const now = readCheckbox($b, names);
+      expect(now, `checkbox "${field}"`).to.not.equal(null);
+      expect(now.checked, `checkbox "${field}" is ${expected}`).to.equal(/^checked$/i.test(expected));
+    });
+    return;
+  }
+  const known = CONTROLS[field];
+  const names = [known && known.dataCy, `${field}-Input`, `${field}-Textarea`, `${field}-ComboBox`, `${field}-PickListDrop`, `${field}-PickList`].filter(Boolean);
+  cy.get('body', { timeout: 15000 }).should(($b) => {
+    const texts = [];
+    names.forEach((n) => {
+      $b.find(`[data-cy="${n}"]`).each((i, e) => {
+        const $e = Cypress.$(e);
+        const vals = $e.find('input, textarea').toArray().map((x) => x.value);
+        texts.push(squashText([$e.text(), $e.val(), ...vals].join(' ')));
+      });
+    });
+    expect(texts.length, `the "${field}" control`).to.be.greaterThan(0);
+    const want = squashText(expected).toLowerCase();
+    expect(texts.some((t) => t.toLowerCase().includes(want)), `"${field}" shows "${expected}" (found: ${texts.join(' | ').slice(0, 200)})`).to.equal(true);
+  });
+});
+
+// ---- the list ----
+function listRoot($b) {
+  const sel = [dotted(LIST.list_container), dotted(LIST.card_container)].filter(Boolean).join(', ');
+  const $r = sel ? $b.find(sel).filter(':visible') : $b.find('table, [class*="grid"]').filter(':visible');
+  return $r.length ? $r : $b;
+}
+
+Then("I search the list for {string}", (value) => {
+  cy.get('body', { timeout: 15000 }).then(($b) => {
+    const $box = findSearchBox($b);
+    expect($box.length, 'a search box').to.be.greaterThan(0);
+    cy.wrap($box).click({ force: true }).clear({ force: true }).type(value, { force: true, delay: 30 });
+    cy.wait(1200);
+  });
+});
+
+Then("I clear the list search", () => {
+  cy.get('body').then(($b) => {
+    const $box = findSearchBox($b);
+    expect($box.length, 'a search box').to.be.greaterThan(0);
+    cy.wrap($box).click({ force: true }).clear({ force: true });
+    cy.wait(1000);
+  });
+});
+
+Then("I should see the record {string} in the list", (value) => {
+  const re = new RegExp('(^|\\s)' + escRe(squashText(value)) + '(\\s|$)');
+  cy.get('body', { timeout: 15000 }).should(($b) => {
+    const text = squashText(listRoot($b).text());
+    expect(re.test(text) || text.includes(squashText(value)), `"${value}" is in the list`).to.equal(true);
+  });
+});
+
+Then("I should not see the record {string} in the list", (value) => {
+  const re = new RegExp('(^|\\s)' + escRe(squashText(value)) + '(\\s|$)');
+  cy.wait(800);
+  cy.get('body', { timeout: 15000 }).should(($b) => {
+    expect(re.test(squashText(listRoot($b).text())), `"${value}" is not in the list`).to.equal(false);
+  });
+});
+
+Then("the list row {string} should show {string}", (record, text) => {
+  cy.get('body', { timeout: 15000 }).should(($b) => {
+    const $leaf = listRoot($b).find('*').filter(':visible').filter((i, e) => e.children.length === 0 && squashText(e.textContent).includes(record)).first();
+    expect($leaf.length, `a list entry for "${record}"`).to.be.greaterThan(0);
+    let $row = $leaf.closest('tr');
+    if (!$row.length) {
+      $row = $leaf.closest('[class*="card"]:not([class*="grid"]):not([class*="header"]):not([class*="body"]):not([class*="footer"]):not([class*="meta"])');
+    }
+    expect($row.length, `the row of "${record}"`).to.be.greaterThan(0);
+    expect(squashText($row.text()).toLowerCase(), `row "${record}" shows "${text}"`).to.include(squashText(text).toLowerCase());
+  });
+});
+
+Then("I filter the list by type {string}", (value) => {
+  const sel = LIST.filter && LIST.filter.class ? `select${dotted(LIST.filter.class)}` : 'select';
+  cy.get(sel, { timeout: 15000 }).filter(':visible').first().select(value);
+  cy.wait(800);
+});
+
+Then("I sort the list by the {string} column in {string} order", (label, order) => {
+  const clicks = /^asc/i.test(order) ? 1 : 2;       // a column starts ascending; a second click reverses it
+  const want = String(label).toLowerCase();
+  for (let i = 0; i < clicks; i += 1) {
+    cy.get('th', { timeout: 15000 }).filter(':visible').filter((j, e) => squashText(e.textContent).toLowerCase() === want).first().click({ force: true });
+    cy.wait(400);
+  }
+});
+
+Then("the list should be sorted by {string} in {string} order", (label, order) => {
+  const asc = /^asc/i.test(order);
+  const col = (LIST.sortable_columns || []).find((c) => String(c.label).toLowerCase() === String(label).toLowerCase());
+  const ranks = (col && (LIST.sort_ranks || {})[col.field]) || null;
+  const key = (t) => (ranks && ranks[t] !== undefined ? ranks[t] : String(t).toLowerCase());
+  cy.get('body', { timeout: 15000 }).should(($b) => {
+    const heads = $b.find('table thead th').filter(':visible').map((i, e) => squashText(e.textContent).toLowerCase()).get();
+    const idx = heads.indexOf(String(label).toLowerCase());
+    expect(idx, `a "${label}" column`).to.be.greaterThan(-1);
+    const cells = $b.find('table tbody tr').filter(':visible').map((i, e) => squashText(Cypress.$(e).children('td').eq(idx).text())).get();
+    expect(cells.length, 'rows to compare').to.be.greaterThan(1);
+    const keys = cells.map(key);
+    const sorted = [...keys].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+    if (!asc) {
+      sorted.reverse();
+    }
+    expect(keys, `column "${label}" in ${order} order`).to.deep.equal(sorted);
+  });
+});
+
+Then("I switch to the {string} view", (view) => {
+  const mode = /card/i.test(view) ? 'card' : 'list';
+  const v = (LIST.views || []).find((x) => x.mode === mode);
+  const sel = v && v.title ? `[title="${v.title}"]` : (v && v.class ? dotted(v.class) : 'button');
+  cy.get(sel, { timeout: 15000 }).filter(':visible').first().click({ force: true });
+  cy.wait(500);
+});
+
+Then("I should see the {string} view", (view) => {
+  const card = /card/i.test(view);
+  const shown = dotted(card ? LIST.card_container : LIST.list_container);
+  const other = dotted(card ? LIST.list_container : LIST.card_container);
+  expect(shown, `a known container for the ${view} view`).to.not.equal('');
+  cy.get(shown, { timeout: 15000 }).filter(':visible').should('have.length.greaterThan', 0);
+  if (other) {
+    cy.get('body').should(($b) => {
+      expect($b.find(other).filter(':visible').length, `the other view is hidden`).to.equal(0);
+    });
+  }
+});
+
+Then("I should see the empty state {string}", (message) => {
+  const sel = LIST.empty_state && LIST.empty_state.class ? dotted(LIST.empty_state.class) : '[class*="empty"]';
+  cy.get(sel, { timeout: 15000 }).filter(':visible').should('have.length.greaterThan', 0);
+  cy.get(sel).filter(':visible').first().should('contain.text', message);
+});
+
+// ---- counters ----
+function counterValue($b, label) {
+  const lc = LIST.counter_label_class || 'stat-label';
+  const nc = LIST.counter_number_class || 'stat-number';
+  const $l = $b.find('.' + lc).filter((i, e) => squashText(e.textContent).toLowerCase() === String(label).toLowerCase()).first();
+  return parseInt(squashText($l.parent().find('.' + nc).first().text()), 10);
+}
+
+Then("I remember the number shown for {string}", (label) => {
+  cy.get('body', { timeout: 15000 }).should(($b) => {
+    expect(Number.isNaN(counterValue($b, label)), `a number is shown for "${label}"`).to.equal(false);
+  });
+  cy.get('body').then(($b) => {
+    cy.wrap(counterValue($b, label)).as(aliasOf(label));
+  });
+});
+
+Then("the number shown for {string} should have changed by {string}", (label, delta) => {
+  cy.get('@' + aliasOf(label)).then((before) => {
+    cy.get('body', { timeout: 15000 }).should(($b) => {
+      expect(counterValue($b, label), `"${label}" changed by ${delta}`).to.equal(before + parseInt(delta, 10));
+    });
+  });
+});
+"""
+
+
+def matrix_steps_enabled() -> bool:
+    return os.getenv("USE_MATRIX_PLANNER", "0").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _behavior_for_script(project_analysis: dict) -> dict:
+    """The parts of the screen's behaviour facts the matrix steps need (selectors, list features)."""
+    spec = (project_analysis or {}).get("screen_spec") or {}
+    b = spec.get("behavior") or {}
+    keep = {k: b.get(k) for k in ("roles", "modal", "list", "type_text") if b.get(k)}
+    return keep
+
+
 def build_script(project_analysis: dict) -> str:
     """The complete step-definition file for one screen."""
     controls = controls_from_analysis(project_analysis)
@@ -816,7 +1158,10 @@ def build_script(project_analysis: dict) -> str:
         .replace("__CONTROLS__", json.dumps(controls, indent=2, ensure_ascii=False))
         .replace("__ACTIONS__", json.dumps(actions, indent=2, ensure_ascii=False))
     )
-    return _TEMPLATE_BLOCK.rstrip("\n") + "\n" + generated
+    script = _TEMPLATE_BLOCK.rstrip("\n") + "\n" + generated
+    if matrix_steps_enabled():
+        script += _MATRIX_STEPS.replace("__BEHAVIOR__", json.dumps(_behavior_for_script(project_analysis), indent=2, ensure_ascii=False))
+    return script
 
 
 def is_generated(script: str | None) -> bool:
