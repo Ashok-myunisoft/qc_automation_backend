@@ -37,6 +37,7 @@ from service import feature_quality  # deterministic feature clean-up
 from service import chunk_analysis
 from service import screen_spec, value_gen  # screen spec (USE_SCREEN_SPEC / USE_BACKEND_DIGEST)
 from service import screen_facts, feature_passes, coverage_loop, extended_steps, run_metrics  # coverage upgrade (flags)
+from service import feature_fixer, template_steps  # code-only feature repair + fixed extended step definitions
 from service import history_store
 from service import job_manager
 from service import job_store
@@ -1323,32 +1324,59 @@ def _merge_step_findings(validation: dict | None, findings, repaired_parts: list
 
 async def _add_extended_steps(ws: WebSocket, tag: str, test_cases: str, base_script: str, project_context: dict,
                               project_analysis: dict, metrics=None) -> str:
-    """USE_EXTENDED_STEPS: the agent writes ONLY the definitions of steps the code-built script lacks; the block is
-    guarded (template intact, no duplicates, node --check, no network/storage). Rejected twice -> base script kept,
-    and the step checker reports the undefined steps as today."""
+    """USE_EXTENDED_STEPS: definitions for the steps the code-built script lacks.
+    1) the fixed, code-written definitions (service/template_steps.py) are added first - no AI involved;
+    2) only what is still undefined goes to the agent, in small batches of 4 sentences, and every accepted
+       batch is kept even when a later one is rejected (one bad batch no longer loses the others).
+    Each block is guarded (template intact, no duplicates, node --check, no network/storage)."""
     try:
         missing = extended_steps.undefined_steps(test_cases, base_script)
         if not missing:
             return base_script
+        source_files = project_context.get("source_files") or []
         behavior = (project_analysis.get("behavior") or {}) if isinstance(project_analysis, dict) else {}
         if not behavior:
             from service import screen_behavior
-            behavior = screen_behavior.extract_behavior(project_context.get("source_files") or [])
-        await send_log(ws, f"{tag}writing {len(missing)} extended step definition(s)...", "secondary")
-        error = ""
-        for attempt in (1, 2):
-            block = await script_generate_agent.generate_extended_steps(
-                missing, base_script, project_context.get("source_files") or [], behavior, previous_error=error)
-            if metrics:
-                metrics.llm()
-            assembled, problems = extended_steps.assemble(base_script, block, missing)
-            if assembled:
-                await send_log(ws, f"{tag}extended step definitions added ({len(missing)} step sentence(s)).", "success")
-                return assembled
-            error = "; ".join(problems)
-            logger.warning("%sextended steps attempt %d rejected: %s", tag, attempt, error)
-        logger.error("%sextended step block rejected twice - keeping the base script (%s)", tag, error)
-        await send_log(ws, f"{tag}extended step definitions rejected ({error[:160]}) - those steps stay undefined and are reported by the step checker.", "danger")
+            behavior = screen_behavior.extract_behavior(source_files)
+        script = base_script
+
+        # 1) fixed definitions
+        try:
+            block, covered = template_steps.build_block(
+                behavior, missing, project_analysis.get("screen_spec") if isinstance(project_analysis, dict) else None)
+            if block:
+                assembled, problems = extended_steps.assemble(script, block, covered)
+                if assembled:
+                    script = assembled
+                    await send_log(ws, f"{tag}{len(covered)} extended step definition(s) added from the fixed templates.", "success")
+                else:
+                    logger.error("%sfixed extended steps rejected: %s", tag, "; ".join(problems))
+                    await send_log(ws, f"{tag}fixed extended step definitions rejected ({'; '.join(problems)[:160]}) - asking the agent instead.", "danger")
+        except Exception:
+            logger.exception("%sfixed extended steps failed - falling back to the agent", tag)
+
+        # 2) whatever is still undefined: the agent, a few sentences at a time
+        left = extended_steps.undefined_steps(test_cases, script)
+        if left:
+            await send_log(ws, f"{tag}writing {len(left)} extended step definition(s) with the agent...", "secondary")
+        for start in range(0, len(left), 4):
+            batch = left[start:start + 4]
+            error = ""
+            for attempt in (1, 2):
+                block = await script_generate_agent.generate_extended_steps(
+                    batch, script, source_files, behavior, previous_error=error)
+                if metrics:
+                    metrics.llm()
+                assembled, problems = extended_steps.assemble(script, block, batch)
+                if assembled:
+                    script = assembled
+                    break
+                error = "; ".join(problems)
+                logger.warning("%sextended steps attempt %d rejected: %s", tag, attempt, error)
+            else:
+                logger.error("%sextended step batch rejected twice - those steps stay undefined (%s)", tag, error)
+                await send_log(ws, f"{tag}extended step definitions rejected ({error[:160]}) - those steps stay undefined and are reported by the step checker.", "danger")
+        return script
     except Exception:
         logger.exception("%sextended steps failed - keeping the base script", tag)
     return base_script
@@ -1648,6 +1676,28 @@ async def _generate_one_screen(ws: WebSocket, src: GitLabService, module: str,
             raise
         except Exception:
             logger.exception("%sfeature clean-up failed - keeping the feature as generated", tag)
+
+        # Code-only repair of what the passes cannot see of each other (service/feature_fixer.py): unique record
+        # codes, "new record field" steps, rows the screen cannot run, delete order, rebuilt open-existing / list
+        # scenarios. It needs the extended step vocabulary, so it runs with USE_EXTENDED_STEPS=1 (or after passes).
+        if _pass_info is not None or extended_steps.enabled():
+            try:
+                from service import screen_behavior as _screen_behavior
+                _ff_behavior = (project_analysis.get("behavior") if isinstance(project_analysis, dict) else None) \
+                    or _screen_behavior.extract_behavior(project_context.get("source_files") or [])
+                test_cases, _ff_report = feature_fixer.fix_feature(
+                    test_cases, project_analysis, _ff_behavior, script_builder.controls_from_analysis(project_analysis))
+                _metrics.stage("feature_fixer", test_cases)
+                for _ff_note in _ff_report["notes"][:25]:
+                    await send_log(ws, f"{tag}{_ff_note}.", "secondary")
+                if len(_ff_report["notes"]) > 25:
+                    await send_log(ws, f"{tag}... and {len(_ff_report['notes']) - 25} more fix(es) - see the backend log.", "muted")
+                for _ff_note in _ff_report["notes"]:
+                    logger.info("%sfeature fixer: %s", tag, _ff_note)
+            except WebSocketDisconnect:
+                raise
+            except Exception:
+                logger.exception("%sfeature fixer failed - keeping the feature as it was", tag)
 
         automation_contract = _build_automation_contract(project_analysis)
         # The script is built by code from the verified (scan-merged) data-cy values -

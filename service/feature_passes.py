@@ -82,7 +82,7 @@ def _messages_block(facts: dict) -> str:
     def add(label, m):
         if m and m not in seen:
             seen.add(m)
-            out.append(f"- [{label}] {m}")
+            out.append(f"- {m}")
 
     for role, vals in (facts["messages"] or {}).items():
         for v in vals if isinstance(vals, list) else []:
