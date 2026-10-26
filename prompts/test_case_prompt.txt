@@ -64,7 +64,11 @@ Match the action wording to the field type shown in Project Analysis:
 
 These steps already have definitions (the first four are owned by the QC team,
 the field steps after them are generated from the real data-cy of the screen).
-Use exactly these sentences, with the quotes and the placeholders as shown:
+Use exactly these sentences, with the quotes and the placeholders as shown.
+When the screen has the matching capability (search, filter, sort, view switch,
+counters, empty state, reset, close, form state, delete prompt, new record
+field), the EXTENDED STEPS listed in the user message or repair request are
+also allowed, spelled exactly as given:
 
   I select "<Value>" in the "<FieldName>" picklist field
   I enter "<Value>" in the "<FieldName>" input field
@@ -137,7 +141,9 @@ the Business Context. A row built on a guess fails on the real application.
   (ui_validations, business_validations, a dialog's expected_message, a field's
   own validation text) or one of the ERP's standard messages shown in this
   prompt's examples ("Details Saved Successfully", "<Field label>* Should not be
-  Empty"). If you do not know the real message for a row, leave that row out.
+  Empty"). If no real message exists for a situation, still write the row and
+  assert an observable behaviour (for example the form stays open) using the
+  extended steps; never invent a message.
   Never write made-up wording such as "Created Successfully", "Updated
   Successfully", "Must be a number" or "Amount exceeds the maximum limit".
 - Never invent a maximum, minimum, length limit or format rule. Write boundary
@@ -207,7 +213,7 @@ Boundary Value, UI, Business Rule, Lookup, Dropdown, Checkbox, Table/Grid, Workf
 Authentication, Authorization, Role-Based Access, Error Handling, API Integration.
 
 
-#SAVE AND FORM COVERAGE MATRIX (CRITICAL — COVERAGE MUST BE HIGH)
+#SAVE AND FORM COVERAGE MATRIX (CRITICAL — COVERAGE MUST BE HIGH; this is the minimum, not the maximum)
 
 For every screen, and above all for the Save action, do not stop at one
 "happy path". Write varied Examples rows covering every item below that the
@@ -308,9 +314,8 @@ screen decides WHICH ones exist.
      e. Delete (only if the screen has delete)
      f. Dropdown / picklist / radio / checkbox variants and dependent fields
      g. Duplicate or business-rule checks (only where the analysis states one)
-   Aim for at least 5 Scenario Outlines per screen. If the screen genuinely
-   supports fewer themes, write all that it supports and stop - never invent a
-   theme or a row to reach the number.
+   Write every scenario the screen facts justify. A coverage checker will
+   request anything missing.
 
 #SCENARIO DEPTH (CRITICAL — NO FIXED SCENARIO COUNT)
 
@@ -319,10 +324,8 @@ count per Rule block. The right number of scenarios is whatever the
 Project Analysis actually justifies — never pad toward a number, and
 never cap short of one. This means:
 
-- A simple direct screen (Case A above) with 5-10 fields and no tabs may
-  correctly produce as few as 10-15 scenarios. That is correct and
-  complete if that is genuinely everything the screen supports — do not
-  invent extra scenarios just to reach a larger number.
+- A simple direct screen (Case A above) is covered with every scenario its
+  facts justify; do not invent scenarios the screen cannot support.
 - A large tabbed screen (Case B above) with many sections and 100+
   fields may correctly produce 100 or more scenarios once every section
   is fully exhausted. That is correct and expected, not excessive — do

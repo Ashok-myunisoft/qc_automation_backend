@@ -2,6 +2,8 @@ import json
 import logging
 import re
 import os
+import time
+from pathlib import Path
 from agent_framework import Agent
 from agent_framework.openai import OpenAIChatClient
 from dotenv import load_dotenv
@@ -259,3 +261,56 @@ Script to repair:
             logger.warning("ScriptGenerateAgent.repair_script output failed the output gate: %s", remaining)
             return script
         return repaired
+
+    async def generate_extended_steps(
+        self,
+        missing_steps: list[str],
+        base_script: str,
+        source_files: list[dict],
+        behavior: dict | None = None,
+        previous_error: str = "",
+        source_char_budget: int = 60000,
+    ) -> str:
+        """Writes ONLY the new step definitions for `missing_steps` (USE_EXTENDED_STEPS). The code keeps the template,
+        login, CONTROLS, ACTIONS and base steps; the caller guards the returned block (service/extended_steps.py)."""
+        from service import run_metrics
+        if getattr(self, "_ext_agent", None) is None:
+            self._ext_agent = Agent(
+                name="ExtendedStepsAgent", client=self.client,
+                instructions=Path("prompts/extended_steps_prompt.txt").read_text(encoding="utf-8"),
+            )
+        reference = Path("prompts/extended_steps_reference.js").read_text(encoding="utf-8")
+        files, used = [], 0
+        for f in sorted(source_files or [], key=lambda x: (not str(x.get("path", "")).endswith((".html", ".ts")), 0)):
+            path = str(f.get("path", ""))
+            if path.startswith("[backend]") or not path.endswith((".html", ".ts")) or ".spec." in path:
+                continue
+            body = f.get("content", "") or ""
+            if used + len(body) > source_char_budget:
+                body = body[: max(0, source_char_budget - used)]
+            if not body:
+                continue
+            used += len(body)
+            files.append(f"----- {path} -----\n{body}")
+        error_block = (f"\nYOUR PREVIOUS BLOCK WAS REJECTED. Fix exactly this and return the full corrected block:\n{previous_error}\n"
+                       if previous_error else "")
+        message = f"""STEPS WITHOUT A DEFINITION (write exactly one definition for each, same wording, {{string}} for quoted/<placeholder> values):
+{chr(10).join("- " + s for s in missing_steps)}
+{error_block}
+DETECTED BEHAVIOUR FACTS (with the source snippets they came from):
+{json.dumps(behavior or {}, indent=2)[:12000]}
+
+BASE SCRIPT (reuse its helpers; do not redefine anything in it):
+{base_script}
+
+REFERENCE DEFINITIONS (style only; the BEHAVIOR values belong to another screen - read yours from the facts above):
+{reference}
+
+SCREEN SOURCE:
+{chr(10).join(files)}
+"""
+        t0 = time.time()
+        response = await self._ext_agent.run(message)
+        run_metrics.log_llm_call("ScriptGenerateAgent.generate_extended_steps", os.getenv("AI_MODEL", ""), response, t0)
+        return _strip_outer_javascript_fence(response.text or "")
+

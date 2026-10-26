@@ -36,6 +36,7 @@ from service import expected_results
 from service import feature_quality  # deterministic feature clean-up
 from service import chunk_analysis
 from service import screen_spec, value_gen  # screen spec (USE_SCREEN_SPEC / USE_BACKEND_DIGEST)
+from service import screen_facts, feature_passes, coverage_loop, extended_steps, run_metrics  # coverage upgrade (flags)
 from service import history_store
 from service import job_manager
 from service import job_store
@@ -1320,6 +1321,39 @@ def _merge_step_findings(validation: dict | None, findings, repaired_parts: list
     return result
 
 
+async def _add_extended_steps(ws: WebSocket, tag: str, test_cases: str, base_script: str, project_context: dict,
+                              project_analysis: dict, metrics=None) -> str:
+    """USE_EXTENDED_STEPS: the agent writes ONLY the definitions of steps the code-built script lacks; the block is
+    guarded (template intact, no duplicates, node --check, no network/storage). Rejected twice -> base script kept,
+    and the step checker reports the undefined steps as today."""
+    try:
+        missing = extended_steps.undefined_steps(test_cases, base_script)
+        if not missing:
+            return base_script
+        behavior = (project_analysis.get("behavior") or {}) if isinstance(project_analysis, dict) else {}
+        if not behavior:
+            from service import screen_behavior
+            behavior = screen_behavior.extract_behavior(project_context.get("source_files") or [])
+        await send_log(ws, f"{tag}writing {len(missing)} extended step definition(s)...", "secondary")
+        error = ""
+        for attempt in (1, 2):
+            block = await script_generate_agent.generate_extended_steps(
+                missing, base_script, project_context.get("source_files") or [], behavior, previous_error=error)
+            if metrics:
+                metrics.llm()
+            assembled, problems = extended_steps.assemble(base_script, block, missing)
+            if assembled:
+                await send_log(ws, f"{tag}extended step definitions added ({len(missing)} step sentence(s)).", "success")
+                return assembled
+            error = "; ".join(problems)
+            logger.warning("%sextended steps attempt %d rejected: %s", tag, attempt, error)
+        logger.error("%sextended step block rejected twice - keeping the base script (%s)", tag, error)
+        await send_log(ws, f"{tag}extended step definitions rejected ({error[:160]}) - those steps stay undefined and are reported by the step checker.", "danger")
+    except Exception:
+        logger.exception("%sextended steps failed - keeping the base script", tag)
+    return base_script
+
+
 async def _generate_one_screen(ws: WebSocket, src: GitLabService, module: str,
                                 screen_name: str, resolved_source: ResolvedSource,
                                 user_request: str, label: str | None = None,
@@ -1333,6 +1367,7 @@ async def _generate_one_screen(ws: WebSocket, src: GitLabService, module: str,
     Callers without a tree handy just omit it; behavior degrades
     gracefully to screen-only."""
     tag = f"[{label}] " if label else ""
+    _metrics = run_metrics.ScreenRun(screen_name, module)  # Phase 0: scenario counts per stage, one JSON line per run
     # Detect MM module screens — these 5 modules share one component file.
     # Skip ArchitectureAgent folder lookup and fetch the 4 fixed files directly.
     is_mm_screen = is_mm_module(module)
@@ -1427,25 +1462,41 @@ async def _generate_one_screen(ws: WebSocket, src: GitLabService, module: str,
             logger.warning("%sbackend context fetch failed: %s - continuing without it", tag, _be)
             await send_log(ws, f"{tag}backend context unavailable ({_be}) - analysing frontend only.", "muted")
 
-        await send_log(ws, f"{tag}running project analysis agent...", "secondary")
-        project_analysis = await project_analysis_agent.analyze(
-            project_context=project_context, user_request=user_request,
-        )
-        unresolved_shared_fields = _unresolved_shared_fields(project_analysis)
-        if unresolved_shared_fields:
-            await send_log(
-                ws,
-                f"{tag}resolving {len(unresolved_shared_fields)} unresolved shared control(s)...",
-                "secondary",
+        _bypass, _bypass_why = screen_facts.bypass_applies(screen_spec_data, is_mm_screen)
+        project_analysis = None
+        if _bypass:
+            try:
+                project_analysis = screen_facts.build_analysis_from_spec(screen_spec_data, project_context, module, screen_name)
+                _metrics.note("analysis", "code-built")
+                await send_log(ws, f"{tag}analysis agent skipped ({_bypass_why}) - built the analysis from the screen spec.", "secondary")
+            except Exception as _fe:
+                logger.exception("%scode-built analysis failed - using the analysis agent", tag)
+                project_analysis = None
+                await send_log(ws, f"{tag}code-built analysis failed ({_fe}) - running the analysis agent instead.", "muted")
+        else:
+            logger.info("%sanalysis agent path (%s)", tag, _bypass_why)
+        if project_analysis is None:
+            _metrics.note("analysis", "agent")
+            _metrics.llm()
+            await send_log(ws, f"{tag}running project analysis agent...", "secondary")
+            project_analysis = await project_analysis_agent.analyze(
+                project_context=project_context, user_request=user_request,
             )
-            shared_resolution = await shared_component_locator_agent.resolve(
-                _build_shared_locator_context(project_context, unresolved_shared_fields)
-            )
-            merged_count = _merge_shared_locator_results(project_analysis, shared_resolution)
-            logger.info(
-                "%sshared-component locator resolution merged %d/%d field(s): %s",
-                tag, merged_count, len(unresolved_shared_fields), shared_resolution,
-            )
+            unresolved_shared_fields = _unresolved_shared_fields(project_analysis)
+            if unresolved_shared_fields:
+                await send_log(
+                    ws,
+                    f"{tag}resolving {len(unresolved_shared_fields)} unresolved shared control(s)...",
+                    "secondary",
+                )
+                shared_resolution = await shared_component_locator_agent.resolve(
+                    _build_shared_locator_context(project_context, unresolved_shared_fields)
+                )
+                merged_count = _merge_shared_locator_results(project_analysis, shared_resolution)
+                logger.info(
+                    "%sshared-component locator resolution merged %d/%d field(s): %s",
+                    tag, merged_count, len(unresolved_shared_fields), shared_resolution,
+                )
         # datacyscan: read the real data-cy values from the running app (normal
         # AND MM screens) and merge them into the analysis. Best-effort: any
         # problem is logged as one line and generation continues as before.
@@ -1497,10 +1548,39 @@ async def _generate_one_screen(ws: WebSocket, src: GitLabService, module: str,
                     project_analysis.pop(_k, None)
 
         await send_log(ws, f"{tag}running test case agent...", "secondary")
-        test_cases = await _run_test_cases_with_chunking(
-            project_analysis=project_analysis, user_request=user_request,
-            business_context=business_context, tag=tag, ws=ws,
-        )
+        _pass_info = None
+        test_cases = None
+        _use_passes, _passes_why = feature_passes.applies(project_analysis.get("screen_spec") if isinstance(project_analysis, dict) else None, is_mm_screen)
+        if _use_passes and isinstance(project_analysis, dict) and "error" not in project_analysis:
+            try:
+                async def _plog(text, _t=tag):
+                    await send_log(ws, f"{_t}{text}", "secondary")
+                test_cases, _pass_info = await feature_passes.run(
+                    test_case_agent, project_context, project_analysis, project_analysis["screen_spec"],
+                    business_context, user_request, _plog, _metrics)
+                _metrics.note("feature", "passes")
+                if coverage_loop.enabled():
+                    async def _gap(gaps, current, _i=_pass_info):
+                        return await feature_passes.gap_fill(test_case_agent, _i["prefix"], _i["facts"], _i["ledger"], gaps, current)
+                    test_cases, _cov_report = await coverage_loop.run_loop(
+                        _pass_info["facts"], test_cases, _gap,
+                        lambda cur, new: chunk_analysis.merge_test_case_chunks(cur, [new]) if new.strip() else cur, _plog)
+                    _metrics.stage("coverage_loop", test_cases)
+            except WebSocketDisconnect:
+                raise
+            except Exception as _pe:
+                logger.exception("%sfeature passes failed - using the single-call path", tag)
+                await send_log(ws, f"{tag}topic passes failed ({_pe}) - using the normal test case generation.", "muted")
+                test_cases, _pass_info = None, None
+        else:
+            logger.info("%sfeature passes not used (%s)", tag, _passes_why)
+        if test_cases is None:
+            _metrics.note("feature", "single-call/chunked")
+            test_cases = await _run_test_cases_with_chunking(
+                project_analysis=project_analysis, user_request=user_request,
+                business_context=business_context, tag=tag, ws=ws,
+            )
+            _metrics.stage("agent_output", test_cases)
 
         # screenspec: how many of the page's fields the scenarios really use (one repair pass is optional:
         # USE_COVERAGE_REPAIR=1). Runs before the verification below, so any repaired rows are verified too.
@@ -1532,6 +1612,9 @@ async def _generate_one_screen(ws: WebSocket, src: GitLabService, module: str,
         # rows that cannot be verified are removed (see service/expected_results.py).
         try:
             test_cases, _er_report = expected_results.verify_feature(test_cases, project_analysis, screen_name)
+            _metrics.stage("verify_feature", test_cases)
+            for _c, _e in _er_report["dropped"]:
+                logger.warning("%sdropped row (unverified expected message): condition=%r expected=%r", tag, _c, _e)
             if _er_report["dropped"]:
                 _er_preview = "; ".join(f'{c or "row"}: "{e}"' for c, e in _er_report["dropped"][:3])
                 await send_log(
@@ -1553,7 +1636,12 @@ async def _generate_one_screen(ws: WebSocket, src: GitLabService, module: str,
         # Best-effort: on any problem the feature is kept exactly as it was.
         try:
             _fq_controls = script_builder.controls_from_analysis(project_analysis)
-            test_cases, _fq_report = feature_quality.refine_feature(test_cases, project_analysis, _fq_controls)
+            if _pass_info is not None or extended_steps.enabled():
+                test_cases, _fq_report = feature_passes.refine_protecting_extended(
+                    test_cases, lambda _t: feature_quality.refine_feature(_t, project_analysis, _fq_controls))
+            else:
+                test_cases, _fq_report = feature_quality.refine_feature(test_cases, project_analysis, _fq_controls)
+            _metrics.stage("refine_feature", test_cases)
             for _fq_note in _fq_report["notes"]:
                 await send_log(ws, f"{tag}{_fq_note}.", "secondary")
         except WebSocketDisconnect:
@@ -1572,6 +1660,9 @@ async def _generate_one_screen(ws: WebSocket, src: GitLabService, module: str,
             test_cases = script_builder.normalize_feature(test_cases, controls)
             generated_script = script_builder.build_script(project_analysis)
             script_locked = True
+            if extended_steps.enabled():
+                generated_script = await _add_extended_steps(
+                    ws, tag, test_cases, generated_script, project_context, project_analysis, _metrics)
             kinds: dict[str, int] = {}
             for info in controls.values():
                 kinds[info["kind"]] = kinds.get(info["kind"], 0) + 1
@@ -1610,6 +1701,9 @@ async def _generate_one_screen(ws: WebSocket, src: GitLabService, module: str,
             test_cases=test_cases, generated_script=generated_script,
         )
         validation_result = _merge_step_findings(validation_result, step_findings, step_repaired)
+        _metrics.stage("final", test_cases)
+        _metrics.write()
+        await send_log(ws, f"{tag}{_metrics.summary()}.", "muted")
     except WebSocketDisconnect:
         logger.warning("%sclient disconnected during generation - stopping", tag)
         raise
