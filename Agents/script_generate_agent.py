@@ -271,7 +271,7 @@ Script to repair:
         previous_error: str = "",
         source_char_budget: int = 60000,
     ) -> str:
-        """Writes ONLY the new step definitions for `missing_steps` (USE_EXTENDED_STEPS). The code keeps the template,
+        """Writes ONLY the new step definitions for `missing_steps`. The code keeps the template,
         login, CONTROLS, ACTIONS and base steps; the caller guards the returned block (service/extended_steps.py)."""
         from service import run_metrics
         if getattr(self, "_ext_agent", None) is None:
@@ -313,4 +313,3 @@ SCREEN SOURCE:
         response = await self._ext_agent.run(message)
         run_metrics.log_llm_call("ScriptGenerateAgent.generate_extended_steps", os.getenv("AI_MODEL", ""), response, t0)
         return _strip_outer_javascript_fence(response.text or "")
-

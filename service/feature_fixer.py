@@ -13,6 +13,10 @@ feature has defects that code can find and fix reliably:
   * "open existing" checks that expect values the record was never saved with
   * list scenarios that put search, filter, sort and view into one row of blanks
   * low-value scenarios (rows that repeat the same test, a "read-only" scenario that tests nothing)
+  * steps that are not in the step vocabulary (mapped to the right sentence, or removed and logged)
+  * input steps / Examples cells aimed at calculated fields (removed, logged); the calculated value is checked instead
+  * dates written as literal dates (made relative: today+N), messages written with {placeholders} (fixed part only)
+  * update rows that repeat a value the record already holds, or repeat another row (replaced / removed)
 
 Public function:  fix_feature(feature_text, project_analysis, behavior=None, controls=None)
                   -> (new_feature_text, {"notes": [...]})
@@ -26,6 +30,9 @@ import logging
 import re
 from dataclasses import dataclass, field
 from typing import Optional
+
+from service import calculated_fields
+from service.expected_results import message_fragment
 
 logger = logging.getLogger(__name__)
 
@@ -213,6 +220,8 @@ class Ctx:
                 "record_picker": bool(f.get("record_picker")), "readonly": bool(f.get("readonly")),
                 "max_length": f.get("max_length"), "lookup": bool(f.get("lookup")),
                 "required": bool(f.get("required")), "required_message": str(f.get("required_message") or ""),
+                "calculated": bool(f.get("calculated")), "computed_from": list(f.get("computed_from") or []),
+                "rule": f.get("calculated_rule") or {},
             })
         if not self.fields:   # no spec: the scan-verified controls give names and kinds only
             for base, c in (controls or {}).items():
@@ -220,7 +229,8 @@ class Ctx:
                     self.fields.append({"name": base, "label": base, "kind": c.get("kind") or "input", "options": [],
                                         "blank": None, "key": False, "record_picker": False, "readonly": False,
                                         "max_length": None, "lookup": False,
-                                        "required": False, "required_message": ""})
+                                        "required": False, "required_message": "",
+                                        "calculated": False, "computed_from": [], "rule": {}})
         self.by_norm = {}
         for f in self.fields:
             self.by_norm[_n(f["name"])] = f
@@ -236,6 +246,14 @@ class Ctx:
         self.save_msg = (self.messages.get("save") or [STANDARD_SAVE])[0]
         dup = self.messages.get("duplicate") or []
         self.dup_msg = dup[0] if dup else ""
+        self.date_format = str(self.spec.get("date_format") or "")
+        self.update_pool: dict = {}
+        try:
+            from service import value_gen as _vg
+            if self.spec.get("fields"):
+                self.update_pool = _vg.build_update_pool(self.spec)
+        except Exception:  # noqa: BLE001
+            logger.exception("feature_fixer: update pool unavailable - repeated update values are only reported")
         self.notes: list = []
         self.nav: list = []
         try:
@@ -1411,27 +1429,69 @@ def _p_update_open(items, ctx):
         ctx.note(f"{n} update scenario(s) started with 'Add New': they now open a saved record first")
 
 
+def _clear_shape(o: Outline):
+    """(column of the cleared field, column of the expected message) of a 'clear a field and update' outline, or None."""
+    if not o.tables:
+        return None
+    t = o.tables[0]
+    cs = next((_CLEAR_RE.match(s.text) for s in o.steps if _CLEAR_RE.match(s.text)), None)
+    ph = re.fullmatch(r"<([^<>]+)>", cs.group(1)) if cs else None
+    ci = _col(t, ph.group(1)) if ph else -1
+    conf = next((s for s in o.steps if s.text.startswith('I should see a confirmation message "')), None)
+    ph2 = re.fullmatch(r'I should see a confirmation message "<([^<>]+)>"', conf.text) if conf else None
+    ei = _col(t, ph2.group(1)) if ph2 else -1
+    return (ci, ei) if ci >= 0 and ei >= 0 else None
+
+
 def _p_update_clear(items, ctx):
-    """'Clear a mandatory field and Update': rebuilt from the required fields and their real messages."""
+    """'Clear a field and Update': a mandatory field expects its real message, an optional field keeps the agent's row
+    (the update succeeds); a mandatory field with no row of its own gets one."""
     if not ctx.key_field:
         return
     recs = _usable_records(items, ctx)
     targets = [o for o in _outlines(items) if _has(o, r"^I click the Update button$") and any(_CLEAR_RE.match(s.text) for s in o.steps)]
     if not targets:
         return
-    rows = [[f"Clear {f['label'] or f['name']}", f["name"], f["required_message"]] for f in ctx.fields
-            if f["required"] and f["required_message"] and f["name"] != ctx.key_field and not f["readonly"]]
-    at = items.index(targets[0])
-    for x in targets:
-        _drop(items, x)
-    if not rows or not recs:
-        ctx.note("update 'clear a mandatory field' scenario dropped: no required field with a known message")
+    required = {f["name"]: f for f in ctx.fields
+                if f["required"] and f["required_message"] and f["name"] != ctx.key_field and not f["readonly"]}
+    covered: set = set()
+    shaped = []
+    for o in targets:
+        sh = _clear_shape(o)
+        if sh is None:
+            _drop(items, o)                      # a shape the repair cannot read: rebuilt below from the required fields
+            continue
+        shaped.append((o, sh))
+        t, (ci, ei) = o.tables[0], sh
+        for row in t.rows:
+            fld = ctx.field(row[ci]) if ci < len(row) else None
+            if fld and fld["name"] in required and ei < len(row):
+                row[ei] = required[fld["name"]]["required_message"]
+                covered.add(fld["name"])
+    missing = [f for n, f in required.items() if n not in covered]
+    if not missing:
         return
-    o = Outline(title='Update - Clear a mandatory field and update - "<Condition>"')
+    if shaped:
+        o, (ci, ei) = shaped[0]
+        t = o.tables[0]
+        for f in missing:
+            base = list(t.rows[0]) if t.rows else [""] * len(t.header)
+            base = base + [""] * (len(t.header) - len(base))
+            base[0] = f"Clear {f['label'] or f['name']}"
+            base[ci], base[ei] = f["name"], f["required_message"]
+            t.rows.append(base)
+        ctx.note(f"update 'clear a field': {len(missing)} mandatory field(s) had no row and got one with the real message")
+        return
+    if not recs:
+        ctx.note("update 'clear a mandatory field' scenario dropped: no saved record to open")
+        return
+    rows = [[f"Clear {f['label'] or f['name']}", f["name"], f["required_message"]] for f in missing]
+    o = Outline(title='Update clear - Clear a mandatory field and update - "<Condition>"')
     o.steps = [Step("When", f'I open the existing record "{recs[0]["key"]}" using the "{ctx.key_field}" field'),
                Step("And", 'I clear the "<ClearField>" field'), Step("And", "I click the Update button"),
                Step("Then", 'I should see a confirmation message "<ExpectedResult>"'), Step("And", "the form should still be open")]
     o.tables.append(Table(header=["Condition", "ClearField", "ExpectedResult"], rows=rows))
+    at = next((i for i, it in enumerate(items) if isinstance(it, Outline) and _is_destructive(it)), len(items))
     items.insert(at, o)
     ctx.note(f"'clear a mandatory field' update scenario rebuilt: one row per required field ({len(rows)}), each with its own field and message")
 
@@ -1698,9 +1758,8 @@ def _p_unused_columns(items, ctx):
 
 
 def _p_cleanup(items, ctx):
-    """Re-runs: records this run created are deleted at the end (FEATURE_CLEANUP=0 switches this off)."""
-    import os
-    if os.getenv("FEATURE_CLEANUP", "1").strip().lower() in ("0", "false", "no", "off") or not ctx.key_field:
+    """Re-runs: records this run created are deleted at the end (the clean-up scenario always runs)."""
+    if not ctx.key_field:
         return
     gone = _deleted_keys(items, ctx)
     recs = [r for r in _collect_records(items, ctx) if r["key"].lower() not in gone]
@@ -1715,14 +1774,315 @@ def _p_cleanup(items, ctx):
     ctx.note(f"added a final clean-up scenario that deletes the {len(recs)} record(s) this run created (so the file can run again)")
 
 
+
+# =========================================================================== vocabulary, calculated fields, dates, messages
+_BUTTON_NAMES = {"add new": "Add New", "save": "save", "update": "Update", "edit": "Edit", "delete": "Delete",
+                 "reset": "Reset", "close": "Close"}
+_STEP_MAP = (
+    (re.compile(r"^(?:I (?:should )?see )?the form (?:is |remains |stays |still )*(?:still )(?:open|opened)$", re.I), "the form should still be open"),
+    (re.compile(r"^(?:I (?:should )?see )?the form (?:is |remains |stays )?(?:open|opened)$", re.I), "the form should be open"),
+    (re.compile(r"^(?:I (?:should )?see )?the form (?:is |gets |has )?(?:closed|close)$", re.I), "the form should be closed"),
+    (re.compile(r"^(?:I (?:should )?see )?the form fields? (?:is |are |should be |remain )?(?:empty|cleared|blank)$", re.I),
+     "the form fields should be empty"),
+)
+
+
+def _map_step(text: str) -> Optional[str]:
+    t = text.strip()
+    for rx, rep in _STEP_MAP:
+        if rx.match(t):
+            return rep
+    m = re.match(r"^I click (?:on )?the (add new|save|update|edit|delete|reset|close) button$", t, re.I)
+    if m:
+        return f"I click the {_BUTTON_NAMES[m.group(1).lower()]} button"
+    m = re.match(r'^I (?:should )?see (?:a |the )?(?:confirmation |success |validation |error |alert )?message "(.*)"$', t, re.I)
+    if m:
+        return f'I should see a confirmation message "{m.group(1)}"'
+    return None
+
+
+def _p_vocabulary(items, ctx):
+    """A step sentence that is not in the vocabulary has no definition: map it to the right sentence or remove it. The
+    script never gets a new definition to make an invalid sentence pass."""
+    from service import extended_steps
+    fixed = removed = 0
+    for o in list(_outlines(items)):
+        keep = []
+        for s in o.steps:
+            if extended_steps.in_vocabulary(s.text):
+                keep.append(s)
+                continue
+            new = _map_step(s.text)
+            if new and extended_steps.in_vocabulary(new):
+                ctx.note(f'step not in the vocabulary: "{s.text}" -> "{new}"')
+                s.text = new
+                fixed += 1
+                keep.append(s)
+                continue
+            removed += 1
+            ctx.note(f'step not in the vocabulary, removed: "{s.text}" (scenario "{o.title}")')
+        o.steps = keep
+        if not o.steps:
+            _drop(items, o)
+    if fixed or removed:
+        ctx.note(f"{fixed} step(s) mapped and {removed} step(s) removed because they are not in the step vocabulary")
+
+
+def _p_message_braces(items, ctx):
+    """Expected messages with {placeholders} (Leave No {leaveNumbers}) are matched by their fixed part only."""
+    n = 0
+    for o in _outlines(items):
+        for s in o.steps:
+            m = re.match(r'^(I should see a confirmation message ")(.*)"$', s.text)
+            if m and "{" in m.group(2):
+                s.text = f'{m.group(1)}{message_fragment(m.group(2))}"'
+                n += 1
+        for t in o.tables:
+            for ci, h in enumerate(t.header):
+                if "expected" in h.lower():
+                    for row in t.rows:
+                        if ci < len(row) and "{" in row[ci]:
+                            row[ci] = message_fragment(row[ci])
+                            n += 1
+    if n:
+        ctx.note(f"{n} expected message(s) with {{placeholders}} now hold only their fixed text")
+
+
+def _calc_name(ctx, name: str):
+    f = ctx.field(name) if name and "<" not in name else None
+    return f if f and f.get("calculated") else None
+
+
+def _p_calculated(items, ctx):
+    """Calculated / read-only fields are never filled: remove every input step (and clear step) that targets one."""
+    if not any(f.get("calculated") for f in ctx.fields):
+        return
+    n = 0
+    for o in list(_outlines(items)):
+        keep = []
+        for s in o.steps:
+            f = _fs(s)
+            name = f[2] if f else (_CLEAR_RE.match(s.text).group(1) if _CLEAR_RE.match(s.text) else None)
+            if name and _calc_name(ctx, name):
+                n += 1
+                ctx.note(f'calculated field "{name}": removed the input step "{s.text}" (scenario "{o.title}") - it is only checked')
+                continue
+            keep.append(s)
+        o.steps = keep
+        if not o.steps:
+            _drop(items, o)
+    if n:
+        ctx.note(f"{n} input step(s) aimed at calculated fields removed (their Examples cells go with the unused columns)")
+
+
+def _p_calculated_values(items, ctx):
+    """The value a calculated field should show: worked out in code when the rule is readable from the TS (days between
+    two relative dates), otherwise only 'not empty'."""
+    calc = [f for f in ctx.fields if f.get("calculated") and f.get("computed_from")]
+    if not calc:
+        return
+    n = 0
+    for o in _outlines(items):
+        for s in list(o.steps):
+            m = _SHOW_RE.match(s.text)
+            f = _calc_name(ctx, m.group(1)) if m else None
+            if not f or not f.get("computed_from"):
+                continue
+            rule = f.get("rule") or {}
+            srcs = {}
+            if rule.get("kind") == "days_between":
+                for st in o.steps:
+                    fs = _fs(st)
+                    fld = ctx.field(fs[2]) if fs else None
+                    if fld and fld["name"] in (rule.get("from_field"), rule.get("to_field")):
+                        srcs[fld["name"]] = fs[1]
+
+            def compute(rm: dict) -> str:
+                if rule.get("kind") != "days_between" or len(srcs) < 2:
+                    return "(not empty)"
+                v = calculated_fields.days_between(_resolve(srcs[rule["from_field"]], rm), _resolve(srcs[rule["to_field"]], rm),
+                                                   bool(rule.get("inclusive")))
+                return str(v) if v is not None and v >= 1 else "(not empty)"
+
+            ph = re.fullmatch(r"<([^<>]+)>", m.group(2))
+            t = o.tables[0] if o.tables else None
+            if ph and t is not None and _col(t, ph.group(1)) >= 0:
+                ci = _col(t, ph.group(1))
+                for row in t.rows:
+                    new = compute(_row_map(t, row))
+                    if ci < len(row) and row[ci] != new:
+                        row[ci] = new
+                        n += 1
+            elif not ph:
+                new = compute({})
+                if m.group(2) != new:
+                    s.text = f'the "{m.group(1)}" field should show "{new}"'
+                    n += 1
+    if n:
+        ctx.note(f"{n} expected value(s) of calculated fields set by code (worked out from the rule, else '(not empty)')")
+
+
+def _p_dates(items, ctx):
+    """Date values are relative (today, today+N, today-N) so the file never goes stale: a literal date is converted."""
+    n = bad = 0
+
+    def rel(v: str) -> str:
+        nonlocal n, bad
+        if not v.strip():
+            return v
+        r = calculated_fields.to_relative(v, ctx.date_format)
+        if r is None:
+            bad += 1
+            return v
+        if r != v:
+            n += 1
+        return r
+
+    for o in _outlines(items):
+        for s in o.steps:
+            f = _fs(s)
+            if not f or f[3] != "date":
+                continue
+            ph = re.fullmatch(r"<([^<>]+)>", f[1])
+            if ph and o.tables:
+                for t in o.tables:
+                    ci = _col(t, ph.group(1))
+                    if ci >= 0:
+                        for row in t.rows:
+                            if ci < len(row):
+                                row[ci] = rel(row[ci])
+            elif not ph:
+                new = rel(f[1])
+                if new != f[1]:
+                    s.text = s.text.replace(f'"{f[1]}"', f'"{new}"', 1)
+    if n:
+        ctx.note(f"{n} literal date(s) made relative (today+N), so the file does not go stale")
+    if bad:
+        ctx.note(f"{bad} date value(s) could not be read as a date and were left as written")
+
+
+def _row_view(o: Outline, t: Table, row: list, ctx) -> dict:
+    """What one row of an update scenario does: record, {field: value}, cleared fields, message."""
+    rm = _row_map(t, row)
+    key = ""
+    for s in o.steps:
+        m = re.match(r'^I open the existing record "([^"]*)" using the "([^"]*)" field$', s.text)
+        if m:
+            key = _resolve(m.group(1), rm).strip()
+    changes, cleared, msg = {}, [], ""
+    for s in o.steps:
+        f = _fs(s)
+        if f:
+            v = _resolve(f[1], rm).strip()
+            fld = ctx.field(f[2])
+            if v:
+                changes[fld["name"] if fld else f[2]] = v
+            continue
+        m = _CLEAR_RE.match(s.text)
+        if m:
+            cleared.append(_resolve(m.group(1), rm))
+            continue
+        m = re.match(r'^I should see a confirmation message "(.*)"$', s.text)
+        if m:
+            msg = _resolve(m.group(1), rm)
+    return {"key": key, "changes": changes, "cleared": cleared, "message": msg}
+
+
+def _is_update_outline(o: Outline) -> bool:
+    return bool(o.tables) and _has(o, r"^I click the Update button$") and _has(o, r"^I open the existing record")
+
+
+def _alt_value(entry: Optional[dict], val: str, cur: str, used: set) -> Optional[str]:
+    if not entry:
+        return None
+    for strict in (True, False):
+        for _cat, v in entry.get("values") or []:
+            if _n(v) in (_n(cur), _n(val)) or (strict and v.lower() in used):
+                continue
+            return v
+    return None
+
+
+def _p_update_values(items, ctx):
+    """Every update row changes a field to a value the record does not hold yet, and no two rows of one column repeat a
+    value (when the update data pool has another one). The record's current values are tracked through the file."""
+    if not ctx.key_field:
+        return
+    recs = {r["key"].lower(): dict(r["fields"]) for r in _collect_records(items, ctx)}
+    changed = 0
+    for o in _outlines(items):
+        if not _is_update_outline(o):
+            continue
+        t = o.tables[0]
+        fsteps = [(s, _fs(s)) for s in o.steps if _fs(s)]
+        used: dict = {}
+        for row in t.rows:
+            view = _row_view(o, t, row, ctx)
+            cur = recs.get(view["key"].lower())
+            if cur is None:
+                continue
+            for s, fs in fsteps:
+                ph = re.fullmatch(r"<([^<>]+)>", fs[1])
+                ci = _col(t, ph.group(1)) if ph else -1
+                fld = ctx.field(fs[2])
+                if ci < 0 or ci >= len(row) or not row[ci].strip() or not fld or fld["name"] == ctx.key_field:
+                    continue
+                val = row[ci].strip()
+                seen = used.setdefault(ci, set())
+                if _n(val) == _n(cur.get(fld["name"], "")) or val.lower() in seen:
+                    alt = _alt_value(ctx.update_pool.get(fld["name"]), val, cur.get(fld["name"], ""), seen)
+                    if alt and _n(alt) != _n(val):
+                        ctx.note(f'update row "{row[0] if row else ""}": "{val}" is what the record already holds / another row uses - now "{alt}"')
+                        row[ci] = alt
+                        val = alt
+                        changed += 1
+                seen.add(val.lower())
+            view = _row_view(o, t, row, ctx)
+            ok = not view["message"] or (re.search(r"success|updated|saved", view["message"], re.I)
+                                         and not re.search(r"should not be empty", view["message"], re.I))
+            if ok:
+                cur.update(view["changes"])
+                for c in view["cleared"]:
+                    cur.pop((ctx.field(c) or {}).get("name", c), None)
+    if changed:
+        ctx.note(f"{changed} update value(s) replaced so every update changes the record to something new")
+
+
+def _p_update_dedupe(items, ctx):
+    """No two update rows with identical values (same record, same changes, same clears, same message)."""
+    seen: set = set()
+    removed = 0
+    for o in list(_outlines(items)):
+        if not _is_update_outline(o):
+            continue
+        for t in o.tables:
+            keep = []
+            for row in t.rows:
+                v = _row_view(o, t, row, ctx)
+                sig = (v["key"].lower(), tuple(sorted((_n(f), x.lower()) for f, x in v["changes"].items())),
+                       tuple(sorted(_n(c) for c in v["cleared"])), v["message"].lower(), o.title.lower())
+                if sig in seen:
+                    removed += 1
+                    continue
+                seen.add(sig)
+                keep.append(row)
+            t.rows = keep
+        if all(not t.rows for t in o.tables):
+            _drop(items, o)
+    if removed:
+        ctx.note(f"{removed} update row(s) removed: same record and same values as another update row")
+
+
 # =========================================================================== entry
 _PASSES = (
-    _p_navigation, _p_background, _p_normalize_steps, _p_unknown_fields, _p_form_state_start, _p_ensure_open, _p_options,
+    _p_navigation, _p_background, _p_normalize_steps, _p_vocabulary, _p_message_braces, _p_unknown_fields, _p_calculated,
+    _p_dates, _p_form_state_start, _p_ensure_open, _p_options,
     _p_overlength, _p_create_clear, _p_clear_rows, _p_new_record_steps, _p_open_by_key, _p_collapse,
     _p_duplicate_outline, _p_save_form_state, _p_unique_keys, _p_edit_button, _p_delete_flow,
     _p_update_open, _p_update_key, _p_update_typed, _p_update_clear, _p_update_label_rows,
     _p_visibility, _p_open_existing, _p_list_behaviour, _p_known_records, _p_retitle_misleading,
-    _p_coverage_creates, _p_drop_weak, _p_drop_pointless, _p_order_creates, _p_unused_columns, _p_cleanup, _p_keywords,
+    _p_coverage_creates, _p_drop_weak, _p_drop_pointless, _p_order_creates, _p_calculated_values, _p_update_values,
+    _p_update_dedupe, _p_unused_columns, _p_cleanup, _p_keywords,
 )
 
 

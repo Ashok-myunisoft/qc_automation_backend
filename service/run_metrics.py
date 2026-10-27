@@ -117,5 +117,6 @@ class ScreenRun:
 
 
 def _flags() -> dict:
-    return {"screen_spec": True, "backend_digest": True, "analysis_agent": False, "feature_passes": True,
-            "extended_steps": True, "coverage_loop": True}
+    """Number settings in force (there are no feature flags any more)."""
+    keys = ("FEATURE_PASS_MAX_PARALLEL", "COVERAGE_LOOP_MAX_ROUNDS", "PASS_SOURCE_CHAR_BUDGET")
+    return {k: os.getenv(k) for k in keys}

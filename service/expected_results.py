@@ -23,13 +23,19 @@ _EXAMPLES_RE = re.compile(r"^\s*(?:Examples|Scenarios)\s*:", re.IGNORECASE)
 _TAG_RE = re.compile(r"^\s*@")
 
 
+def message_fragment(text: str) -> str:
+    """A message with {placeholders} is matched by its fixed part only: the text before the first {."""
+    t = str(text or "")
+    return t.split("{")[0].strip() if "{" in t else t.strip()
+
+
 def _n(text) -> str:
     """Comparison form: lower case, letters and digits only."""
     return re.sub(r"[^a-z0-9]", "", str(text or "").lower())
 
 
 def _add(text: str, out: set[str]) -> None:
-    text = (text or "").strip()
+    text = message_fragment(text)
     if not text or text.lower() == "unknown":
         return
     out.add(_n(text))
@@ -88,6 +94,7 @@ def _override_messages(screen_name: str) -> set[str]:
 
 
 def _single_ok(expected: str, known: set[str]) -> bool:
+    expected = message_fragment(expected)
     if _STANDARD_RE.match(expected):
         return True
     ne = _n(expected)
@@ -102,7 +109,7 @@ def _single_ok(expected: str, known: set[str]) -> bool:
 
 
 def is_verified(expected: str, known: set[str]) -> bool:
-    expected = (expected or "").strip()
+    expected = message_fragment(expected)
     if not expected:
         return True
     if _single_ok(expected, known):

@@ -1,5 +1,6 @@
 import asyncio
 import itertools
+from collections import deque
 import logging
 import os
 import re
@@ -18,6 +19,8 @@ _counter = itertools.count(1)
 _JOBS: dict[int, "Job"] = {}
 _semaphore: asyncio.Semaphore | None = None
 
+_MAX_MISSED = 5000        # messages kept for the browser while it is away (replayed on reconnect)
+
 _COUNTER_RE = re.compile(r"^\[(\d+)/(\d+)\]")
 
 
@@ -34,6 +37,10 @@ class JobSocket:
     def __init__(self, ws, job: "Job"):
         self._ws = ws
         self._job = job
+        # Everything the browser did not receive while it was disconnected. It is replayed, in
+        # order, when the same browser reconnects, so a run that finished during a network blip
+        # still ends with its final status / result on screen.
+        self._missed: deque = deque(maxlen=_MAX_MISSED)
 
     def detach(self) -> None:
         self._ws = None
@@ -42,6 +49,16 @@ class JobSocket:
     def attached(self) -> bool:
         return self._ws is not None
 
+    def pending(self) -> int:
+        return len(self._missed)
+
+    async def attach(self, ws) -> None:
+        """A (re)connected browser takes over this job: replay what it missed, then go live.
+        New messages that arrive while replaying are buffered too, so order is kept."""
+        while self._missed:
+            await ws.send_json(self._missed.popleft())
+        self._ws = ws
+
     async def send_json(self, data: dict) -> None:
         try:
             self._job.observe(data)
@@ -49,12 +66,14 @@ class JobSocket:
             logger.exception("job observe failed")
         ws = self._ws
         if ws is None:
+            self._missed.append(data)
             return
         try:
             await ws.send_json(data)
         except Exception:
             # The browser went away between checks. Keep the job going.
             self._ws = None
+            self._missed.append(data)
             logger.info("[job %s] browser disconnected - continuing in the background", self._job.key)
 
 

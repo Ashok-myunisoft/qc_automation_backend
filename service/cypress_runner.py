@@ -211,9 +211,11 @@ async def run_cypress(session: dict, feature_content: str, script_content: str, 
                 returncode = payload
                 yield ('exit', returncode, None)
                 break
-        mocha = _read_latest_mochawesome()
-        screenshots = _stash_screenshots(slug)
-        summary = _summarize_run(mocha, returncode, slug, screenshots)
+        # File reads / screenshot copying / parsing: off the event loop, so the WebSocket keeps
+        # answering its keepalive pings while a big run is being summarised.
+        mocha = await asyncio.to_thread(_read_latest_mochawesome)
+        screenshots = await asyncio.to_thread(_stash_screenshots, slug)
+        summary = await asyncio.to_thread(_summarize_run, mocha, returncode, slug, screenshots)
         summary['started_at'] = started_at
         summary['feature_text'] = feature_content
         yield ('result', summary, None)

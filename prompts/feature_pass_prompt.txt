@@ -49,6 +49,20 @@ WHAT TO WRITE
 - A scenario never ends with only "the form should be open": it must save or update and assert a real message, or assert a
   value / record / list result. Typing values without saving tests nothing.
 - Update scenarios open a saved record from the RECORD LEDGER first (never "Add New") and never claim to change the key.
+  The update passes are split by kind (single field, several fields, options, boundaries, dates, clear, no change): write
+  ONLY the kind named in the pass. Use ONLY the values of the UPDATE DATA POOL, a different value and a different record on
+  every row, never the value the record already holds in the ledger, and at least 3 rows. A scenario title starts with the
+  title prefix of the pass.
+- CALCULATED / READ-ONLY fields (listed in the user message) are filled by the app: never write an input step, a pool value,
+  an Examples cell or a "clear" step for them. Check them only with  the "<Field>" field should show "<Value>"  - the exact
+  number when the rule is given (work it out from the relative dates of the row), otherwise "(not empty)".
+- Dates: write every date value as today, today+N or today-N (N = days). Never write a literal date.
+- A message with {placeholders} is written and matched by its fixed text only (the text before the first "{"); never write
+  the braces. A backend rule a user cannot trigger from this screen (internal ids, impossible states) gets no scenario.
+- A step sentence that is not in STEP VOCABULARY must never be written, and no new step may be invented to make a sentence
+  work (for example write "the form should still be open", never "the form still open").
+- form_core saves at least 6 records (distinct codes and names, every editable field filled) so each update row can open a
+  different record.
 - A scenario title must say what its rows really test (no "fails" / "invalid" when every row succeeds). The only duplicate
   rule known is a repeated key: do not write "duplicate name" rows.
 - Never write the menu path yourself with display names: copy the NAVIGATION line exactly.

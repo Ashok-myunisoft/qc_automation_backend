@@ -429,63 +429,23 @@ function dismissPopups({ quietMs = 1500, max = 15 } = {}) {
 }
 
 // ---- navigation ----
-// Names in the feature may differ from the real data-cy in letter case, spaces or symbols
-// ("Skill Management" vs "skillmanagement"): the element is found by comparing the names
-// without case / spaces / symbols, so the step works with whatever the page really carries.
-const navNorm = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
-function navFind(suffixRe, name, child) {
-  const pick = ($b) => $b.find('[data-cy]').filter((i, e) => {
-    const m = String(e.getAttribute('data-cy')).match(suffixRe);
-    return !!m && navNorm(m[1]) === navNorm(name);
-  }).first();
-  cy.get('body', { timeout: 60000 }).should(($b) => {
-    expect(pick($b).length, `an element whose data-cy is "${name}" followed by ${suffixRe}`).to.be.greaterThan(0);
-  });
-  return cy.get('body').then(($b) => {
-    const $el = pick($b);
-    const $kid = child ? $el.children(child).first() : $el;
-    return cy.wrap($kid.length ? $kid : $el);
-  });
-}
-// A 2-level path on a screen that sits inside a menu folder: open the folders until the screen's entry is drawn.
-function navOpenLeaf(screen) {
-  const leaf = ($b) => $b.find('[data-cy]').filter((i, e) => {
-    const m = String(e.getAttribute('data-cy')).match(/^(.*)-MenuData\d+$/);
-    return !!m && navNorm(m[1]) === navNorm(screen);
-  }).first();
-  const step = (n, clicked) => {
-    cy.get('body').then(($b) => {
-      if (leaf($b).length || n >= 12) return;
-      const $f = $b.find('[data-cy]').filter(':visible').filter((i, e) => /-MenuFolder\d+$/.test(String(e.getAttribute('data-cy')))
-        && !clicked.includes(e.getAttribute('data-cy'))).first();
-      if (!$f.length) return;
-      clicked.push($f.attr('data-cy'));
-      cy.wrap($f).click({ force: true });
-      cy.wait(600);
-      step(n + 1, clicked);
-    });
-  };
-  step(0, []);
-}
-
 Then("I navigate through the following path {string} -> {string}", (module, screen) => {
   dismissPopups();                                  // popups left over from login
   cy.get('[data-cy="ModuleList"] > .mat-icon').should('be.visible').and('not.be.disabled').dblclick();
-  navFind(/^(.*)-Module$/, module, '.card-image').scrollIntoView().should('be.visible').click();
+  cy.get(`[data-cy="${module}-Module"] > .card-image`).scrollIntoView().should('be.visible').click();
   dismissPopups();                                  // popups after opening the module
-  navOpenLeaf(screen);
-  navFind(/^(.*)-MenuData\d+$/, screen, '.menu-item').scrollIntoView().should('be.visible').click();
+  cy.get(`[data-cy="${screen}-MenuData0"] > .menu-item`).scrollIntoView().should('be.visible').click();
   dismissPopups();                                  // popups after opening the screen
 });
 
 Then("I navigate through the following path {string} -> {string} -> {string}", (module, menu, screen) => {
   dismissPopups();                                  // popups left over from login
   cy.get('[data-cy="ModuleList"] > .mat-icon').should('be.visible').and('not.be.disabled').dblclick();
-  navFind(/^(.*)-Module$/, module, '.card-image').scrollIntoView().should('be.visible').click();
+  cy.get(`[data-cy="${module}-Module"] > .card-image`).scrollIntoView().should('be.visible').click();
   dismissPopups();                                  // popups after opening the module
-  navFind(/^(.*)-MenuFolder\d+$/, menu).scrollIntoView().should('be.visible').click({ force: true });
+  cy.get(`[data-cy="${menu}-MenuFolder0"]`).scrollIntoView().should('be.visible').click({ force: true });
   dismissPopups();                                  // popups after opening the menu folder
-  navFind(/^(.*)-MenuData\d+$/, screen, '.menu-item').scrollIntoView().should('be.visible').click({ force: true });
+  cy.get(`[data-cy="${screen}-MenuData1"] > .menu-item`).scrollIntoView().should('be.visible').click({ force: true });
   dismissPopups();                                  // popups after opening the screen
 });
 
@@ -545,6 +505,40 @@ Then("I select {string} in the {string} combobox field", (value, field) => {
   cy.contains('mat-option, .mat-mdc-option, [role="option"]', value, { timeout: 15000 }).click({ force: true });
 });
 
+// Dates are written in the feature as today, today+N or today-N (so the file never goes stale) and typed in the
+// date format the screen shows (read from the screen's code; else taken from the field's own value).
+const DATE_FORMAT = __DATE_FORMAT__;
+
+function formatDate(d, fmt) {
+  const months = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+  const two = (n) => String(n).padStart(2, '0');
+  return String(fmt).replace(/yyyy|YYYY|yy|YY|MMMM|MMM|MM|M|dd|DD|d|D/g, (t) => ({
+    yyyy: d.getFullYear(), YYYY: d.getFullYear(), yy: two(d.getFullYear() % 100), YY: two(d.getFullYear() % 100),
+    MMMM: months[d.getMonth()], MMM: months[d.getMonth()].slice(0, 3), MM: two(d.getMonth() + 1), M: d.getMonth() + 1,
+    dd: two(d.getDate()), DD: two(d.getDate()), d: d.getDate(), D: d.getDate(),
+  })[t]);
+}
+
+// a format taken from a value the field already shows: 27/Oct/2026 -> dd/MMM/yyyy, 27-10-2026 -> dd-MM-yyyy
+function inferDateFormat(shown) {
+  const m = String(shown || '').trim().match(/^(\d{1,2})([\/\-. ])([A-Za-z]{3,9}|\d{1,2})\2(\d{4})$/);
+  if (!m) {
+    return '';
+  }
+  const mid = /^\d+$/.test(m[3]) ? 'MM' : (m[3].length > 3 ? 'MMMM' : 'MMM');
+  return 'dd' + m[2] + mid + m[2] + 'yyyy';
+}
+
+function relDate(value, shown) {
+  const m = String(value).trim().match(/^today\s*(?:([+-])\s*(\d+))?$/i);
+  if (!m) {
+    return String(value);
+  }
+  const d = new Date();
+  d.setDate(d.getDate() + (m[1] ? (m[1] === '-' ? -1 : 1) * parseInt(m[2], 10) : 0));
+  return formatDate(d, DATE_FORMAT || inferDateFormat(shown) || 'dd/MM/yyyy');
+}
+
 Then("I enter {string} in the {string} date field", (value, field) => {
   if (!value) {
     return;
@@ -554,7 +548,8 @@ Then("I enter {string} in the {string} date field", (value, field) => {
     if (/^today$/i.test(value.trim()) && $input.val()) {
       return; // the field already holds today's date by default
     }
-    cy.wrap($input).click({ force: true }).clear({ force: true }).type(value, { force: true, delay: 50 });
+    const typed = relDate(value, $input.val());
+    cy.wrap($input).click({ force: true }).clear({ force: true }).type(typed, { force: true, delay: 50 });
     cy.wrap($input).blur({ force: true });
   });
 });
@@ -845,6 +840,14 @@ Then("I should no longer see the record {string} using the {string} field", (val
 """
 
 
+def _date_format(project_analysis: dict) -> str:
+    """The date format the screen's own code uses ('' = taken from the field's value at run time)."""
+    try:
+        return str(((project_analysis or {}).get("screen_spec") or {}).get("date_format") or "")
+    except Exception:  # noqa: BLE001
+        return ""
+
+
 def build_script(project_analysis: dict) -> str:
     """The complete step-definition file for one screen."""
     controls = controls_from_analysis(project_analysis)
@@ -856,6 +859,7 @@ def build_script(project_analysis: dict) -> str:
         .replace("__CONTROLS_END__", _CONTROLS_END)
         .replace("__ACTIONS_BEGIN__", _ACTIONS_BEGIN)
         .replace("__ACTIONS_END__", _ACTIONS_END)
+        .replace("__DATE_FORMAT__", json.dumps(_date_format(project_analysis)))
         .replace("__CONTROLS__", json.dumps(controls, indent=2, ensure_ascii=False))
         .replace("__ACTIONS__", json.dumps(actions, indent=2, ensure_ascii=False))
     )

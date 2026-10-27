@@ -209,7 +209,7 @@ function dismissPopups({ quietMs = 1500, max = 15 } = {}) {
 // it is not there yet, open folders one by one until it appears. The folders that
 // lead to it are read back from the page order (the menu is a flat, depth-first
 // list) and saved, so the generated test can use the real path.
-const navState = { module: "", path: [] };
+const navState = { module: "", path: [], matchedBy: "exact", matchedName: "", alternatives: [] };
 const NAV_RE = /^(.*)-(MenuFolder|MenuData)(\d+)$/;
 const squash = (s) => String(s || "").toLowerCase().replace(/[^a-z0-9]/g, "");
 
@@ -235,6 +235,64 @@ function pathTo(nodes, idx) {
   return path;
 }
 
+// ---- similar-name search ---------------------------------------------------------
+// Used only when NO menu item has exactly the screen's name. The name in the source code is
+// not always the name in the menu ("leaveondutyrequest" -> "LeaveRequest"), so the menu items
+// are ranked by how much their name (or visible text) looks like the screen's name / title.
+// The backend then checks the opened page really has this screen's fields, and asks for the
+// next candidate if not (SCAN_PICK).
+// <rank-start>
+function splitWords(s) {
+  return String(s || "")
+    .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+    .replace(/([A-Z]+)([A-Z][a-z])/g, "$1 $2")
+    .toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
+}
+function lcsLen(a, b) {
+  const m = a.length, n = b.length;
+  if (!m || !n) return 0;
+  let prev = new Array(n + 1).fill(0);
+  for (let i = 1; i <= m; i++) {
+    const cur = [0];
+    for (let j = 1; j <= n; j++) cur[j] = a[i - 1] === b[j - 1] ? prev[j - 1] + 1 : Math.max(prev[j], cur[j - 1]);
+    prev = cur;
+  }
+  return prev[n];
+}
+function nameScore(menuName, targets) {
+  const cand = squash(menuName);
+  if (!cand) return 0;
+  const cw = splitWords(menuName);
+  const hasTitle = targets.some((t) => t.words.length > 1);   // a real title ("Leave Onduty Request") beats the run-together code name
+  let best = 0;
+  for (const t of targets) {
+    if (!t.squashed) continue;
+    if (cand === t.squashed) return 1;
+    const dice = (2 * lcsLen(cand, t.squashed)) / (cand.length + t.squashed.length);
+    let cover = 0;
+    if (t.words.length > 1) {                       // a title with real words: whole words must match
+      const set = new Set(t.words);
+      cover = cw.length ? cw.filter((w) => set.has(w)).length / cw.length : 0;
+    } else if (!hasTitle) {                         // only a run-together name: its words must appear inside it
+      const sig = cw.filter((w) => w.length >= 3);
+      cover = sig.length ? sig.filter((w) => t.squashed.includes(w)).length / sig.length : 0;
+    }
+    let score = 0.5 * dice + 0.5 * cover;
+    if (cw.length && cw[0].length >= 3 && t.squashed.startsWith(cw[0])) score += 0.05;   // menu names often just drop middle words
+    best = Math.max(best, Math.min(score, 0.99));
+  }
+  return best;
+}
+function rankMenu(items, screen, labels) {
+  // items: [{ idx, name, text }]  ->  [{ idx, score }] best first, weak matches left out
+  const targets = [screen].concat(labels || []).map((x) => ({ squashed: squash(x), words: splitWords(x) }));
+  return items
+    .map((it) => ({ idx: it.idx, score: Math.max(nameScore(it.name, targets), nameScore(it.text, targets)) }))
+    .filter((r) => r.score >= 0.5)
+    .sort((a, b) => b.score - a.score || a.idx - b.idx);
+}
+// <rank-end>
+
 function clickNode(el) {
   const $el = Cypress.$(el);
   const $item = $el.children(".menu-item");
@@ -253,6 +311,8 @@ function findAndOpen(screen, hints, st) {
       const best = hits.find((i) => hintKeys.every((h) => pathTo(nodes, i).map(squash).includes(h)));
       const idx = best === undefined ? hits[0] : best;
       navState.path = pathTo(nodes, idx);
+      navState.matchedBy = "exact";
+      navState.matchedName = nodes[idx].name;
       clickNode(nodes[idx].el);
       return;
     }
@@ -265,6 +325,23 @@ function findAndOpen(screen, hints, st) {
       cy.wait(2000);
       findAndOpen(screen, hints, st);
       return;
+    }
+    if (folders.length === 0 || st.attempt >= 150) {
+      // every folder is open and still no menu item has exactly this name: take the most similar one
+      const items = [];
+      nodes.forEach((n, i) => { if (n.kind === "MenuData") items.push({ idx: i, name: n.name, text: (n.el.innerText || "").trim() }); });
+      const ranked = rankMenu(items, screen, Cypress.env("SCAN_LABELS") || []);
+      const pick = parseInt(Cypress.env("SCAN_PICK") || 0, 10) || 0;
+      if (ranked.length > pick) {
+        const chosen = nodes[ranked[pick].idx];
+        navState.path = pathTo(nodes, ranked[pick].idx);
+        navState.matchedBy = "similar";
+        navState.matchedName = chosen.name;
+        navState.alternatives = ranked.slice(0, 5).map((r) => nodes[r.idx].name);
+        Cypress.log({ name: "menu", message: `no menu item is named "${screen}" - opening the most similar one: "${chosen.name}"` });
+        clickNode(chosen.el);
+        return;
+      }
     }
     const seen = nodes.slice(0, 10).map((n) => n.name + "-" + n.kind + n.depth).join(", ");
     expect(folders.length > 0 && st.attempt < 150,
@@ -364,11 +441,15 @@ Then("I collect the data-cy attributes", () => {
         label: labelFor(el),
         visible: rect.width > 0 && rect.height > 0,
         interactive: !!inner || el.tagName === "BUTTON" || el.getAttribute("role") === "button",
+        // a control the user cannot change, and what it shows (e.g. Employee Name filled in from the login)
+        locked: !!(inner && (inner.disabled || inner.readOnly)) || !!el.closest(".mat-form-field-disabled, .mat-mdc-form-field-disabled"),
+        value: inner ? String(inner.value || "").replace(/\s+/g, " ").trim().slice(0, 80) : "",
       });
     });
     cy.writeFile(Cypress.env("SCAN_OUT"), {
       url: doc.location.href, elements: elements,
-      navigation: { module: navState.module, path: navState.path },
+      navigation: { module: navState.module, path: navState.path, matched_by: navState.matchedBy,
+                    matched_name: navState.matchedName, alternatives: navState.alternatives },
     });
   });
 })
@@ -465,7 +546,8 @@ def _open_form_selectors(project_analysis: dict) -> list[str]:
 
 
 def _run_scan(module: str, screen: str, nav: list[str], is_mm: bool = False,
-              biz_field: str = "", open_cy: list[str] | None = None) -> tuple[dict | None, str]:
+              biz_field: str = "", open_cy: list[str] | None = None,
+              labels: list[str] | None = None, pick: int = 0) -> tuple[dict | None, str]:
     """Blocking. Returns (scan_dict, "") on success or (None, reason)."""
     if not _WORKSPACE.exists():
         return None, "cypress-workspace/ folder not found"
@@ -501,6 +583,8 @@ def _run_scan(module: str, screen: str, nav: list[str], is_mm: bool = False,
             "SCAN_OUT": f"{rel_dir}/result.json",
             "SCAN_BIZTYPE_FIELD": biz_field or "BizTransactionTypeName",
             "SCAN_OPEN_SELECTORS": open_cy or [],
+            "SCAN_LABELS": labels or [],       # the screen's title(s), to find a similarly named menu item
+            "SCAN_PICK": int(pick or 0),       # 0 = most similar menu item, 1 = the next one, ...
             # Point the cucumber preprocessor at this scan's own step file only.
             "stepDefinitions": [f"{rel_dir}/*.js"],
         }
@@ -546,7 +630,7 @@ def _run_scan(module: str, screen: str, nav: list[str], is_mm: bool = False,
 def _cache_key(module: str, screen: str, nav: list[str], is_mm: bool = False) -> str:
     slug = re.sub(r"[^a-z0-9]+", "-", f"{module}-{screen}".lower()).strip("-") or "screen"
     digest = hashlib.sha1(
-        ("v2|" + "|".join(nav) + "|" + os.getenv("SCAN_BASE_URL", "") + ("|mm" if is_mm else "")).encode("utf-8")
+        ("v3|" + "|".join(nav) + "|" + os.getenv("SCAN_BASE_URL", "") + ("|mm" if is_mm else "")).encode("utf-8")
     ).hexdigest()[:8]
     return f"{slug}-{digest}"
 
@@ -671,6 +755,68 @@ def _apply_found_navigation(page: dict, scan: dict) -> str:
     return f"navigation is {' > '.join(names)} (the analysis had guessed {' > '.join(old) or 'nothing'})."
 
 
+def _page_labels(project_analysis: dict) -> list[str]:
+    """The screen's title(s) from the analysis - help to find a similarly named menu item."""
+    page = _first_page(project_analysis)
+    out: list[str] = []
+    for v in (page.get("page_name"), (page.get("forms") or [{}])[0].get("form_name") if page.get("forms") else None):
+        v = str(v or "").strip()
+        if v and v not in out:
+            out.append(v)
+    return out
+
+
+def _field_group(field: dict, groups: dict) -> list[dict] | None:
+    """The scanned elements that belong to this analysis field, or None."""
+    loc = field.get("automation_locator")
+    existing = str(loc.get("value")) if isinstance(loc, dict) and loc.get("value") not in (None, "", "Unknown") else ""
+    if existing:
+        grp = groups.get(_norm(_SUFFIX_RE.sub(r"\g<base>", existing)))
+        if grp:
+            return grp
+    for candidate in (field.get("control_name"), field.get("field_key"), field.get("label")):
+        if candidate and str(candidate) != "Unknown":
+            grp = _find_group(_norm(candidate), groups)
+            if grp:
+                return grp
+    return None
+
+
+def _scan_fit(project_analysis: dict, scan: dict) -> tuple[int, int]:
+    """(fields of the analysis found on the scanned page, fields in the analysis). Read-only:
+    used to check that a page opened by a SIMILAR menu name really is this screen."""
+    page = _first_page(project_analysis)
+    groups = _group_by_base(scan.get("elements") or [])
+    total = found = 0
+    for field, _is_loop in _iter_fields(page):
+        total += 1
+        if _field_group(field, groups):
+            found += 1
+    return found, total
+
+
+def _mark_fixed_fields(project_analysis: dict, page: dict, groups: dict) -> list[str]:
+    """Fields that are filled in AND locked on the real page (for example Employee Name, which
+    comes from the login and cannot be changed). They are marked read-only in the analysis and in
+    the screen spec, so the tests neither pick, clear nor 'require' them."""
+    spec = project_analysis.get("screen_spec") if isinstance(project_analysis, dict) else None
+    spec_fields = [f for f in (spec.get("fields") or []) if isinstance(f, dict)] if isinstance(spec, dict) else []
+    names: list[str] = []
+    for field, _is_loop in _iter_fields(page):
+        grp = _field_group(field, groups)
+        if not grp or not any(e.get("locked") and str(e.get("value") or "").strip() for e in grp):
+            continue
+        name = str(field.get("control_name") or field.get("field_key") or field.get("label") or "?")
+        field["readonly"] = True
+        field["auto_filled"] = True
+        for sf in spec_fields:
+            if _norm(sf.get("name")) in (_norm(field.get("control_name")), _norm(field.get("field_key"))):
+                sf["readonly"] = True
+                sf["auto_filled"] = True
+        names.append(name)
+    return names
+
+
 def merge_scan_into_analysis(project_analysis: dict, scan: dict) -> dict:
     """Writes real data-cy values from the scan into the analysis. Returns
     counts: confirmed / filled / corrected / still_unresolved (names) / extra."""
@@ -680,7 +826,7 @@ def merge_scan_into_analysis(project_analysis: dict, scan: dict) -> dict:
     scanned_values = {str(e.get("data_cy")) for e in elements}
     used_groups: set[str] = set()
     stats = {"confirmed": 0, "filled": 0, "corrected": 0, "still_unresolved": [], "extra": 0,
-             "not_on_page": [], "navigation": ""}
+             "not_on_page": [], "navigation": "", "fixed": []}
     stats["navigation"] = _apply_found_navigation(page, scan)
     missing_on_page: list[tuple[dict, str]] = []   # (field, name) the analysis claims but the page lacks
 
@@ -741,6 +887,9 @@ def merge_scan_into_analysis(project_analysis: dict, scan: dict) -> dict:
         else:
             stats["still_unresolved"].extend(name for _f, name in missing_on_page)
 
+    # fields the page fills in itself and does not let the user change (e.g. Employee Name from the login)
+    stats["fixed"] = _mark_fixed_fields(project_analysis, page, groups)
+
     # buttons: Save / Delete / ... with an unverified locator
     for action in page.get("business_actions") or []:
         if not isinstance(action, dict) or _field_is_verified(action):
@@ -776,6 +925,11 @@ def _biz_type_field(project_analysis: dict) -> str:
         if _norm(name).startswith("biztransactiontype"):
             return name
     return "BizTransactionTypeName"
+
+
+_FIT_GOOD = 0.5          # a similar-name page with at least this share of the screen's fields is accepted at once
+_FIT_MIN = 0.25          # ... and the best of the tried pages is still accepted down to this share
+_MAX_SIMILAR_PICKS = 3   # how many similar menu items are opened, at most, before giving up
 
 
 async def scan_and_merge(project_analysis: dict, module: str, screen: str, log: LogFn,
@@ -818,10 +972,43 @@ async def scan_and_merge(project_analysis: dict, module: str, screen: str, log: 
                   f"(login + read data-cy, up to {_int('SCAN_TIMEOUT_SECONDS', 240)}s)...", "secondary")
         if _scan_lock is None:
             _scan_lock = asyncio.Lock()
+        biz_field = _biz_type_field(project_analysis) if is_mm else ""
+        open_cy = _open_form_selectors(project_analysis)
+        labels = _page_labels(project_analysis)
+
+        async def run(pick: int):
+            return await asyncio.to_thread(_run_scan, module, screen, nav, is_mm, biz_field, open_cy, labels, pick)
+
         async with _scan_lock:
-            scan, reason = await asyncio.to_thread(
-                _run_scan, module, screen, nav, is_mm, _biz_type_field(project_analysis) if is_mm else "",
-                _open_form_selectors(project_analysis))
+            scan, reason = await run(0)
+            # No menu item had exactly this screen's name, so the closest-looking one was opened.
+            # Check it really is this screen (its fields are on the page); if not, try the next one.
+            best = None
+            pick = 0
+            while scan is not None and (scan.get("found_navigation") or {}).get("matched_by") == "similar":
+                fn = scan["found_navigation"]
+                found, total = _scan_fit(project_analysis, scan)
+                ratio = (found / total) if total else 1.0
+                if best is None or ratio > best["ratio"]:
+                    best = {"ratio": ratio, "scan": scan, "name": fn.get("matched_name") or "?", "found": found, "total": total}
+                if ratio >= _FIT_GOOD:
+                    break
+                alternatives = fn.get("alternatives") or []
+                if pick + 1 >= min(len(alternatives), _MAX_SIMILAR_PICKS):
+                    break                                   # nothing left to try
+                pick += 1
+                await say(f"data-cy scan: '{fn.get('matched_name')}' has only {found} of {total} of this screen's fields - "
+                          f"trying the next closest menu item ('{alternatives[pick]}')...", "secondary")
+                scan, reason = await run(pick)
+            if best is not None:
+                if best["ratio"] >= _FIT_MIN:
+                    scan = best["scan"]
+                    await say(f"data-cy scan: no menu item is named '{screen}', so the closest one was used - '{best['name']}' "
+                              f"({best['found']} of {best['total']} fields found on that page). Please check it is the right screen.", "secondary")
+                else:
+                    scan = None
+                    reason = (f"no menu item is named '{screen}' and the closest one ('{best['name']}') does not look like "
+                              f"this screen (only {best['found']} of {best['total']} fields on its page)")
         if scan is None:
             cooldown = _int("SCAN_FAIL_COOLDOWN_MINUTES", 30)
             if cooldown > 0:
@@ -843,6 +1030,10 @@ async def scan_and_merge(project_analysis: dict, module: str, screen: str, log: 
     await say(msg, "success" if not (stats["still_unresolved"] or stats["not_on_page"]) else "secondary")
     if stats["navigation"]:
         await say(f"data-cy scan: {stats['navigation']}", "secondary")
+    if stats["fixed"]:
+        verb = "is" if len(stats["fixed"]) == 1 else "are"
+        await say(f"data-cy scan: {', '.join(stats['fixed'])} {verb} pre-filled on the page and cannot be changed "
+                  f"(for example from the login) - the tests will not pick, clear or edit {'it' if verb == 'is' else 'them'}.", "secondary")
     if stats["extra"]:
         await say(f"data-cy scan: {stats['extra']} visible control(s) on the page were not in the analysis "
                   f"(not added to the tests).", "muted")

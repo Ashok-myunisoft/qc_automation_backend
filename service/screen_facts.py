@@ -1,6 +1,6 @@
 """Code-built `project_analysis` (same schema as the analysis agent's, subset) from the screen spec.
 
-Used for normal screens that have a formjson spec (the analysis agent is skipped for them).
+Used for every normal (non-MM) screen that has a formjson spec - the analysis agent is not called for it.
 The live data-cy scan verifies the locators afterwards; nothing here guesses a data-cy for a field.
 """
 from __future__ import annotations
@@ -14,10 +14,10 @@ logger = logging.getLogger(__name__)
 
 
 def bypass_applies(spec: dict | None, is_mm: bool) -> tuple[bool, str]:
-    """(applies, reason) - reason is logged as one line."""
+    """(applies, reason) - reason is logged as one line. The code chooses the path by what the screen has."""
     if is_mm:
         return False, "MM screen keeps the analysis agent"
-    if not spec:
+    if not spec or not spec.get("fields"):
         return False, "no formjson spec for this screen"
     return True, "code-built analysis"
 
@@ -42,6 +42,13 @@ def _field(f: dict) -> dict:
         out["options"] = [o["text"] for o in f["options"] if not o.get("blank")]
     if f.get("key_field"):
         out["is_key_field"] = True
+    if f.get("calculated"):
+        out["calculated"] = True
+        out["calculated_origin"] = f.get("calculated_origin") or []
+        if f.get("computed_from"):
+            out["computed_from"] = f["computed_from"]
+        if f.get("calculated_rule"):
+            out["calculated_rule"] = f["calculated_rule"]
     return out
 
 
@@ -122,4 +129,4 @@ def build_analysis_from_spec(spec: dict, project_context: dict, module: str, scr
         page["loops"].append({"fields": grid_fields})
         page["forms"][0]["fields"] = [x for x in fields if x["control_name"] not in {g["control_name"] for g in grid_fields}]
     return {"modules": [{"module_name": module, "pages": [page]}], "unresolved": [],
-            "source": "code-built", "behavior": behavior}
+            "source": "code-built from the screen spec", "behavior": behavior}

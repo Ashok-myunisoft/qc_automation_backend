@@ -1,10 +1,12 @@
-"""Feature generation in topic passes (always on), spec 01.
+"""Feature generation in topic passes (every screen that has a formjson spec and is not an MM screen), spec 01.
 
 The agent writes the scenarios; code decides which passes a screen needs, packages the raw source and verified facts,
-keeps a record ledger, orders and merges the passes, and (coverage loop) asks for the gaps only."""
+keeps a record ledger (the values each record holds NOW, updated after every update pass), orders and merges the passes,
+and the coverage loop asks for the gaps only."""
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 import logging
 import os
@@ -19,11 +21,8 @@ STANDARD_MESSAGES = ["Details Saved Successfully With Code:", "Details Updated S
                      "Details have been deleted successfully"]
 
 
-def enabled() -> bool:
-    return True
-
-
 def _int(name: str, default: int) -> int:
+    """A number setting with a default in code (no .env needed)."""
     try:
         return max(1, int(os.getenv(name, str(default))))
     except ValueError:
@@ -94,6 +93,25 @@ def _messages_block(facts: dict) -> str:
     return "KNOWN MESSAGES (ExpectedResult may ONLY be one of these):\n" + ("\n".join(out) if out else "- none")
 
 
+def _calculated_block(facts: dict) -> str:
+    """Calculated fields are only checked; dates are relative. Part of the stable prefix of every pass."""
+    lines = []
+    calc = facts.get("calculated") or []
+    if calc:
+        lines.append("CALCULATED / READ-ONLY FIELDS: the app fills these, the user never does. NEVER write an input step, a "
+                     "data-pool value or an Examples cell for them and never clear them; they are only CHECKED with the step  "
+                     "the \"<Field>\" field should show \"<Value>\".")
+        lines += value_gen.describe_calculated(calc)
+        lines.append("Value of that check: the exact number when the rule above gives it (work it out from the relative dates of "
+                     "the row), otherwise the text (not empty).")
+    if facts.get("date_format") or any(f.get("kind") == "date" for f in facts.get("fields") or []):
+        fmt = facts.get("date_format")
+        lines.append("DATES: write every date value as today, today+N or today-N (N = days), never as a literal date, so the file "
+                     "never goes stale; the date step types it in the screen's own date format"
+                     + (f" ({fmt})" if fmt else "") + ".")
+    return "\n".join(lines)
+
+
 def build_prefix(project_context: dict, project_analysis: dict, spec: dict, facts: dict,
                  business_context: dict | None, user_request: str) -> str:
     """STABLE PREFIX: identical for every pass of one screen (so prompt caching applies)."""
@@ -103,6 +121,7 @@ def build_prefix(project_context: dict, project_analysis: dict, spec: dict, fact
     except Exception:  # noqa: BLE001
         logger.exception("feature passes: spec rendering failed - using the compact spec")
         spec_text = json.dumps(screen_spec.compact(spec), indent=2)
+    calc_text = _calculated_block(facts)
     nav = ""
     page = ((project_analysis.get("modules") or [{}])[0].get("pages") or [{}])[0]
     path = [p for p in page.get("navigation_path") or [] if isinstance(p, str)]
@@ -112,6 +131,7 @@ def build_prefix(project_context: dict, project_analysis: dict, spec: dict, fact
         f"User request: {user_request}",
         "SCREEN SOURCE (raw files):\n" + _source_block(project_context, _int("PASS_SOURCE_CHAR_BUDGET", 120000)),
         spec_text,
+        calc_text,
         _datacy_table(facts),
         _messages_block(facts),
         nav,
@@ -122,10 +142,19 @@ def build_prefix(project_context: dict, project_analysis: dict, spec: dict, fact
     ]).strip()
 
 
-def build_tail(p: pass_planner.Pass, facts: dict, ledger: list[dict], titles: list[str], first: bool) -> str:
+def build_tail(p: pass_planner.Pass, facts: dict, ledger: list[dict], titles: list[str], first: bool,
+               update_pool_text: str = "", offset: int = 0) -> str:
     lines = [f"=== THIS PASS: {p.id} | title prefix: \"{p.title_prefix}\" ===", f"THEME: {p.theme_text}"]
     if p.id == "business_rules":
-        lines.append("BACKEND RULES:\n" + "\n".join(f"- {r.get('condition') or 'always'} -> \"{r.get('message')}\"" for r in facts["backend_rules"]))
+        lines.append("BACKEND RULES (the message is its fixed text only; ExpectedResult is exactly that text, never with {braces}):\n"
+                     + "\n".join(f"- {r.get('condition') or 'always'} -> \"{r.get('message')}\"" for r in facts["backend_rules"]))
+    if p.id.startswith("update_"):
+        lines.append(pass_planner.UPDATE_RULES)
+        if update_pool_text:
+            lines.append(update_pool_text)
+        if ledger:
+            lines.append(f"Take the records of the RECORD LEDGER in order, starting with record number {offset % len(ledger) + 1} "
+                         f"({ledger[offset % len(ledger)]['key']}), and use the next record for each further row.")
     if p.id == "delete":
         lines.append("Delete messages: " + " | ".join((facts["messages"].get("delete") or []) + [STANDARD_MESSAGES[2]])
                      + ". Prompt texts: 'Are you sure you want to delete' (list) and 'Are you sure you want to delete this record?' (form), "
@@ -139,7 +168,8 @@ def build_tail(p: pass_planner.Pass, facts: dict, ledger: list[dict], titles: li
         lines.append("TITLES ALREADY WRITTEN (do not repeat):\n" + "\n".join(f"- {t}" for t in titles[:120]))
     if p.id == "form_core":
         lines.append("Write the Feature: header and the Background: first. Include a dedicated Scenario Outline that saves "
-                     "records for the later delete checks and the open-existing/update checks (distinct codes), titled "
+                     f"AT LEAST {pass_planner.MIN_RECORDS} records for the later delete, open-existing and update checks (distinct "
+                     "codes and distinct names, every editable field filled so each update row can open a different record), titled "
                      f"\"{p.title_prefix} - Records for the later checks\".")
     else:
         lines.append("Start directly with Scenario Outline: (no Feature:, no Background:).")
@@ -151,26 +181,8 @@ def _titles(text: str) -> list[str]:
     return [m.group(1).strip() for m in re.finditer(r"^\s*Scenario\s+(?:Outline|Template)\s*:\s*(.*)$", text or "", re.M | re.I)]
 
 
-def _apply_updates(ledger: list[dict], update_text: str) -> list[dict]:
-    """Second ledger: record values after the update pass ran (best effort, by key column)."""
-    new = {r["key"].lower(): {"key": r["key"], "condition": r["condition"], "values": dict(r["values"])} for r in ledger}
-    for steps, header, rows in pass_planner.examples_tables(update_text):
-        if not re.search(r"click the Update button", steps, re.I):
-            continue
-        rec_col = next((i for i, h in enumerate(header) if h.lower() in ("record", "domaincode", "code")), None)
-        if rec_col is None:
-            continue
-        for r in rows:
-            rec = new.get(r[rec_col].lower()) if rec_col < len(r) else None
-            if rec:
-                for i, h in enumerate(header):
-                    if i not in (0, rec_col) and h.lower() != "expectedresult" and i < len(r) and r[i]:
-                        rec["values"][h] = r[i]
-    return list(new.values())
-
-
-def _delete_ledger(original: list[dict], after_update: list[dict], update_text: str) -> list[dict]:
-    """Records the delete pass may use: those saved for deletion, and records the update pass did not touch."""
+def _delete_ledger(original: list[dict], after_update: list[dict]) -> list[dict]:
+    """Records the delete pass may use: those saved for deletion, and records the update passes did not touch."""
     touched = {r["key"].lower() for r, a in zip(original, after_update) if r["values"] != a["values"]}
     keep = [r for r in after_update if r["key"].lower() not in touched or re.search(r"delet", r["condition"], re.I)]
     return keep or after_update
@@ -195,21 +207,40 @@ def merge_passes(ordered: list[tuple[pass_planner.Pass, str]]) -> str:
 
 
 # --------------------------------------------------------------------------- runner
+def update_row_counts(text: str) -> dict[str, int]:
+    """{update kind: number of Examples rows} of the update scenarios in a feature text."""
+    out: dict[str, int] = {}
+    for u in pass_planner.update_rows(text):
+        out[u["kind"]] = out.get(u["kind"], 0) + 1
+    return out
+
+
 async def run(agent, project_context: dict, project_analysis: dict, spec: dict, business_context: dict | None,
               user_request: str, log: Callable[[str], Awaitable[None]], metrics: run_metrics.ScreenRun | None = None):
     """Returns (feature_text, info). Raises on total failure so the caller can fall back to the old path."""
     facts = pass_planner.build_facts(spec, project_analysis)
     passes = pass_planner.plan_passes(facts)
     await log(f"planned {len(passes)} passes: " + ", ".join(p.id + (f"[{p.extra['label']}]" if p.extra.get("label") else "") for p in passes))
+    for sk in facts.get("backend_rules_skipped") or []:
+        await log(f"backend rule not UI-triggerable - no scenario: \"{sk['message']}\" ({sk['why']})")
+    if facts.get("calculated"):
+        await log("calculated / read-only fields (never filled, only checked): "
+                  + ", ".join(f["name"] + (f" <- {'+'.join(f['computed_from'])}" if f.get("computed_from") else "") for f in facts["calculated"]))
     prefix = build_prefix(project_context, project_analysis, spec, facts, business_context, user_request)
+    update_pool_text = ""
+    try:
+        update_pool_text = value_gen.render_update_pool(value_gen.build_update_pool(spec, business_context))
+    except Exception:  # noqa: BLE001
+        logger.exception("update data pool failed - the update passes run without it")
     sem = asyncio.Semaphore(_int("FEATURE_PASS_MAX_PARALLEL", 3))
     done: dict[int, str] = {}
     counter = {"n": 0}
     total = len(passes)
+    key_field = next((f["name"] for f in facts["fields"] if f.get("key_field") and f["kind"] == "picklist"), "")
 
-    async def one(idx: int, p: pass_planner.Pass, ledger, titles, first=False):
+    async def one(idx: int, p: pass_planner.Pass, ledger, titles, first=False, offset: int = 0):
         async with sem:
-            tail = build_tail(p, facts, ledger, titles, first)
+            tail = build_tail(p, facts, ledger, titles, first, update_pool_text, offset)
             try:
                 text = await agent.generate_pass(prefix, tail)
             except Exception as e:  # noqa: BLE001
@@ -218,8 +249,9 @@ async def run(agent, project_context: dict, project_analysis: dict, spec: dict, 
                 text = ""
             counter["n"] += 1
             c = run_metrics.counts(text)
-            logger.info("pass %d/%d '%s': %d outline(s), %d row(s)", counter["n"], total, p.id, c["outlines"], c["rows"])
-            await log(f"pass {counter['n']}/{total} '{p.id}': {c['outlines']} outline(s), {c['rows']} row(s)")
+            label = f"[{p.extra['label']}]" if p.extra.get("label") else ""
+            logger.info("pass %d/%d '%s%s': %d outline(s), %d row(s)", counter["n"], total, p.id, label, c["outlines"], c["rows"])
+            await log(f"pass {counter['n']}/{total} '{p.id}{label}': {c['outlines']} outline(s), {c['rows']} row(s)")
             if metrics:
                 metrics.llm()
             done[idx] = text
@@ -236,7 +268,21 @@ async def run(agent, project_context: dict, project_analysis: dict, spec: dict, 
     # create group (non-tab): parallel, each told the titles written so far
     await asyncio.gather(*[one(i, passes[i], [], list(titles)) for i in group("create")])
     create_texts = [core_text] + [done.get(i, "") for i in group("create")]
-    ledger = pass_planner.build_ledger("\n".join(create_texts))
+    ledger = pass_planner.build_ledger("\n".join(create_texts), key_field)
+    # enough records for the later passes: every update row opens a DIFFERENT record
+    if passes and any(p.order_group == "update" for p in passes) and len(ledger) < pass_planner.MIN_RECORDS:
+        try:
+            extra_text, extra_recs = pass_planner.topup_records(facts, ledger, pass_planner.MIN_RECORDS - len(ledger))
+            if extra_text:
+                passes.append(pass_planner.Pass("records_topup", "Form core", "records for the later checks", mutates=True))
+                idx = len(passes) - 1
+                ids.append(idx)
+                done[idx] = extra_text
+                create_texts.append(extra_text)
+                ledger = pass_planner.build_ledger("\n".join(create_texts), key_field)
+                await log(f"form_core saved {len(ledger) - len(extra_recs)} record(s); added {len(extra_recs)} more by code (target {pass_planner.MIN_RECORDS})")
+        except Exception:  # noqa: BLE001
+            logger.exception("record top-up failed - the update passes use the records there are")
     titles = [t for tx in create_texts for t in _titles(tx)]
     # tab passes (create group): also parallel
     tab_idx = [i for i in ids if passes[i].id == "tabs"]
@@ -244,33 +290,51 @@ async def run(agent, project_context: dict, project_analysis: dict, spec: dict, 
     # read-only group
     await asyncio.gather(*[one(i, passes[i], ledger, list(titles)) for i in group("read_only")])
     titles += [t for i in group("read_only") for t in _titles(done.get(i, ""))]
-    # update, then delete with the second ledger
-    upd_text = ""
-    for i in group("update"):
-        upd_text = await one(i, passes[i], ledger, list(titles))
-        titles += _titles(upd_text)
-    ledger2 = _apply_updates(ledger, upd_text)
+    # update passes, one after the other: each one sees what the earlier ones left in every record
+    ledger_now = copy.deepcopy(ledger)
+    upd_texts: list[str] = []
+    for n, i in enumerate(group("update")):
+        t = await one(i, passes[i], copy.deepcopy(ledger_now), list(titles), offset=n * 2)
+        try:
+            pass_planner.apply_update_text(ledger_now, t)
+        except Exception:  # noqa: BLE001
+            logger.exception("ledger update after pass %s failed - the next pass sees the older values", passes[i].id)
+        titles += _titles(t)
+        upd_texts.append(t)
+    if upd_texts:
+        counts = update_row_counts("\n".join(upd_texts))
+        await log("update rows by kind: " + (", ".join(f"{k}={v}" for k, v in sorted(counts.items())) or "none"))
+        logger.info("update rows by kind: %s", counts)
     for i in group("delete"):
-        await one(i, passes[i], _delete_ledger(ledger, ledger2, upd_text), list(titles))
+        await one(i, passes[i], _delete_ledger(ledger, ledger_now), list(titles))
 
     ordered = pass_planner.order_passes([(passes[i], done.get(i, "")) for i in ids])
     merged = merge_passes(ordered)
-    info = {"facts": facts, "passes": [p.id for p in passes], "ledger": ledger, "prefix": prefix}
+    info = {"facts": facts, "passes": [p.id for p in passes], "ledger": ledger, "prefix": prefix,
+            "update_pool_text": update_pool_text}
     if metrics:
         metrics.stage("passes_merged", merged)
     return merged, info
 
 
-async def gap_fill(agent, prefix: str, facts: dict, ledger: list[dict], gap_lines: list[str], current: str) -> str:
-    tail = "\n\n".join([
+async def gap_fill(agent, prefix: str, facts: dict, ledger: list[dict], gap_lines: list[str], current: str,
+                   update_pool_text: str = "") -> str:
+    parts = [
         "=== THIS PASS: coverage gaps | title prefix: \"Coverage\" ===",
         "THEME: write scenarios ONLY for these gaps, one Scenario Outline per gap group, nothing else:\n"
         + "\n".join(f"- {g}" for g in gap_lines),
+    ]
+    if any(g.upper().startswith("UPDATE") for g in gap_lines):
+        parts.append(pass_planner.UPDATE_RULES + "\nFor an update gap start the title with the title prefix named in the gap "
+                     "(for example \"Update single field - text\").")
+        if update_pool_text:
+            parts.append(update_pool_text)
+    parts += [
         pass_planner.render_ledger(ledger),
         "TITLES ALREADY WRITTEN (do not repeat):\n" + "\n".join(f"- {t}" for t in _titles(current)[:150]),
         "Start directly with Scenario Outline: (no Feature:, no Background:). Output only Gherkin.",
-    ])
-    raw = await agent.generate_pass(prefix, tail)
+    ]
+    raw = await agent.generate_pass(prefix, "\n\n".join(parts))
     return chunk_analysis.strip_to_scenarios(raw)
 
 

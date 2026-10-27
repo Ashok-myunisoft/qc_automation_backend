@@ -10,7 +10,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-from service import screen_spec as _screen_spec, value_gen as _value_gen  # screen spec (USE_SCREEN_SPEC)
+from service import screen_spec as _screen_spec, value_gen as _value_gen  # screen spec
 from service import run_metrics as _run_metrics  # Phase 0 instrumentation
 
 logger = logging.getLogger(__name__)
@@ -36,12 +36,13 @@ class TestCaseAgent:
         project_analysis: dict,
         user_request: str,
         business_context: dict = None,
+        extended: bool = False,
     ):
         """Every scenario is a Scenario Outline with an aligned Examples table, and
         steps use the QC team's fixed vocabulary (see test_case_prompt.txt,
         #FIXED STEP VOCABULARY) so they match the template step definitions
         that ScriptGenerateAgent copies into every script."""
-        # Screen spec (only present when USE_SCREEN_SPEC=1): shown as its own block, not inside the analysis JSON.
+        # Screen spec (only present for screens that have a formjson): shown as its own block, not inside the analysis JSON.
         spec = project_analysis.get("screen_spec") if isinstance(project_analysis, dict) else None
         spec_block = ""
         if spec:
@@ -55,7 +56,7 @@ class TestCaseAgent:
         _ext_vocab = ""
         try:
             from service import extended_steps as _ext_steps
-            if _ext_steps.enabled():
+            if extended:
                 _ext_vocab = ("\n\nEXTENDED STEPS (also allowed when the screen has the capability; spelled exactly):\n"
                               + _ext_steps.EXTENDED_VOCAB)
         except Exception:
@@ -84,7 +85,7 @@ textarea) from the suffix of that field's verified data-cy.{spec_block}{_ext_voc
         return response.text
 
     async def generate_pass(self, prefix: str, tail: str) -> str:
-        """One focused topic pass (USE_FEATURE_PASSES). `prefix` is identical for every pass of a screen (so prompt
+        """One focused topic pass. `prefix` is identical for every pass of a screen (so prompt
         caching applies); `tail` is the pass-specific part. Uses prompts/feature_pass_prompt.txt as instructions."""
         if getattr(self, "_pass_agent", None) is None:
             self._pass_agent = Agent(
@@ -100,7 +101,7 @@ textarea) from the suffix of that field's verified data-cy.{spec_block}{_ext_voc
             text = re.sub(r"\r?\n```\s*$", "", text)
         return text.strip()
 
-    async def repair_test_cases(self, test_cases: str, findings_text: str) -> str:
+    async def repair_test_cases(self, test_cases: str, findings_text: str, extended: bool = False) -> str:
         """One-shot repair of a feature file using findings from the
         deterministic step checker (service/step_checker.py). Returns the full
         corrected feature text. The caller keeps the original if the repair
@@ -108,7 +109,7 @@ textarea) from the suffix of that field's verified data-cy.{spec_block}{_ext_voc
         _ext = ""
         try:
             from service import extended_steps as _ext_steps
-            if _ext_steps.enabled():
+            if extended:
                 _ext = ("\n- The EXTENDED step vocabulary is also allowed (never change an extended step into a base one):\n"
                         + _ext_steps.EXTENDED_VOCAB + "\n")
         except Exception:

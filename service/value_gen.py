@@ -1,13 +1,15 @@
 """Test values, scenario plan and the text block for the test-case agent - all built by CODE
-from the screen spec (service/screen_spec.py). Used only when USE_SCREEN_SPEC=1.
+from the screen spec (service/screen_spec.py).
 
 The agent may use ONLY the values in the pool, so it never has to invent PLACEHOLDER_ text.
 """
 from __future__ import annotations
 
+import random
 import re
 import secrets
 
+_RND = random.SystemRandom()
 _WORDS = ["Alpha", "Beta", "Gamma", "Delta", "Omega", "Prime", "Nova", "Zenith"]
 
 
@@ -108,7 +110,8 @@ def build_value_pool(spec: dict, business_context: dict | None = None) -> dict:
             entry.update(options=["Checked", "Unchecked"], valid="Checked")
         elif f["kind"] == "date":
             entry["valid"] = "today"
-            entry["note"] = "the field already shows today's date; the value today keeps it (never type a fixed date)"
+            entry["note"] = ("write dates as today, today+N or today-N (N = days); never a literal date: the step types the "
+                             "date in the screen's own format" + (f" ({spec['date_format']})" if spec.get("date_format") else ""))
         elif f["lookup"] or f["kind"] == "picklist" and not f["key_field"]:
             real = _business_value(business_context, f)
             entry["valid"] = real if real else f"PLACEHOLDER_{re.sub(r'[^A-Za-z0-9]+', '_', f['label']).strip('_')}"
@@ -182,9 +185,15 @@ def render_for_test_cases(spec: dict, pool: dict, plan: list[str]) -> str:
         if p["note"]:
             bits.append(p["note"])
         lines.append("- " + "; ".join(bits))
-    skipped = [f["name"] for f in spec["fields"] if f["active"] and (f.get("readonly") or f["kind"] == "grid")]
+    skipped = [f["name"] for f in spec["fields"] if f["active"] and (f.get("readonly") or f["kind"] == "grid")
+               and not f.get("calculated")]
     if skipped:
-        lines.append(f"Shown on the page but never typed (read-only or a grid): {', '.join(skipped)}")
+        lines.append(f"Shown on the page but never typed (a grid): {', '.join(skipped)}")
+    calc = describe_calculated([f for f in spec["fields"] if f["active"]])
+    if calc:
+        lines.append("CALCULATED / READ-ONLY FIELDS - never filled, never given a data-pool value, never an input step; "
+                     "they are only CHECKED with the step  the \"<Field>\" field should show \"<Value>\":")
+        lines += calc
     pickers = [f["name"] for f in spec["fields"] if f.get("record_picker") and f["active"]]
     if pickers:
         lines.append(f"Record pickers (they OPEN an existing record - empty when creating): {', '.join(pickers)}")
@@ -207,4 +216,181 @@ def render_for_test_cases(spec: dict, pool: dict, plan: list[str]) -> str:
             lines.append(f"- {role} message: \"{m['template']}\" (assert the fragment \"{m['fragment']}\")")
     lines += ["", "SCENARIO PLAN (cover every line; one Examples row each, grouped into outlines):"]
     lines += [f"{i}. {row}" for i, row in enumerate(plan, 1)]
+    return "\n".join(lines)
+
+# --------------------------------------------------------------------------- calculated fields (text for the agents)
+def describe_calculated(fields: list[dict]) -> list[str]:
+    """One line per calculated / read-only field: where it comes from and what to assert."""
+    lines = []
+    for f in fields:
+        if not f.get("calculated"):
+            continue
+        src = f.get("computed_from") or []
+        rule = f.get("calculated_rule") or {}
+        bits = [f"{f['name']} (label '{f.get('label') or f['name']}')"]
+        if src:
+            bits.append("computed from " + ", ".join(src))
+        if isinstance(rule, dict) and rule.get("kind") == "days_between":
+            bits.append(f"value = number of days between {rule['from_field']} and {rule['to_field']}"
+                        + (" INCLUSIVE (to - from + 1)" if rule.get("inclusive") else " (to - from)")
+                        + "; with relative dates the number can be worked out exactly")
+        elif src:
+            bits.append("exact rule not readable from the code: assert only  \"(not empty)\"")
+        else:
+            bits.append("read-only: never typed; assert nothing unless the source shows its value")
+        lines.append("- " + "; ".join(bits))
+    return lines
+
+
+# --------------------------------------------------------------------------- update data pool
+UPDATE_NUMERIC = ("number", "percentage", "int", "integer", "decimal", "numeric", "double", "float", "money", "currency")
+UPDATE_MIN_VALUES, UPDATE_MAX_VALUES = 4, 6
+
+
+def update_group(f: dict) -> str:
+    """Kind of an editable field for the update passes: text / textarea / combobox / picklist / date / checkbox / number."""
+    k = f.get("kind") or "input"
+    if k == "textarea":
+        return "textarea"
+    if k in ("combobox", "radio"):
+        return "combobox"
+    if k == "checkbox":
+        return "checkbox"
+    if k == "date":
+        return "date"
+    if k == "picklist":
+        # a lookup of ANOTHER entity is picked; the screen's own name / title picklist is typed like text
+        return "picklist" if f.get("lookup") else "text"
+    if str(f.get("type") or "").lower() in UPDATE_NUMERIC:
+        return "number"
+    return "text"
+
+
+def is_editable(f: dict) -> bool:
+    """A field an update may change: shown, not read-only / calculated, not a grid, not the record key / picker."""
+    return (f.get("active", True) is not False and not f.get("readonly") and not f.get("calculated")
+            and (f.get("kind") or "") != "grid" and not f.get("record_picker") and not f.get("key_field")
+            and not f.get("grid"))
+
+
+def _fits(v: str, f: dict) -> bool:
+    mx = f.get("max_length")
+    if not v or (mx and len(v) > mx) or v != v.strip() or any(c in v for c in '"|<>'):
+        return False
+    rx = f.get("regex")
+    if rx:
+        try:
+            return re.fullmatch(rx, v) is not None
+        except re.error:
+            return False
+    return True
+
+
+def _text_update_values(f: dict, screen: str) -> list[tuple[str, str]]:
+    mx = f.get("max_length")
+    w = _RND.sample(_WORDS, 4)
+    label = f.get("label") or f["name"]
+    if _is_code(f):
+        init = _initials(screen)
+        typical = [f"{init}{_uniq(3)}", f"{init}{_uniq(3)}X", f"{_initials(label)}{_uniq(3)}"]
+    elif _is_name(f):
+        typical = [f"{screen} {w[0]} {_uniq(2)}", f"{w[1]} {label} {_uniq(2)}", f"{w[2]} {w[3]} {_uniq(2)}"]
+    elif f.get("kind") == "textarea" or re.search(r"desc|remark|note", f["name"].lower()):
+        typical = [f"Updated by automated test {w[0]} {_uniq(3)}", f"{w[1]} remark {_uniq(3)}", f"{w[2]} {w[3]} note {_uniq(3)}"]
+    else:
+        typical = [f"{label} {w[0]} {_uniq(2)}", f"{w[1]} {_uniq(3)}", f"{label} {w[2]} {_uniq(2)}"]
+    cands: list[tuple[str, str]] = [("typical", _fit(t, mx)) for t in typical]
+    if mx and mx >= 2:
+        unit = (typical[0] + " ")
+        longest = (unit * (mx // len(unit) + 2))[:mx].rstrip()
+        longest = longest + "X" * (mx - len(longest))
+        cands.append(("longest allowed", longest))
+    if not mx or mx >= 8:
+        cands.append(("special characters", _fit(f"{w[0]}&{w[1]}-{_uniq(2)}_(x) #1", mx)))
+        cands.append(("internal spaces", _fit(f"{w[2]}  {w[3]} {_uniq(2)}", mx)))
+    good = [(c, v) for c, v in cands if _fits(v, f)]
+    if not good and f.get("regex"):          # a regex: try plain shapes until one matches
+        for c, v in (("typical", "ABC"), ("typical", "AB12"), ("typical", "A123"), ("typical", "Test1"),
+                     ("typical", "12345"), ("typical", "abc"), ("typical", "Test Value")):
+            if _fits(v, f):
+                good.append((c, v))
+    return good
+
+
+def _number_update_values(f: dict) -> list[tuple[str, str]]:
+    mx = f.get("max_length")
+    decimal = str(f.get("type") or "").lower() in ("decimal", "percentage", "double", "float", "money", "currency")
+    base = [("typical", str(_RND.randint(2, 9) * 10 + _RND.randint(1, 9))),
+            ("typical", str(_RND.randint(100, 499))),
+            ("minimum value", "1")]
+    if decimal and (not mx or mx >= 4):
+        base.append(("decimal", f"{_RND.randint(1, 90)}.5"))
+    if mx and mx >= 2:
+        base.append(("longest allowed", "9" * min(mx, 9)))
+    else:
+        base.append(("typical", str(_RND.randint(1000, 9999))))
+    out, seen = [], set()
+    for c, v in base:
+        if v not in seen and _fits(v, f):
+            seen.add(v)
+            out.append((c, v))
+    return out
+
+
+def build_update_pool(spec: dict, business_context: dict | None = None) -> dict:
+    """{field NAME: {...values: [(category, value)]}} for EVERY editable field - 4 to 6 valid, different values (typical,
+    longest, special characters, every option, different dates, different numbers). The update passes use them one per
+    row; the repair step replaces a value the record already holds. Built by code from the spec, never invented."""
+    screen = _screen_label(spec)
+    pool: dict[str, dict] = {}
+    for f in spec["fields"]:
+        if not f.get("active", True) or not is_editable(f):
+            continue
+        group = update_group(f)
+        vals: list[tuple[str, str]] = []
+        note = ""
+        opts = [o["text"] for o in f.get("options") or [] if not o.get("blank") and str(o.get("text", "")).strip()]
+        if group == "combobox":
+            vals = [("option", o) for o in opts]
+            note = "every option is listed: use each one, the one the record already shows excluded"
+        elif group == "checkbox":
+            vals = [("checked", "Checked"), ("unchecked", "Unchecked")]
+            note = "toggle: pick the state the record does NOT hold"
+        elif group == "date":
+            vals = [("today", "today"), ("future", "today+1"), ("future", "today+7"), ("past", "today-1"),
+                    ("future", "today+30"), ("past", "today-7")]
+            note = ("relative dates only; the step types them in the screen's format"
+                    + (f" ({spec['date_format']})" if spec.get("date_format") else "")
+                    + "; use a past date only when the source does not forbid it")
+        elif group == "picklist":
+            real = _business_value(business_context, f)
+            vals = [("existing record", real if real else f"PLACEHOLDER_{re.sub(r'[^A-Za-z0-9]+', '_', f['label']).strip('_')}")]
+            note = "lookup of another entity: only this value is known - one row per record"
+        elif group == "number":
+            vals = _number_update_values(f)
+        else:
+            vals = _text_update_values(f, screen)
+        seen, uniq = set(), []
+        for c, v in vals:
+            if v.lower() not in seen:
+                seen.add(v.lower())
+                uniq.append((c, v))
+        if group != "combobox":
+            uniq = uniq[:UPDATE_MAX_VALUES]
+        if f.get("regex") and not uniq:
+            note = f"regex {f['regex']}: no safe generated value - write values for this field only from the source"
+        pool[f["name"]] = {"name": f["name"], "label": f.get("label") or f["name"], "kind": f.get("kind"), "group": group,
+                           "max_length": f.get("max_length"), "regex": f.get("regex") or "", "values": uniq, "note": note}
+    return pool
+
+
+def render_update_pool(pool: dict) -> str:
+    if not pool:
+        return "UPDATE DATA POOL: no editable field."
+    lines = ["UPDATE DATA POOL (built by code; use ONLY these values for update rows, a DIFFERENT value on every row; a changed "
+             "value must differ from the value the record currently holds in the RECORD LEDGER; never change the record key):"]
+    for name, p in pool.items():
+        vals = " | ".join(f"{c}: {v}" for c, v in p["values"]) or "none"
+        lim = f", max {p['max_length']}" if p["max_length"] else ""
+        lines.append(f"- {name} (label '{p['label']}', {p['group']}{lim}): {vals}" + (f"  [{p['note']}]" if p["note"] else ""))
     return "\n".join(lines)

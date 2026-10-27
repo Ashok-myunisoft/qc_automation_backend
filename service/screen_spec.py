@@ -2,16 +2,15 @@
 
   frontend : formjson  (type / required / max length / regex / dropdown options / picklist)
              intersected with the fields the screen's HTML really renders,
-             real labels from gbhost i18n, the frontend's own validation messages
-  backend  : every file of the screen's backend entity,
-             condensed into a small digest of the Save / Delete rules and messages
+             real labels from gbhost i18n, the frontend's own validation messages,
+             calculated / read-only fields (formjson + HTML + TS) and the date format the screen shows
+  backend  : every file of the screen's backend entity, condensed into a small digest of the Save / Delete
+             rules and messages (when the backend repository can be reached)
 
 Everything here is best-effort: every public function returns None / {} on any problem and
 the caller carries on with the old behaviour.
 
-Always on (no .env flags): formjson + rendered fields + labels + value pool + scenario plan,
-entity-based backend files + digest, and one coverage-repair pass when a rendered field is unused.
-Optional:
+Optional settings (repo paths / a safety cap, all with defaults in code):
   I18N_PATH, SAVEURL_PATH   repo paths of the label file / the route map
   BACKEND_ENTITY_MAX_FILES  safety cap on fetched backend files (default 40)
 """
@@ -23,20 +22,9 @@ import os
 import re
 import time
 
+from service import calculated_fields
+
 logger = logging.getLogger(__name__)
-
-# --------------------------------------------------------------------------- flags
-def enabled() -> bool:
-    return True
-
-
-def backend_digest_enabled() -> bool:
-    return True
-
-
-def coverage_repair_enabled() -> bool:
-    return True
-
 
 def _n(text) -> str:
     return re.sub(r"[^a-z0-9]", "", str(text or "").lower())
@@ -189,7 +177,8 @@ def _parse_field(raw: dict) -> dict:
         "add_new": _truthy(_ci(raw, "AddNew")),
         "link_id": str(_ci(raw, "LinkId") or ""),
         "picklist_title": str(_ci(raw, "PicklistTitle") or ""),
-        "readonly": _truthy(_ci(raw, "ReadOnly")) or str(_ci(raw, "Type") or "").lower() == "readonly",
+        "readonly": (_truthy(_ci(raw, "ReadOnly")) or _truthy(_ci(raw, "IsReadOnly")) or _truthy(_ci(raw, "Disabled"))
+                     or _truthy(_ci(raw, "IsDisabled")) or str(_ci(raw, "Type") or "").lower() == "readonly"),
         "grid": bool(_ci(raw, "Grid")),
         "post_data": _ci(raw, "PostData", True),
     }
@@ -616,7 +605,9 @@ def digest_entity(files: dict[str, str], messages) -> dict:
                 cond = re.sub(r"\s+", " ", conds[-1]).strip() if conds else ""
                 if msg not in seen_rules:
                     seen_rules.add(msg)
-                    rules.append({"message": msg, "condition": cond})
+                    # a message with {placeholders} is matched by its fixed part only (the text before the first {)
+                    fragment = msg.split("{")[0].strip()
+                    rules.append({"message": fragment, "template": msg, "condition": cond})
 
     msgs: dict[str, dict] = {}
     for (cls, prop), args in refs.items():
@@ -727,6 +718,11 @@ def build_screen_spec(src, resolved_dir: str, source_files: list[dict], source_t
     rendered = rendered_from_html(source_files, resolved_dir)
     i18n = _load_i18n(src)
     fields = _build_fields(raw_fields, rendered, i18n, formname, module)
+    calc_info = {"calculated": [], "date_format": "", "date_format_source": ""}
+    try:
+        calc_info = calculated_fields.apply(fields, rendered, source_files, resolved_dir)
+    except Exception:
+        logger.exception("screen_spec: calculated-field detection failed - continuing without it")
     msgs = component_messages(source_files, resolved_dir)
 
     # the screen's own code is the truth about what is required and what the message says
@@ -746,6 +742,9 @@ def build_screen_spec(src, resolved_dir: str, source_files: list[dict], source_t
         "rendered_html_found": bool(rendered["found"]),
         "not_rendered": [f["name"] for f in fields if f["rendered"] is False],
         "labels_resolved": bool(i18n),
+        "calculated_fields": calc_info.get("calculated") or [],
+        "date_format": calc_info.get("date_format") or "",
+        "date_format_source": calc_info.get("date_format_source") or "",
         "messages_by_label": by_label,
         "messages": {
             "required": list(dict.fromkeys([f["required_message"] for f in fields if f["active"] and f["required_message"]]
@@ -754,7 +753,7 @@ def build_screen_spec(src, resolved_dir: str, source_files: list[dict], source_t
         },
     }
 
-    if backend is not None and backend_digest_enabled():
+    if backend is not None:
         try:
             entities = entity_candidates(source_files, formname, _saveurl_map(src))
             digest = build_backend_digest(backend, entities, module)
@@ -779,7 +778,8 @@ def compact(spec: dict) -> dict:
     out = {k: v for k, v in spec.items() if k not in ("fields",)}
     out["fields"] = [
         {k: f[k] for k in ("name", "label", "kind", "type", "required", "max_length", "regex", "active", "candidate",
-                           "alternate_of", "readonly", "record_picker", "rendered", "lookup", "required_message") if k in f}
+                           "alternate_of", "readonly", "record_picker", "rendered", "lookup", "required_message",
+                           "calculated", "computed_from", "calculated_rule", "calculated_origin") if k in f}
         | ({"options": [o["text"] for o in f["options"] if not o["blank"]]} if f.get("options") else {})
         for f in spec["fields"]
     ]
@@ -805,6 +805,10 @@ def summary_line(spec: dict) -> str:
         s += f" ({len(alt)} alternate field(s) - only one is shown per role/module, the live scan decides)"
     if spec.get("not_rendered"):
         s += f", {len(spec['not_rendered'])} not on the page"
+    if spec.get("calculated_fields"):
+        s += f", {len(spec['calculated_fields'])} calculated/read-only ({', '.join(c['name'] for c in spec['calculated_fields'][:5])})"
+    if spec.get("date_format"):
+        s += f", date format {spec['date_format']}"
     b = spec.get("backend")
     if b:
         s += f"; backend entity {b['entity']} ({b['module']}, {len(b['files'])} file(s), via {b['found_by']})"

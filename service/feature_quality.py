@@ -464,11 +464,12 @@ def _fix_missing_rows(outlines: list[Outline], fields: _Fields, controls: dict, 
 # step 3 - duplicates
 # ---------------------------------------------------------------------------
 def _signature(o: Outline, row: list[str]) -> tuple:
-    cols = o.field_columns()
-    values = tuple(sorted((_n(f), row[o.col(ph)].strip().lower()) for _k, (ph, f) in cols.items()))
+    """Two rows are the same only when every cell except the Condition label is the same (so rows that differ only in
+    data - another record, another value - are never merged)."""
     fixed = tuple(t for t in o.step_texts() if not _FIELD_STEP_RE.match(t))
-    expected = row[o.expected_col].strip().lower() if o.expected_col >= 0 else ""
-    return (fixed, values, expected)
+    cells = tuple(c.strip().lower() for i, c in enumerate(row) if i != 0 or o.col("Condition") != 0)
+    steps_with_values = tuple(o.step_texts())
+    return (fixed, steps_with_values, cells)
 
 
 def _dedupe(items, report: dict) -> None:

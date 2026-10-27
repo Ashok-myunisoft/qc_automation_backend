@@ -1,9 +1,11 @@
 import asyncio
 import base64
 import copy
+import json
 import logging
 import posixpath
 import re
+import time
 from pathlib import Path
 import logger_config
 from fastapi import FastAPI, HTTPException, Response, WebSocket, WebSocketDisconnect
@@ -35,8 +37,8 @@ from service import script_builder
 from service import expected_results
 from service import feature_quality  # deterministic feature clean-up
 from service import chunk_analysis
-from service import screen_spec, value_gen  # screen spec (USE_SCREEN_SPEC / USE_BACKEND_DIGEST)
-from service import screen_facts, feature_passes, coverage_loop, extended_steps, run_metrics  # coverage upgrade (flags)
+from service import screen_spec, value_gen  # screen spec (formjson + backend digest)
+from service import screen_facts, feature_passes, coverage_loop, extended_steps, run_metrics  # topic passes, coverage loop, extended steps
 from service import feature_fixer, template_steps  # code-only feature repair + fixed extended step definitions
 from service import history_store
 from service import job_manager
@@ -1080,7 +1082,7 @@ async def _append_one_screen(existing_feature: str, existing_script: str,
 
 async def _run_test_cases_with_chunking(
     project_analysis: dict, user_request: str, business_context: dict | None,
-    tag: str, ws: WebSocket,
+    tag: str, ws: WebSocket, extended: bool = False,
 ) -> str:
     """Mirrors _run_analysis_with_chunking's rationale, one stage later in
     the pipeline. A tabbed screen's merged project_analysis correctly
@@ -1116,7 +1118,7 @@ async def _run_test_cases_with_chunking(
                 raw = await test_case_agent.generate_test_cases(
                     project_analysis=project_analysis,
                     user_request=chunk_analysis.build_focus_test_case_request(user_request, i),
-                    business_context=business_context,
+                    business_context=business_context, extended=extended,
                 )
                 texts.append(raw if i == 0 else chunk_analysis.strip_to_scenarios(raw))
             merged = chunk_analysis.merge_test_case_chunks(texts[0], texts[1:])
@@ -1130,7 +1132,7 @@ async def _run_test_cases_with_chunking(
             return merged
         return await test_case_agent.generate_test_cases(
             project_analysis=project_analysis, user_request=user_request,
-            business_context=business_context,
+            business_context=business_context, extended=extended,
         )
 
     modules = project_analysis.get("modules") or []
@@ -1146,7 +1148,7 @@ async def _run_test_cases_with_chunking(
     shared_request = chunk_analysis.build_shared_test_case_request(user_request)
     shared_text = await test_case_agent.generate_test_cases(
         project_analysis=shared_analysis, user_request=shared_request,
-        business_context=business_context,
+        business_context=business_context, extended=extended,
     )
 
     rule_texts = []
@@ -1157,7 +1159,7 @@ async def _run_test_cases_with_chunking(
         section_request = chunk_analysis.build_section_test_case_request(user_request, label)
         raw = await test_case_agent.generate_test_cases(
             project_analysis=section_analysis, user_request=section_request,
-            business_context=business_context,
+            business_context=business_context, extended=extended,
         )
         rule_texts.append(chunk_analysis.strip_to_rule_block(raw, label))
 
@@ -1205,7 +1207,7 @@ def _log_step_findings(tag: str, findings, heading: str) -> None:
 
 async def _step_check_and_repair(tag: str, test_cases: str, generated_script: str,
                                  automation_contract: dict | None,
-                                 controls: dict | None = None, script_locked: bool = False):
+                                 controls: dict | None = None, script_locked: bool = False, extended: bool = False):
     """Runs the step checker on the generated pair, logs every finding to the
     backend log, and - only when there are critical findings - makes ONE repair
     attempt per agent (test_case_agent for feature defects, script_generate_agent
@@ -1240,7 +1242,7 @@ async def _step_check_and_repair(tag: str, test_cases: str, generated_script: st
         if feature_side:
             try:
                 new_feature = await test_case_agent.repair_test_cases(
-                    test_cases, step_checker.format_for_prompt(feature_side),
+                    test_cases, step_checker.format_for_prompt(feature_side), extended=extended,
                 )
                 if controls is not None:
                     new_feature = script_builder.normalize_feature(new_feature, controls)
@@ -1324,13 +1326,19 @@ def _merge_step_findings(validation: dict | None, findings, repaired_parts: list
 
 async def _add_extended_steps(ws: WebSocket, tag: str, test_cases: str, base_script: str, project_context: dict,
                               project_analysis: dict, metrics=None) -> str:
-    """USE_EXTENDED_STEPS: definitions for the steps the code-built script lacks.
+    """Definitions for the steps the code-built script lacks (screens with a formjson spec).
     1) the fixed, code-written definitions (service/template_steps.py) are added first - no AI involved;
     2) only what is still undefined goes to the agent, in small batches of 4 sentences, and every accepted
        batch is kept even when a later one is rejected (one bad batch no longer loses the others).
     Each block is guarded (template intact, no duplicates, node --check, no network/storage)."""
     try:
         missing = extended_steps.undefined_steps(test_cases, base_script)
+        # a sentence outside the vocabulary never gets a definition: the feature is repaired instead
+        missing, _not_vocab = extended_steps.split_by_vocabulary(missing)
+        for _bad in _not_vocab:
+            logger.warning("%sstep not in the vocabulary - no definition written for it: %s", tag, _bad)
+        if _not_vocab:
+            await send_log(ws, f"{tag}{len(_not_vocab)} step sentence(s) are not in the step vocabulary - no definition is written for them (see the backend log).", "muted")
         if not missing:
             return base_script
         source_files = project_context.get("source_files") or []
@@ -1345,7 +1353,7 @@ async def _add_extended_steps(ws: WebSocket, tag: str, test_cases: str, base_scr
             block, covered = template_steps.build_block(
                 behavior, missing, project_analysis.get("screen_spec") if isinstance(project_analysis, dict) else None)
             if block:
-                assembled, problems = extended_steps.assemble(script, block, covered)
+                assembled, problems = await asyncio.to_thread(extended_steps.assemble, script, block, covered)
                 if assembled:
                     script = assembled
                     await send_log(ws, f"{tag}{len(covered)} extended step definition(s) added from the fixed templates.", "success")
@@ -1356,7 +1364,7 @@ async def _add_extended_steps(ws: WebSocket, tag: str, test_cases: str, base_scr
             logger.exception("%sfixed extended steps failed - falling back to the agent", tag)
 
         # 2) whatever is still undefined: the agent, a few sentences at a time
-        left = extended_steps.undefined_steps(test_cases, script)
+        left, _ = extended_steps.split_by_vocabulary(extended_steps.undefined_steps(test_cases, script))
         if left:
             await send_log(ws, f"{tag}writing {len(left)} extended step definition(s) with the agent...", "secondary")
         for start in range(0, len(left), 4):
@@ -1367,7 +1375,7 @@ async def _add_extended_steps(ws: WebSocket, tag: str, test_cases: str, base_scr
                     batch, script, source_files, behavior, previous_error=error)
                 if metrics:
                     metrics.llm()
-                assembled, problems = extended_steps.assemble(script, block, batch)
+                assembled, problems = await asyncio.to_thread(extended_steps.assemble, script, block, batch)
                 if assembled:
                     script = assembled
                     break
@@ -1411,15 +1419,17 @@ async def _generate_one_screen(ws: WebSocket, src: GitLabService, module: str,
             project_context = await asyncio.to_thread(
                 _fetch_source_project_context, src, resolved_source, source_tree,
             )
-        # screenspec: build the screen spec by code (formjson + rendered HTML + labels, and with
-        # USE_BACKEND_DIGEST the entity's backend files). Off by default; any problem -> carry on as before.
+        # screenspec: build the screen spec by code (formjson + rendered HTML + labels + calculated fields + the entity's
+        # backend files). Every normal (non-MM) screen; no formjson or any problem -> carry on with the normal analysis.
         screen_spec_data = None
         screen_spec_backend_ok = False
-        if screen_spec.enabled() and not is_mm_screen:
+        if not is_mm_screen:
             try:
                 _spec_backend = None
-                if screen_spec.backend_digest_enabled():
+                try:
                     _spec_backend = await asyncio.to_thread(_backend_gitlab_service)
+                except Exception as _be0:
+                    logger.warning("%sbackend repository unavailable for the screen spec (%s) - frontend spec only", tag, _be0)
                 screen_spec_data = await asyncio.to_thread(
                     screen_spec.build_screen_spec, src, project_context.get("primary_dir") or resolved_source.dir,
                     project_context.get("source_files", []), source_tree, _spec_backend,
@@ -1587,13 +1597,13 @@ async def _generate_one_screen(ws: WebSocket, src: GitLabService, module: str,
                     test_case_agent, project_context, project_analysis, project_analysis["screen_spec"],
                     business_context, user_request, _plog, _metrics)
                 _metrics.note("feature", "passes")
-                if coverage_loop.enabled():
-                    async def _gap(gaps, current, _i=_pass_info):
-                        return await feature_passes.gap_fill(test_case_agent, _i["prefix"], _i["facts"], _i["ledger"], gaps, current)
-                    test_cases, _cov_report = await coverage_loop.run_loop(
-                        _pass_info["facts"], test_cases, _gap,
-                        lambda cur, new: chunk_analysis.merge_test_case_chunks(cur, [new]) if new.strip() else cur, _plog)
-                    _metrics.stage("coverage_loop", test_cases)
+                async def _gap(gaps, current, _i=_pass_info):
+                    return await feature_passes.gap_fill(test_case_agent, _i["prefix"], _i["facts"], _i["ledger"], gaps, current,
+                                                         _i.get("update_pool_text", ""))
+                test_cases, _cov_report = await coverage_loop.run_loop(
+                    _pass_info["facts"], test_cases, _gap,
+                    lambda cur, new: chunk_analysis.merge_test_case_chunks(cur, [new]) if new.strip() else cur, _plog)
+                _metrics.stage("coverage_loop", test_cases)
             except WebSocketDisconnect:
                 raise
             except Exception as _pe:
@@ -1602,16 +1612,22 @@ async def _generate_one_screen(ws: WebSocket, src: GitLabService, module: str,
                 test_cases, _pass_info = None, None
         else:
             logger.info("%sfeature passes not used (%s)", tag, _passes_why)
+        # extended steps (form state, list checks, calculated-field checks ...) are used for every screen that has a formjson spec
+        _extended = _pass_info is not None or bool(
+            isinstance(project_analysis, dict) and project_analysis.get("screen_spec") and not is_mm_screen)
         if test_cases is None:
+            _why = _passes_why if not _use_passes else "the topic passes failed"
+            logger.info("%susing the single-call/chunked generation (%s)", tag, _why)
+            await send_log(ws, f"{tag}using the normal single-call test case generation ({_why}).", "muted")
             _metrics.note("feature", "single-call/chunked")
             test_cases = await _run_test_cases_with_chunking(
                 project_analysis=project_analysis, user_request=user_request,
-                business_context=business_context, tag=tag, ws=ws,
+                business_context=business_context, tag=tag, ws=ws, extended=_extended,
             )
             _metrics.stage("agent_output", test_cases)
 
-        # screenspec: how many of the page's fields the scenarios really use (one repair pass is optional:
-        # USE_COVERAGE_REPAIR=1). Runs before the verification below, so any repaired rows are verified too.
+        # screenspec: how many of the page's fields the scenarios really use (one repair pass when a field is unused).
+        # Runs before the verification below, so any repaired rows are verified too.
         if screen_spec_data and isinstance(project_analysis, dict) and project_analysis.get("screen_spec"):
             try:
                 _cov = screen_spec.coverage_report(test_cases, screen_spec_data)
@@ -1620,11 +1636,13 @@ async def _generate_one_screen(ws: WebSocket, src: GitLabService, module: str,
                         + (f" (missing: {', '.join(_cov['missing'])})." if _cov["missing"] else "."),
                     "secondary" if not _cov["missing"] else "muted",
                 )
-                if _cov["missing"] and screen_spec.coverage_repair_enabled():
+                _calc_names = {f["name"] for f in screen_spec_data["fields"] if f.get("readonly") or f.get("calculated")}
+                _fill = [n for n in _cov["missing"] if n not in _calc_names]   # calculated / read-only fields are never filled
+                if _fill:
                     _findings = "\n".join(
                         f"- the field '{n}' is on the page but never used in any scenario: add it to the Examples "
-                        f"tables (with a value from the Project Analysis) and to the steps." for n in _cov["missing"])
-                    _repaired = await test_case_agent.repair_test_cases(test_cases, _findings)
+                        f"tables (with a value from the Project Analysis) and to the steps." for n in _fill)
+                    _repaired = await test_case_agent.repair_test_cases(test_cases, _findings, extended=_extended)
                     _cov2 = screen_spec.coverage_report(_repaired, screen_spec_data)
                     if "Feature:" in _repaired and len(_cov2["missing"]) < len(_cov["missing"]):
                         test_cases = _repaired
@@ -1664,7 +1682,7 @@ async def _generate_one_screen(ws: WebSocket, src: GitLabService, module: str,
         # Best-effort: on any problem the feature is kept exactly as it was.
         try:
             _fq_controls = script_builder.controls_from_analysis(project_analysis)
-            if _pass_info is not None or extended_steps.enabled():
+            if _extended:
                 test_cases, _fq_report = feature_passes.refine_protecting_extended(
                     test_cases, lambda _t: feature_quality.refine_feature(_t, project_analysis, _fq_controls))
             else:
@@ -1679,8 +1697,8 @@ async def _generate_one_screen(ws: WebSocket, src: GitLabService, module: str,
 
         # Code-only repair of what the passes cannot see of each other (service/feature_fixer.py): unique record
         # codes, "new record field" steps, rows the screen cannot run, delete order, rebuilt open-existing / list
-        # scenarios. It needs the extended step vocabulary, so it runs with USE_EXTENDED_STEPS=1 (or after passes).
-        if _pass_info is not None or extended_steps.enabled():
+        # scenarios. It needs the extended step vocabulary, so it runs for every screen that has a formjson spec.
+        if _extended:
             try:
                 from service import screen_behavior as _screen_behavior
                 _ff_behavior = (project_analysis.get("behavior") if isinstance(project_analysis, dict) else None) \
@@ -1710,7 +1728,7 @@ async def _generate_one_screen(ws: WebSocket, src: GitLabService, module: str,
             test_cases = script_builder.normalize_feature(test_cases, controls)
             generated_script = script_builder.build_script(project_analysis)
             script_locked = True
-            if extended_steps.enabled():
+            if _extended:
                 generated_script = await _add_extended_steps(
                     ws, tag, test_cases, generated_script, project_context, project_analysis, _metrics)
             kinds: dict[str, int] = {}
@@ -1743,7 +1761,7 @@ async def _generate_one_screen(ws: WebSocket, src: GitLabService, module: str,
 
         test_cases, generated_script, step_findings, step_repaired = await _step_check_and_repair(
             tag, test_cases, generated_script, automation_contract,
-            controls=controls if script_locked else None, script_locked=script_locked,
+            controls=controls if script_locked else None, script_locked=script_locked, extended=_extended,
         )
 
         await send_log(ws, f"{tag}running validate agent...", "secondary")
@@ -2534,11 +2552,12 @@ async def handle_report(ws: WebSocket, session: dict):
         return
 
     module = session.get("module") or ""
-    xlsx_bytes = report_builder.build_report_xlsx(module, run_results)
+    xlsx_bytes = await asyncio.to_thread(report_builder.build_report_xlsx, module, run_results)
     filename = f"qc-report-{module or 'run'}.xlsx".replace(" ", "_")
+    content_b64 = await asyncio.to_thread(lambda: base64.b64encode(xlsx_bytes).decode("ascii"))
     await ws.send_json({
         "type":            "report",
-        "content_base64":  base64.b64encode(xlsx_bytes).decode("ascii"),
+        "content_base64":  content_b64,
         "filename":        filename,
         "mime":            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     })
@@ -2551,7 +2570,7 @@ async def handle_screenshots(ws: WebSocket, session: dict):
         return
 
     module = session.get("module") or ""
-    html = report_builder.build_screenshots_html(module, run_results)
+    html = await asyncio.to_thread(report_builder.build_screenshots_html, module, run_results)
     filename = f"qc-screenshots-{module or 'run'}.html".replace(" ", "_")
     await ws.send_json({
         "type":     "screenshots",
@@ -3038,10 +3057,22 @@ def _session_job_active(session: dict) -> bool:
     return job is not None and job.active
 
 
-@app.websocket("/ws/qc")
-async def qc_session(websocket: WebSocket):
-    await websocket.accept()
-    session = {
+# ----------------------------------------------------------------------
+# Connection resilience
+#
+# A browser connection can drop for reasons that have nothing to do with the
+# container being up (wifi / VPN change, laptop sleep, a proxy idle timeout...).
+# The UI therefore reconnects on its own and sends the same client id (?cid=)
+# every time. A session is kept for a while after its socket drops, so the
+# reconnected browser gets the same session back (generated files waiting for
+# approval, run results, an in-flight run) instead of an empty one.
+# ----------------------------------------------------------------------
+_SESSIONS: dict[str, dict] = {}
+_SESSION_TTL_SECONDS = 30 * 60
+
+
+def _new_session() -> dict:
+    return {
         "module": None, "screen": None, "origin": None,
         "feature": None, "script": None, "resolved": None,
         "pushed": False, "process": None, "pending_generate": None,
@@ -3049,14 +3080,102 @@ async def qc_session(websocket: WebSocket):
         "current_task": None,
         "job": None,
         "test_env": None,
+        "ws": None,
+        "last_seen": time.monotonic(),
     }
+
+
+def _prune_sessions() -> None:
+    now = time.monotonic()
+    for cid, sess in list(_SESSIONS.items()):
+        if sess.get("ws") is not None or _session_job_active(sess):
+            continue
+        if now - sess.get("last_seen", now) > _SESSION_TTL_SECONDS:
+            _SESSIONS.pop(cid, None)
+
+
+# Logs a warning whenever something blocks the event loop for more than a couple of seconds.
+# A blocked loop cannot answer WebSocket keepalive pings, which is one way a connection gets
+# closed. The log line is the signal to go and find the blocking call.
+_loop_monitor_task: asyncio.Task | None = None
+
+
+async def _loop_lag_monitor():
+    interval = 1.0
+    while True:
+        started = time.monotonic()
+        await asyncio.sleep(interval)
+        lag = time.monotonic() - started - interval
+        if lag > 2.0:
+            logger.warning("event loop was blocked for %.1fs - WebSocket pings could not be answered "
+                           "during this time; a synchronous call is running inside async code", lag)
+
+
+def _ensure_loop_monitor() -> None:
+    global _loop_monitor_task
+    if _loop_monitor_task is None or _loop_monitor_task.done():
+        _loop_monitor_task = asyncio.create_task(_loop_lag_monitor())
+
+
+@app.websocket("/ws/qc")
+async def qc_session(websocket: WebSocket):
+    await websocket.accept()
+    _ensure_loop_monitor()
+    _prune_sessions()
+
+    cid = (websocket.query_params.get("cid") or "").strip()[:64]
+    session = _SESSIONS.get(cid) if cid else None
+    fresh = session is None
+    if session is None:
+        session = _new_session()
+        if cid:
+            _SESSIONS[cid] = session
+    else:
+        # Same browser coming back. If the server still thinks the old socket is open
+        # (half-dead connection), drop it so only one connection owns the session.
+        old = session.get("ws")
+        if old is not None and old is not websocket:
+            try:
+                await old.close(code=4000)
+            except Exception:
+                pass
+    session["ws"] = websocket
+    session["last_seen"] = time.monotonic()
+
+    job = session.get("job")
+    try:
+        await websocket.send_json({
+            "type": "resumed",
+            "fresh": fresh,
+            "job_active": bool(job is not None and job.active),
+            "replaying": job.socket.pending() if job is not None else 0,
+        })
+        if job is not None:
+            job.socket.detach()                 # buffer anything new until the replay is done
+            await job.socket.attach(websocket)  # replay what the browser missed, then go live
+    except Exception:
+        logger.info("qc session: could not finish resume handshake", exc_info=True)
 
     try:
         while True:
-            msg    = await websocket.receive_json()
+            raw = await websocket.receive_text()
+            try:
+                msg = json.loads(raw)
+            except ValueError:
+                await send_error(websocket, "invalid message (not JSON) - ignored.")
+                continue
+            if not isinstance(msg, dict):
+                await send_error(websocket, "invalid message (expected an object) - ignored.")
+                continue
             action = msg.get("action")
+            session["last_seen"] = time.monotonic()
 
-            if action == "set_env":
+            if action == "ping":
+                # UI heartbeat: keeps idle proxies from closing the socket and lets the UI
+                # notice a dead connection quickly.
+                await websocket.send_json({"type": "pong"})
+
+            elif action == "set_env":
                 session["current_task"] = asyncio.create_task(handle_set_env(websocket, session, msg))
 
             elif action == "fetch":
@@ -3174,6 +3293,12 @@ async def qc_session(websocket: WebSocket):
                 await send_error(websocket, f"unknown action: {action}")
 
     except WebSocketDisconnect:
+        if session.get("ws") is not websocket:
+            # A newer connection from the same browser has already taken this session over.
+            logger.info("qc session: superseded socket closed")
+            return
+        session["ws"] = None
+        session["last_seen"] = time.monotonic()
         logger.info("qc session disconnected")
         job = session.get("job")
         if job is not None and job.active:

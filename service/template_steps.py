@@ -303,7 +303,13 @@ Then("the {string} field should show {string}", (field, value) => {
   cy.get('body', { timeout: 15000 }).should(($b) => {
     const $el = tplFindEl($b, field);
     expect($el.length, 'the "' + field + '" control').to.be.greaterThan(0);
-    expect(tplValueOf($el).toLowerCase(), 'the value of "' + field + '"').to.include(tplSq(value).toLowerCase());
+    const now = tplValueOf($el);
+    if (/^\(not empty\)$/i.test(tplSq(value))) {
+      expect(now, 'the calculated field "' + field + '" is not empty').to.not.equal('');
+      return;
+    }
+    const want = (typeof relDate === 'function' && /^today\s*([+-]\s*\d+)?$/i.test(tplSq(value))) ? relDate(value) : tplSq(value);
+    expect(now.toLowerCase(), 'the value of "' + field + '"').to.include(want.toLowerCase());
   });
 });'''),
 

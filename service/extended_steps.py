@@ -1,4 +1,4 @@
-"""Extended step vocabulary (always on): which feature steps have no definition yet, and the guarded
+"""Extended step vocabulary: which feature steps have no definition yet, and the guarded
 assembly of the agent-written definitions into the code-built script (spec 02 part B)."""
 from __future__ import annotations
 
@@ -20,7 +20,7 @@ I clear the "<Field>" field
 the form should be open / the form should still be open / the form should be closed
 the form fields should be empty
 the "<Action>" action should be "<visible or hidden>"
-the "<Field>" field should show "<Value>"
+the "<Field>" field should show "<Value>"    (Value "(not empty)" only checks that the field is not empty; use it for calculated fields whose rule is unknown)
 I click the Reset button
 I click the Close button
 I open the existing record "<Record>" using the "<Field>" field
@@ -49,19 +49,58 @@ I click the Delete button
 I select "<Value>" in the "<Field>" picklist field
 I enter "<Value>" in the "<Field>" input field
 I select "<Value>" in the "<Field>" combobox field
-I enter "<Value>" in the "<Field>" date field
+I enter "<Value>" in the "<Field>" date field    (Value: today, today+N or today-N, never a literal date)
 I select "<Value>" in the "<Field>" radio field
 I set "<Checked or Unchecked>" in the "<Field>" checkbox field
 I enter "<Value>" in the "<Field>" textarea field
 I should see a confirmation message "<ExpectedResult>"'''
 
 
-def enabled() -> bool:
-    return True
-
-
 def step_vocabulary() -> str:
-    return BASE_VOCAB + ("\n" + EXTENDED_VOCAB if enabled() else "")
+    return BASE_VOCAB + "\n" + EXTENDED_VOCAB
+
+
+_Q = r'"[^"]*"'
+_VOCAB_PATTERNS = [re.compile(p) for p in (
+    r'I navigate through the following path ' + _Q + r'(?: -> ' + _Q + r'){1,2}',
+    r'I click the (?:Add New|save|Update|Edit|Delete|Reset|Close) button',
+    r'I (?:select|enter|set) ' + _Q + r' in the ' + _Q + r' (?:picklist|input|combobox|date|radio|checkbox|textarea|new record) field',
+    r'I should see a confirmation message ".*"',
+    r'I clear the ' + _Q + r' field',
+    r'the form should (?:be open|still be open|be closed)',
+    r'the form fields should be empty',
+    r'the ' + _Q + r' action should be ' + _Q,
+    r'the ' + _Q + r' field should show ' + _Q,
+    r'I open the existing record ' + _Q + r' using the ' + _Q + r' field',
+    r'I request to delete the record ' + _Q + r' using the ' + _Q + r' field',
+    r'I request to delete the open record',
+    r'I should see the delete prompt ' + _Q,
+    r'I (?:confirm|cancel) the delete',
+    r'I should (?:still|no longer) see the record ' + _Q + r' using the ' + _Q + r' field',
+    r'I search the list for ' + _Q, r'I clear the list search',
+    r'I should (?:not )?see the record ' + _Q + r' in the list',
+    r'the list row ' + _Q + r' should show ' + _Q,
+    r'I filter the list by type ' + _Q,
+    r'I sort the list by the ' + _Q + r' column in ' + _Q + r' order',
+    r'the list should be sorted by ' + _Q + r' in ' + _Q + r' order',
+    r'I switch to the ' + _Q + r' view', r'I should see the ' + _Q + r' view',
+    r'I should see the empty state ' + _Q,
+    r'I remember the number shown for ' + _Q,
+    r'the number shown for ' + _Q + r' should have changed by ' + _Q,
+)]
+
+
+def in_vocabulary(step_text: str) -> bool:
+    """True when the sentence is one of the vocabulary sentences (placeholders like <Value> count as text)."""
+    t = (step_text or "").strip()
+    return any(rx.fullmatch(t) for rx in _VOCAB_PATTERNS)
+
+
+def split_by_vocabulary(sentences: list[str]) -> tuple[list[str], list[str]]:
+    """(in the vocabulary, not in it). Only the first may get a definition: no definition is ever written to make an
+    invalid sentence pass - the feature is repaired instead."""
+    ok = [s for s in sentences if in_vocabulary(s)]
+    return ok, [s for s in sentences if s not in ok]
 
 
 def undefined_steps(feature_text: str, script_text: str) -> list[str]:
