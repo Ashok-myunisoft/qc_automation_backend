@@ -292,20 +292,23 @@ const ACTION_CLASS = {
 const CLICKABLE = 'button, [role="button"], a, span.formbuttons, div.btn, span.btn, [class*="btn"]';
 
 function fallbackAction($body, name) {
+  // Delete: when a form / dialog is open, only look inside it (a list row's delete icon must never be hit)
+  const $modalRoot = $body.find('.modal, mat-dialog-container, .mat-mdc-dialog-container').filter(':visible');
+  const $root = (name === 'delete' && $modalRoot.length) ? $modalRoot.first() : $body;
   const order = name === 'save' ? ['save', 'update'] : name === 'update' ? ['update', 'save'] : [name];
   for (const key of order) {
     if (!ACTION_TEXT[key]) {
       continue;
     }
-    let $hit = $body.find(ACTION_CLASS[key]).filter(':visible');
+    let $hit = $root.find(ACTION_CLASS[key]).filter(':visible');
     if ($hit.length) {
       return $hit.first();
     }
-    $hit = $body.find('[title], [aria-label]').filter(':visible').filter((i, e) => ACTION_TEXT[key].test(String(e.getAttribute('title') || e.getAttribute('aria-label') || '').trim()));
+    $hit = $root.find('[title], [aria-label]').filter(':visible').filter((i, e) => ACTION_TEXT[key].test(String(e.getAttribute('title') || e.getAttribute('aria-label') || '').trim()));
     if ($hit.length) {
       return $hit.first();
     }
-    $hit = $body.find(CLICKABLE).filter(':visible').filter((i, e) => ACTION_TEXT[key].test(Cypress.$(e).text()));
+    $hit = $root.find(CLICKABLE).filter(':visible').filter((i, e) => ACTION_TEXT[key].test(Cypress.$(e).text()));
     if ($hit.length) {
       return $hit.first();
     }

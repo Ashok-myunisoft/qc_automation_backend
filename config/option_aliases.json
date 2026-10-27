@@ -1,0 +1,4 @@
+{
+  "_comment": "Where the list, the filter or a sort column shows a dropdown option under another name than the form does. Format: { \"<Field>\": { \"<option in the form>\": \"<name in the list / filter>\" } }. Add one entry per screen field that differs.",
+  "DomainType": { "Production": "Manufacturing" }
+}

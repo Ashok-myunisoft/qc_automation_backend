@@ -212,13 +212,15 @@ class Ctx:
                 "options": texts, "blank": blank, "key": bool(f.get("key_field")),
                 "record_picker": bool(f.get("record_picker")), "readonly": bool(f.get("readonly")),
                 "max_length": f.get("max_length"), "lookup": bool(f.get("lookup")),
+                "required": bool(f.get("required")), "required_message": str(f.get("required_message") or ""),
             })
         if not self.fields:   # no spec: the scan-verified controls give names and kinds only
             for base, c in (controls or {}).items():
                 if isinstance(c, dict):
                     self.fields.append({"name": base, "label": base, "kind": c.get("kind") or "input", "options": [],
                                         "blank": None, "key": False, "record_picker": False, "readonly": False,
-                                        "max_length": None, "lookup": False})
+                                        "max_length": None, "lookup": False,
+                                        "required": False, "required_message": ""})
         self.by_norm = {}
         for f in self.fields:
             self.by_norm[_n(f["name"])] = f
@@ -235,6 +237,13 @@ class Ctx:
         dup = self.messages.get("duplicate") or []
         self.dup_msg = dup[0] if dup else ""
         self.notes: list = []
+        self.nav: list = []
+        try:
+            from service import datacy_scan as _ds
+            page = ((pa.get("modules") or [{}])[0].get("pages") or [{}])[0]
+            self.nav = [n for n in _ds._clean_path(page.get("navigation_path")) if n]
+        except Exception:  # noqa: BLE001
+            self.nav = []
         try:
             from service import template_steps as _ts
             self.aliases = _ts.load_aliases()
@@ -392,6 +401,9 @@ def _normalize_text(text: str):
     for rx, rep in _NORMALIZE:
         if rx.match(t):
             return rep
+    m = re.match(r'^I clear the ([A-Za-z_]\w*) field$', t)
+    if m:
+        return f'I clear the "{m.group(1)}" field'
     m = re.match(r'^I clear the "([^"]*)" (?:input|picklist|combobox|textarea|date|radio|checkbox) field$', t)
     if m:
         return f'I clear the "{m.group(1)}" field'
@@ -775,7 +787,7 @@ def _field_step(ctx: Ctx, fname: str, ph: str) -> Optional[str]:
     return f'I enter "{ph}" in the "{fname}" input field'
 
 
-def _make_create_outline(ctx: Ctx, title: str, recs: list, label: str) -> Optional[Outline]:
+def _make_create_outline(ctx: Ctx, title: str, recs: list, label: str, labels: Optional[list] = None) -> Optional[Outline]:
     if not recs:
         return None
     names = [f["name"] for f in ctx.fields if not f["readonly"] and any(f["name"] in r["fields"] for r in recs)]
@@ -791,7 +803,8 @@ def _make_create_outline(ctx: Ctx, title: str, recs: list, label: str) -> Option
     o.steps.append(Step("Then", f'I should see a confirmation message "{ctx.save_msg}"'))
     t = Table(header=["Condition"] + names, rows=[])
     for i, r in enumerate(recs, 1):
-        t.rows.append([f"{label} {i}"] + [r["fields"].get(nm, "") for nm in names])
+        t.rows.append([(labels[i - 1] if labels and i - 1 < len(labels) else f"{label} {i}")]
+                      + [r["fields"].get(nm, "") for nm in names])
     o.tables.append(t)
     return o
 
@@ -1286,12 +1299,430 @@ def _p_visibility(items, ctx):
     ctx.note("button visibility rebuilt: new record = Save visible / Delete hidden, open record = Update visible / Delete visible")
 
 
+
+# =========================================================================== second round of repairs
+# (navigation, forms that never open, invented / empty / not-yet-saved records, update flow, clean-up)
+def _nav_text(ctx) -> str:
+    if len(ctx.nav) in (2, 3):
+        return "I navigate through the following path " + " -> ".join(f'"{n}"' for n in ctx.nav)
+    return ""
+
+
+def _p_navigation(items, ctx):
+    """The Background must use the menu path the live scan found, with the right number of levels."""
+    new = _nav_text(ctx)
+    if not new:
+        return
+    changed = 0
+    for it in items:
+        if isinstance(it, Raw):
+            for k, line in enumerate(it.lines):
+                sm = _STEP_RE.match(line)
+                if sm and sm.group(3).startswith("I navigate through the following path") and sm.group(3) != new:
+                    it.lines[k] = f"{sm.group(1)}{sm.group(2)} {new}"
+                    changed += 1
+        elif isinstance(it, Outline):
+            for st in it.steps:
+                if st.text.startswith("I navigate through the following path") and st.text != new:
+                    st.text = new
+                    changed += 1
+    if changed:
+        ctx.note(f"navigation now uses the path the live scan found: {' > '.join(ctx.nav)}")
+
+
+def _is_field_action(text: str) -> bool:
+    return bool(_fs(Step("", text)) or _CLEAR_RE.match(text))
+
+
+def _p_ensure_open(items, ctx):
+    """A scenario that types into the form without opening it first (the form is closed when the screen loads)."""
+    n = 0
+    for o in _outlines(items):
+        if any(_opens_form(s.text) for s in o.steps) or _has(o, r"^I click the Update button$"):
+            continue
+        for i, s in enumerate(o.steps):
+            if _is_field_action(s.text):
+                o.steps.insert(i, Step("When", "I click the Add New button"))
+                n += 1
+                break
+    if n:
+        ctx.note(f"{n} scenario(s) typed into the form without opening it: they now start with 'Add New'")
+
+
+def _p_create_clear(items, ctx):
+    """On a NEW record every field is already empty: a 'clear' step there does nothing."""
+    n = 0
+    for o in _outlines(items):
+        if not (_has(o, r"^I click the Add New button$") and _has(o, r"^I click the save button$")):
+            continue
+        keep = [s for s in o.steps if not _CLEAR_RE.match(s.text)]
+        if len(keep) != len(o.steps):
+            n += len(o.steps) - len(keep)
+            o.steps = keep
+    if n:
+        ctx.note(f"{n} 'clear' step(s) on a new record removed (its fields start empty; an empty Examples cell leaves a field empty)")
+
+
+def _deleted_keys(items, ctx) -> set:
+    out = set()
+    for o in _outlines(items):
+        if not _has(o, r"^I confirm the delete$"):
+            continue
+        for s, k0 in _record_key_refs(o):
+            ph = re.fullmatch(r"<([^<>]+)>", k0)
+            if ph and o.tables:
+                ci = _col(o.tables[0], ph.group(1))
+                out.update(r[ci].strip().lower() for r in o.tables[0].rows if 0 <= ci < len(r) and r[ci].strip())
+            elif not ph:
+                out.add(k0.strip().lower())
+    return out
+
+
+def _usable_records(items, ctx) -> list:
+    gone = _deleted_keys(items, ctx)
+    allr = _collect_records(items, ctx)
+    return [r for r in allr if r["key"].lower() not in gone] or allr
+
+
+def _p_update_open(items, ctx):
+    """Update starts from an OPEN record, not from 'Add New' (that would be a save)."""
+    if not ctx.key_field:
+        return
+    recs = _usable_records(items, ctx)
+    if not recs:
+        return
+    n = 0
+    for o in _outlines(items):
+        if not _has(o, r"^I click the Update button$") or _has(o, r"^I open the existing record") or not o.tables:
+            continue
+        t = o.tables[0]
+        col = "Record" if _col(t, "Record") < 0 else "RecordKey"
+        step = f'I open the existing record "<{col}>" using the "{ctx.key_field}" field'
+        idx = next((i for i, s in enumerate(o.steps) if s.text == "I click the Add New button"), None)
+        if idx is None:
+            o.steps.insert(0, Step("When", step))
+        else:
+            o.steps[idx] = Step(o.steps[idx].kw, step)
+        t.header.insert(1, col)
+        for r, row in enumerate(t.rows):
+            row.insert(1, recs[r % len(recs)]["key"])
+        n += 1
+    if n:
+        ctx.note(f"{n} update scenario(s) started with 'Add New': they now open a saved record first")
+
+
+def _p_update_clear(items, ctx):
+    """'Clear a mandatory field and Update': rebuilt from the required fields and their real messages."""
+    if not ctx.key_field:
+        return
+    recs = _usable_records(items, ctx)
+    targets = [o for o in _outlines(items) if _has(o, r"^I click the Update button$") and any(_CLEAR_RE.match(s.text) for s in o.steps)]
+    if not targets:
+        return
+    rows = [[f"Clear {f['label'] or f['name']}", f["name"], f["required_message"]] for f in ctx.fields
+            if f["required"] and f["required_message"] and f["name"] != ctx.key_field and not f["readonly"]]
+    at = items.index(targets[0])
+    for x in targets:
+        _drop(items, x)
+    if not rows or not recs:
+        ctx.note("update 'clear a mandatory field' scenario dropped: no required field with a known message")
+        return
+    o = Outline(title='Update - Clear a mandatory field and update - "<Condition>"')
+    o.steps = [Step("When", f'I open the existing record "{recs[0]["key"]}" using the "{ctx.key_field}" field'),
+               Step("And", 'I clear the "<ClearField>" field'), Step("And", "I click the Update button"),
+               Step("Then", 'I should see a confirmation message "<ExpectedResult>"'), Step("And", "the form should still be open")]
+    o.tables.append(Table(header=["Condition", "ClearField", "ExpectedResult"], rows=rows))
+    items.insert(at, o)
+    ctx.note(f"'clear a mandatory field' update scenario rebuilt: one row per required field ({len(rows)}), each with its own field and message")
+
+
+def _p_update_label_rows(items, ctx):
+    """An update row that says it changes the code cannot change it."""
+    if not ctx.key_field:
+        return
+    kf = ctx.field(ctx.key_field) or {}
+    words = {_n(ctx.key_field), _n(kf.get("label", ""))} - {""}
+    names = [x for x in (ctx.key_field, kf.get("label", "")) if x]
+    rx = re.compile(r"\b(?:" + "|".join(re.escape(x) for x in names) + r")\b(?:\s*(?:and|,|&)\s*|\s+)?", re.I)
+    for o in _outlines(items):
+        if not _has(o, r"^I click the Update button$"):
+            continue
+        for t in o.tables:
+            for r in t.rows:
+                if r and any(w in _n(r[0]) for w in words):
+                    old = r[0]
+                    new = re.sub(r"\s+", " ", rx.sub("", old)).strip(" ,-")
+                    r[0] = new if len(new) > 8 else "Update the other fields"
+                    ctx.note(f'update row "{old}" renamed to "{r[0]}": an open record keeps its {ctx.key_field}')
+
+
+def _ref_cells(o: Outline) -> list:
+    out = []
+    for s in o.steps:
+        m = re.match(r'^(?:I (?:open the existing|request to delete the) record|I should (?:still|no longer) see the record) "([^"]*)" using the "([^"]*)" field$', s.text)
+        if m:
+            ph = re.fullmatch(r"<([^<>]+)>", m.group(1))
+            out.append((s, ph.group(1) if ph else None, m.group(1)))
+    return out
+
+
+def _p_known_records(items, ctx):
+    """Every record a scenario opens / keeps / duplicates must be one this file saves. Empty keys are dropped,
+    invented ones (seed-data guesses) are replaced by a record the file really saves."""
+    if not ctx.key_field:
+        return
+    recs = _usable_records(items, ctx)
+    if not recs:
+        return
+    known = {r["key"].lower() for r in _collect_records(items, ctx)}
+    rot = [0]
+
+    def pick():
+        k = recs[rot[0] % len(recs)]["key"]
+        rot[0] += 1
+        return k
+
+    dropped = replaced = 0
+    for o in list(_outlines(items)):
+        if _has(o, r"^I confirm the delete$"):
+            continue                                   # destructive scenarios are handled by _p_delete_flow
+        refs = _ref_cells(o)
+        dup = bool(re.search(r"duplicate", o.title, re.I)) or any(
+            re.search(r"duplicate", s.text, re.I) for s in o.steps if s.text.startswith("I should see a confirmation message"))
+        is_dup_create = dup and _is_create(o, ctx)
+        if not refs and not is_dup_create:
+            continue
+        for t in o.tables:
+            keep = []
+            for row in t.rows:
+                rm = _row_map(t, row)
+                bad_row = False
+                for s, ph, lit in refs:
+                    if not ph:
+                        continue
+                    key = rm.get(ph, "").strip()
+                    if not key:
+                        bad_row = True
+                        break
+                    if key.lower() not in known:
+                        row[_col(t, ph)] = pick()
+                        replaced += 1
+                if bad_row:
+                    dropped += 1
+                    continue
+                if is_dup_create:
+                    kstep = next(x for x in o.steps if _fs(x) and _fs(x)[2] == ctx.key_field)
+                    kph = re.fullmatch(r"<([^<>]+)>", _fs(kstep)[1])
+                    ci = _col(t, kph.group(1)) if kph else -1
+                    cond = row[0] if row else ""
+                    other = [f for f in ctx.fields if f["name"] != ctx.key_field
+                             and (re.search(re.escape(f["name"]), cond, re.I) or re.search(r"\b" + re.escape(f["label"]) + r"\b", cond, re.I))]
+                    if other:
+                        dropped += 1
+                        ctx.note(f'dropped duplicate row "{cond}": only a repeated {ctx.key_field} is known to be rejected as a duplicate')
+                        continue
+                    if ci >= 0 and row[ci].strip().lower() not in known:
+                        row[ci] = pick()
+                        replaced += 1
+                keep.append(row)
+            t.rows = keep
+        for s, ph, lit in refs:                         # literal keys written straight into the step
+            if not ph:
+                if not lit.strip():
+                    _drop(items, o)
+                    dropped += 1
+                    break
+                if lit.strip().lower() not in known:
+                    s.text = s.text.replace(f'"{lit}"', f'"{pick()}"', 1)
+                    replaced += 1
+        if o.tables and all(not t.rows for t in o.tables):
+            _drop(items, o)
+    if dropped:
+        ctx.note(f"{dropped} row(s) dropped: they opened a record with no code, or a duplicate that cannot be proven")
+    if replaced:
+        ctx.note(f"{replaced} record code(s) that no scenario saves (guessed from the source) now point at records this file saves")
+
+
+def _p_order_creates(items, ctx):
+    """Scenarios that save records run before the scenarios that use them (up to the first Rule block)."""
+    if not ctx.key_field:
+        return
+    cut = next((i for i, it in enumerate(items) if isinstance(it, RuleLine)), len(items))
+    head, tail = items[:cut], items[cut:]
+    first = next((i for i, it in enumerate(head) if isinstance(it, Outline)), None)
+    if first is None:
+        return
+    outs = [it for it in head[first:] if isinstance(it, Outline)]
+    creators = [it for it in outs if _is_create(it, ctx) and it.tables and _success_rows(it, it.tables[0])]
+    rest = [it for it in head[first:] if it not in creators]
+    new_order = head[:first] + creators + rest
+    if any(a is not b for a, b in zip(new_order, head)):
+        ctx.note("scenarios that save records now run first, so nothing opens, searches or duplicates a record before it exists")
+    items[:] = new_order + tail
+
+
+def _p_retitle_misleading(items, ctx):
+    for o in _outlines(items):
+        if not re.search(r"\b(fails?|invalid|reject(s|ed)?|errors?)\b", o.title, re.I) or not o.tables:
+            continue
+        conf = next((s for s in o.steps if s.text.startswith("I should see a confirmation message")), None)
+        t = o.tables[0]
+        if conf is None or not t.rows:
+            continue
+        raw = re.match(r'^I should see a confirmation message "(.*)"$', conf.text)
+        if raw and all(_SUCCESS_RX.search(_resolve(raw.group(1), _row_map(t, r))) for r in t.rows):
+            prefix = o.title.split(" - ")[0] if " - " in o.title else "Save"
+            old = o.title
+            o.title = f'{prefix} - Save with a valid value - "<Condition>"'
+            ctx.note(f'"{old}" only tests successful saves: renamed so the title matches what it checks')
+
+
+def _p_coverage_creates(items, ctx):
+    """Every dropdown option, both checkbox states and every maximum length are SAVED at least once."""
+    if not ctx.key_field:
+        return
+    recs = [r for r in _collect_records(items, ctx) if len(r["fields"]) >= 3]
+    if not recs:
+        return
+    tmpl = recs[0]
+    saved = [r["fields"] for r in _collect_records(items, ctx)]
+    used = {v.lower() for r in saved for v in r.values()} | set(getattr(ctx, "saved_keys", set()))
+    new: list = []
+    labels: list = []
+    kcap = int((ctx.field(ctx.key_field) or {}).get("max_length") or 0)
+
+    def clone(**chg):
+        fields = dict(tmpl["fields"])
+        fields.update(chg)
+        key = bump(tmpl["key"], used, kcap)
+        fields[ctx.key_field] = key
+        used.add(key.lower())
+        for nm in ctx.typed:
+            if nm != ctx.key_field and nm in fields and nm not in chg:
+                fields[nm] = bump(fields[nm], used, int((ctx.field(nm) or {}).get("max_length") or 0))
+                used.add(fields[nm].lower())
+        return {"key": key, "fields": fields}
+
+    for f in ctx.fields:
+        if f["readonly"] or f["name"] == ctx.key_field:
+            continue
+        if f["kind"] in ("combobox", "radio") and f["options"]:
+            have = {_n(r.get(f["name"], "")) for r in saved}
+            for opt in f["options"]:
+                if _n(opt) not in have:
+                    new.append(clone(**{f["name"]: opt}))
+                    labels.append(f"{f['label']} {opt} saved")
+        elif f["kind"] == "checkbox":
+            have = {_n(r.get(f["name"], "")) for r in saved}
+            for st in ("Checked", "Unchecked"):
+                if _n(st) not in have:
+                    new.append(clone(**{f["name"]: st}))
+                    labels.append(f"{f['label']} {st.lower()} saved")
+    for f in ctx.fields:
+        cap = int(f.get("max_length") or 0)
+        if f["readonly"] or cap < 2 or f["kind"] not in ("input", "textarea", "picklist"):
+            continue
+        if any(len(r.get(f["name"], "")) == cap for r in saved):
+            continue
+        seed = (tmpl["fields"].get(f["name"]) or f["label"] or "Value").strip()
+        if f["name"] == ctx.key_field:
+            m = re.match(r"^(\D*)", seed)
+            pre = (m.group(1) if m else "")[: max(0, cap - 2)] or "K"
+            val = None
+            for n in range(1, 100000):
+                cand = pre + str(n).zfill(cap - len(pre))
+                if len(cand) == cap and cand.lower() not in used:
+                    val = cand
+                    break
+            if not val:
+                continue
+            used.add(val.lower())
+            fields = dict(tmpl["fields"])
+            fields[ctx.key_field] = val
+            for nm in ctx.typed:
+                if nm != ctx.key_field and nm in fields:
+                    fields[nm] = bump(fields[nm], used, int((ctx.field(nm) or {}).get("max_length") or 0))
+                    used.add(fields[nm].lower())
+            new.append({"key": val, "fields": fields})
+        else:
+            val = seed
+            while len(val) < cap:
+                val += " " + seed
+            val = val[:cap].rstrip()
+            val = val + "x" * (cap - len(val))
+            if f["name"] in ctx.typed:
+                for n in range(1, 100000):
+                    tail = str(n)
+                    cand = val[: cap - len(tail)] + tail
+                    if cand.lower() not in used:
+                        val = cand
+                        break
+            used.add(val.lower())
+            new.append(clone(**{f["name"]: val}))
+        labels.append(f"{f['label']} at its maximum length ({cap})")
+    if not new:
+        return
+    o = _make_create_outline(ctx, "Field values - every option, checkbox state and maximum length saved", new, "Field value", labels)
+    if o is None:
+        return
+    last_create = max((i for i, it in enumerate(items) if isinstance(it, Outline) and _is_create(it, ctx)), default=len(items) - 1)
+    items.insert(last_create + 1, o)
+    ctx.note(f"added {len(new)} saving row(s): options, checkbox states and maximum lengths that no scenario saved")
+
+
+_STRONG_RE = re.compile(r"^(I click the (save|Update|Reset|Close|Delete) button|I should see|I confirm|I cancel|I request|the \"[^\"]*\" field should show"
+                        r"|the list|the number|I search|I filter|I sort|I switch|I remember)")
+
+
+def _p_drop_weak(items, ctx):
+    """'Type a value, the form is open' tests nothing: no save, no message, no value check."""
+    for o in list(_outlines(items)):
+        if not any(_is_field_action(s.text) for s in o.steps):
+            continue
+        if any(_STRONG_RE.match(s.text) for s in o.steps):
+            continue
+        _drop(items, o)
+        ctx.note(f'dropped "{o.title}": it types values and only checks the form is open (tests nothing; saving is covered by the save scenarios)')
+
+
+def _p_unused_columns(items, ctx):
+    for o in _outlines(items):
+        used = _placeholders_used(o) | set(_PH_RE.findall(o.title))
+        for t in o.tables:
+            for ci in range(len(t.header) - 1, 0, -1):
+                if t.header[ci] not in used:
+                    t.header.pop(ci)
+                    for r in t.rows:
+                        if ci < len(r):
+                            r.pop(ci)
+
+
+def _p_cleanup(items, ctx):
+    """Re-runs: records this run created are deleted at the end (FEATURE_CLEANUP=0 switches this off)."""
+    import os
+    if os.getenv("FEATURE_CLEANUP", "1").strip().lower() in ("0", "false", "no", "off") or not ctx.key_field:
+        return
+    gone = _deleted_keys(items, ctx)
+    recs = [r for r in _collect_records(items, ctx) if r["key"].lower() not in gone]
+    if not recs:
+        return
+    msg = (ctx.messages.get("delete") or ["Details have been deleted successfully"])[0]
+    o = Outline(title='Cleanup - Remove the records this run created - "<Condition>"')
+    o.steps = [Step("When", f'I request to delete the record "<Record>" using the "{ctx.key_field}" field'),
+               Step("And", "I confirm the delete"), Step("Then", f'I should see a confirmation message "{msg}"')]
+    o.tables.append(Table(header=["Condition", "Record"], rows=[[f"Remove {r['key']}", r["key"]] for r in recs]))
+    items.append(o)
+    ctx.note(f"added a final clean-up scenario that deletes the {len(recs)} record(s) this run created (so the file can run again)")
+
+
 # =========================================================================== entry
 _PASSES = (
-    _p_background, _p_normalize_steps, _p_unknown_fields, _p_form_state_start, _p_options, _p_overlength,
-    _p_update_key, _p_update_typed, _p_clear_rows, _p_new_record_steps, _p_open_by_key, _p_collapse,
-    _p_duplicate_outline, _p_save_form_state, _p_unique_keys, _p_edit_button, _p_delete_flow, _p_visibility,
-    _p_open_existing, _p_list_behaviour, _p_drop_pointless, _p_keywords,
+    _p_navigation, _p_background, _p_normalize_steps, _p_unknown_fields, _p_form_state_start, _p_ensure_open, _p_options,
+    _p_overlength, _p_create_clear, _p_clear_rows, _p_new_record_steps, _p_open_by_key, _p_collapse,
+    _p_duplicate_outline, _p_save_form_state, _p_unique_keys, _p_edit_button, _p_delete_flow,
+    _p_update_open, _p_update_key, _p_update_typed, _p_update_clear, _p_update_label_rows,
+    _p_visibility, _p_open_existing, _p_list_behaviour, _p_known_records, _p_retitle_misleading,
+    _p_coverage_creates, _p_drop_weak, _p_drop_pointless, _p_order_creates, _p_unused_columns, _p_cleanup, _p_keywords,
 )
 
 

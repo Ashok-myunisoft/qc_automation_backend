@@ -418,7 +418,7 @@ Then("the list should be sorted by {string} in {string} order", (label, order) =
       if (typeof x === 'number' && typeof y === 'number') return x - y;
       const nx = parseFloat(x), ny = parseFloat(y);
       if (!Number.isNaN(nx) && !Number.isNaN(ny) && String(nx) === String(x) && String(ny) === String(y)) return nx - ny;
-      return String(x).localeCompare(String(y));
+      return String(x) < String(y) ? -1 : (String(x) > String(y) ? 1 : 0);   // character-code order, like the app
     };
     for (let i = 1; i < vals.length; i += 1) {
       expect(cmp(vals[i - 1], vals[i]) * dir, '"' + vals[i - 1] + '" before "' + vals[i] + '" in ' + order + ' order').to.be.at.most(0);

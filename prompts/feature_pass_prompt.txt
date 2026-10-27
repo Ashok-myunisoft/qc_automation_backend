@@ -42,6 +42,16 @@ WHAT TO WRITE
   SCREEN BEHAVIOUR, using the real labels found there. One scenario per capability; never one table row that mixes search,
   filter, sort and view.
 - Cover the theme exhaustively: be generous with rows, but every row must test something different.
+- Every scenario starts by opening the form: "I click the Add New button" for a new record, or "I open the existing record"
+  for an existing one. Never start with a field step.
+- Never use "I clear the ..." on a NEW record: leave the Examples cell empty to leave a field empty. "I clear the "<Field>"
+  field" is only for an open record (update scenarios), always written with the field name in quotes.
+- A scenario never ends with only "the form should be open": it must save or update and assert a real message, or assert a
+  value / record / list result. Typing values without saving tests nothing.
+- Update scenarios open a saved record from the RECORD LEDGER first (never "Add New") and never claim to change the key.
+- A scenario title must say what its rows really test (no "fails" / "invalid" when every row succeeds). The only duplicate
+  rule known is a repeated key: do not write "duplicate name" rows.
+- Never write the menu path yourself with display names: copy the NAVIGATION line exactly.
 - Do not repeat a scenario whose title is in TITLES ALREADY WRITTEN.
 
 OUTPUT
