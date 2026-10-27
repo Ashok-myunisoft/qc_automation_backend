@@ -1,4 +1,4 @@
-"""Extended step vocabulary (flag USE_EXTENDED_STEPS): which feature steps have no definition yet, and the guarded
+"""Extended step vocabulary (always on): which feature steps have no definition yet, and the guarded
 assembly of the agent-written definitions into the code-built script (spec 02 part B)."""
 from __future__ import annotations
 
@@ -57,7 +57,7 @@ I should see a confirmation message "<ExpectedResult>"'''
 
 
 def enabled() -> bool:
-    return os.getenv("USE_EXTENDED_STEPS", "0").strip().lower() in ("1", "true", "yes", "on")
+    return True
 
 
 def step_vocabulary() -> str:

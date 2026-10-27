@@ -429,23 +429,63 @@ function dismissPopups({ quietMs = 1500, max = 15 } = {}) {
 }
 
 // ---- navigation ----
+// Names in the feature may differ from the real data-cy in letter case, spaces or symbols
+// ("Skill Management" vs "skillmanagement"): the element is found by comparing the names
+// without case / spaces / symbols, so the step works with whatever the page really carries.
+const navNorm = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+function navFind(suffixRe, name, child) {
+  const pick = ($b) => $b.find('[data-cy]').filter((i, e) => {
+    const m = String(e.getAttribute('data-cy')).match(suffixRe);
+    return !!m && navNorm(m[1]) === navNorm(name);
+  }).first();
+  cy.get('body', { timeout: 60000 }).should(($b) => {
+    expect(pick($b).length, `an element whose data-cy is "${name}" followed by ${suffixRe}`).to.be.greaterThan(0);
+  });
+  return cy.get('body').then(($b) => {
+    const $el = pick($b);
+    const $kid = child ? $el.children(child).first() : $el;
+    return cy.wrap($kid.length ? $kid : $el);
+  });
+}
+// A 2-level path on a screen that sits inside a menu folder: open the folders until the screen's entry is drawn.
+function navOpenLeaf(screen) {
+  const leaf = ($b) => $b.find('[data-cy]').filter((i, e) => {
+    const m = String(e.getAttribute('data-cy')).match(/^(.*)-MenuData\d+$/);
+    return !!m && navNorm(m[1]) === navNorm(screen);
+  }).first();
+  const step = (n, clicked) => {
+    cy.get('body').then(($b) => {
+      if (leaf($b).length || n >= 12) return;
+      const $f = $b.find('[data-cy]').filter(':visible').filter((i, e) => /-MenuFolder\d+$/.test(String(e.getAttribute('data-cy')))
+        && !clicked.includes(e.getAttribute('data-cy'))).first();
+      if (!$f.length) return;
+      clicked.push($f.attr('data-cy'));
+      cy.wrap($f).click({ force: true });
+      cy.wait(600);
+      step(n + 1, clicked);
+    });
+  };
+  step(0, []);
+}
+
 Then("I navigate through the following path {string} -> {string}", (module, screen) => {
   dismissPopups();                                  // popups left over from login
   cy.get('[data-cy="ModuleList"] > .mat-icon').should('be.visible').and('not.be.disabled').dblclick();
-  cy.get(`[data-cy="${module}-Module"] > .card-image`).scrollIntoView().should('be.visible').click();
+  navFind(/^(.*)-Module$/, module, '.card-image').scrollIntoView().should('be.visible').click();
   dismissPopups();                                  // popups after opening the module
-  cy.get(`[data-cy="${screen}-MenuData0"] > .menu-item`).scrollIntoView().should('be.visible').click();
+  navOpenLeaf(screen);
+  navFind(/^(.*)-MenuData\d+$/, screen, '.menu-item').scrollIntoView().should('be.visible').click();
   dismissPopups();                                  // popups after opening the screen
 });
 
 Then("I navigate through the following path {string} -> {string} -> {string}", (module, menu, screen) => {
   dismissPopups();                                  // popups left over from login
   cy.get('[data-cy="ModuleList"] > .mat-icon').should('be.visible').and('not.be.disabled').dblclick();
-  cy.get(`[data-cy="${module}-Module"] > .card-image`).scrollIntoView().should('be.visible').click();
+  navFind(/^(.*)-Module$/, module, '.card-image').scrollIntoView().should('be.visible').click();
   dismissPopups();                                  // popups after opening the module
-  cy.get(`[data-cy="${menu}-MenuFolder0"]`).scrollIntoView().should('be.visible').click({ force: true });
+  navFind(/^(.*)-MenuFolder\d+$/, menu).scrollIntoView().should('be.visible').click({ force: true });
   dismissPopups();                                  // popups after opening the menu folder
-  cy.get(`[data-cy="${screen}-MenuData1"] > .menu-item`).scrollIntoView().should('be.visible').click({ force: true });
+  navFind(/^(.*)-MenuData\d+$/, screen, '.menu-item').scrollIntoView().should('be.visible').click({ force: true });
   dismissPopups();                                  // popups after opening the screen
 });
 

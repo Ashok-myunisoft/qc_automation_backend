@@ -3,16 +3,14 @@
   frontend : formjson  (type / required / max length / regex / dropdown options / picklist)
              intersected with the fields the screen's HTML really renders,
              real labels from gbhost i18n, the frontend's own validation messages
-  backend  : (flag USE_BACKEND_DIGEST) every file of the screen's backend entity,
+  backend  : every file of the screen's backend entity,
              condensed into a small digest of the Save / Delete rules and messages
 
 Everything here is best-effort: every public function returns None / {} on any problem and
 the caller carries on with the old behaviour.
 
-Flags (in .env):
-  USE_SCREEN_SPEC=1      formjson + rendered fields + labels + value pool + scenario plan
-  USE_BACKEND_DIGEST=1   entity-based backend files + digest (needs USE_SCREEN_SPEC=1)
-  USE_COVERAGE_REPAIR=1  one repair pass when a rendered field is unused (needs USE_SCREEN_SPEC=1)
+Always on (no .env flags): formjson + rendered fields + labels + value pool + scenario plan,
+entity-based backend files + digest, and one coverage-repair pass when a rendered field is unused.
 Optional:
   I18N_PATH, SAVEURL_PATH   repo paths of the label file / the route map
   BACKEND_ENTITY_MAX_FILES  safety cap on fetched backend files (default 40)
@@ -28,20 +26,16 @@ import time
 logger = logging.getLogger(__name__)
 
 # --------------------------------------------------------------------------- flags
-def _flag(name: str) -> bool:
-    return os.getenv(name, "0").strip().lower() in ("1", "true", "yes", "on")
-
-
 def enabled() -> bool:
-    return _flag("USE_SCREEN_SPEC")
+    return True
 
 
 def backend_digest_enabled() -> bool:
-    return enabled() and _flag("USE_BACKEND_DIGEST")
+    return True
 
 
 def coverage_repair_enabled() -> bool:
-    return enabled() and _flag("USE_COVERAGE_REPAIR")
+    return True
 
 
 def _n(text) -> str:

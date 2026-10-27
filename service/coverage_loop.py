@@ -1,4 +1,4 @@
-"""Coverage loop (flag USE_COVERAGE_LOOP): code computes a checklist from ScreenFacts, finds gaps in the feature
+"""Coverage loop (always on): code computes a checklist from ScreenFacts, finds gaps in the feature
 text, the agent fills only the gaps (max COVERAGE_LOOP_MAX_ROUNDS rounds)."""
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 
 
 def enabled() -> bool:
-    return os.getenv("USE_COVERAGE_LOOP", "0").strip().lower() in ("1", "true", "yes", "on")
+    return True
 
 
 def max_rounds() -> int:

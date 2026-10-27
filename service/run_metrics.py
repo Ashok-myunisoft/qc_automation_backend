@@ -117,6 +117,5 @@ class ScreenRun:
 
 
 def _flags() -> dict:
-    keys = ("USE_SCREEN_SPEC", "USE_BACKEND_DIGEST", "USE_ANALYSIS_AGENT", "USE_FEATURE_PASSES",
-            "USE_EXTENDED_STEPS", "USE_COVERAGE_LOOP")
-    return {k: os.getenv(k) for k in keys}
+    return {"screen_spec": True, "backend_digest": True, "analysis_agent": False, "feature_passes": True,
+            "extended_steps": True, "coverage_loop": True}

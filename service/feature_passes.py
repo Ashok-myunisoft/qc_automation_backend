@@ -1,7 +1,7 @@
-"""Feature generation in topic passes (flag USE_FEATURE_PASSES), spec 01.
+"""Feature generation in topic passes (always on), spec 01.
 
 The agent writes the scenarios; code decides which passes a screen needs, packages the raw source and verified facts,
-keeps a record ledger, orders and merges the passes, and (with USE_COVERAGE_LOOP) asks for the gaps only."""
+keeps a record ledger, orders and merges the passes, and (coverage loop) asks for the gaps only."""
 from __future__ import annotations
 
 import asyncio
@@ -20,7 +20,7 @@ STANDARD_MESSAGES = ["Details Saved Successfully With Code:", "Details Updated S
 
 
 def enabled() -> bool:
-    return os.getenv("USE_FEATURE_PASSES", "0").strip().lower() in ("1", "true", "yes", "on")
+    return True
 
 
 def _int(name: str, default: int) -> int:
@@ -31,8 +31,6 @@ def _int(name: str, default: int) -> int:
 
 
 def applies(spec: dict | None, is_mm: bool) -> tuple[bool, str]:
-    if not enabled():
-        return False, "USE_FEATURE_PASSES=0"
     if is_mm:
         return False, "MM screen keeps the old path"
     if not spec or not spec.get("fields"):

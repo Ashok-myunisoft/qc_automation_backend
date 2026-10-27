@@ -1,12 +1,11 @@
 """Code-built `project_analysis` (same schema as the analysis agent's, subset) from the screen spec.
 
-Used when USE_ANALYSIS_AGENT=0 for normal screens that have a formjson spec (Phase 1 bypass).
+Used for normal screens that have a formjson spec (the analysis agent is skipped for them).
 The live data-cy scan verifies the locators afterwards; nothing here guesses a data-cy for a field.
 """
 from __future__ import annotations
 
 import logging
-import os
 import re
 
 from service import chunk_analysis, screen_behavior
@@ -14,24 +13,12 @@ from service import chunk_analysis, screen_behavior
 logger = logging.getLogger(__name__)
 
 
-def _flag(name: str, default: str) -> bool:
-    return os.getenv(name, default).strip().lower() in ("1", "true", "yes", "on")
-
-
-def analysis_agent_enabled() -> bool:
-    return _flag("USE_ANALYSIS_AGENT", "1")
-
-
 def bypass_applies(spec: dict | None, is_mm: bool) -> tuple[bool, str]:
     """(applies, reason) - reason is logged as one line."""
-    if analysis_agent_enabled():
-        return False, "USE_ANALYSIS_AGENT=1"
     if is_mm:
         return False, "MM screen keeps the analysis agent"
     if not spec:
         return False, "no formjson spec for this screen"
-    if not (_flag("USE_SCREEN_SPEC", "0") and _flag("USE_BACKEND_DIGEST", "0")):
-        return False, "bypass needs USE_SCREEN_SPEC=1 and USE_BACKEND_DIGEST=1"
     return True, "code-built analysis"
 
 
@@ -135,4 +122,4 @@ def build_analysis_from_spec(spec: dict, project_context: dict, module: str, scr
         page["loops"].append({"fields": grid_fields})
         page["forms"][0]["fields"] = [x for x in fields if x["control_name"] not in {g["control_name"] for g in grid_fields}]
     return {"modules": [{"module_name": module, "pages": [page]}], "unresolved": [],
-            "source": "code-built (USE_ANALYSIS_AGENT=0)", "behavior": behavior}
+            "source": "code-built", "behavior": behavior}
