@@ -209,7 +209,7 @@ function dismissPopups({ quietMs = 1500, max = 15 } = {}) {
 // it is not there yet, open folders one by one until it appears. The folders that
 // lead to it are read back from the page order (the menu is a flat, depth-first
 // list) and saved, so the generated test can use the real path.
-const navState = { module: "", path: [], matchedBy: "exact", matchedName: "", alternatives: [] };
+const navState = { module: "", path: [], matchedBy: "exact", matchedName: "", alternatives: [], candidates: [], menuItems: [] };
 const NAV_RE = /^(.*)-(MenuFolder|MenuData)(\d+)$/;
 const squash = (s) => String(s || "").toLowerCase().replace(/[^a-z0-9]/g, "");
 
@@ -286,10 +286,14 @@ function nameScore(menuName, targets) {
 function rankMenu(items, screen, labels) {
   // items: [{ idx, name, text }]  ->  [{ idx, score }] best first, weak matches left out
   const targets = [screen].concat(labels || []).map((x) => ({ squashed: squash(x), words: splitWords(x) }));
-  return items
-    .map((it) => ({ idx: it.idx, score: Math.max(nameScore(it.name, targets), nameScore(it.text, targets)) }))
+  const ranked = items
+    .map((it) => ({ idx: it.idx, name: it.name, score: Math.max(nameScore(it.name, targets), nameScore(it.text, targets)) }))
     .filter((r) => r.score >= 0.5)
     .sort((a, b) => b.score - a.score || a.idx - b.idx);
+  // the same screen can be in the menu more than once (several folders / role menus): keep one per name,
+  // so that the few candidates that get tried are really different screens
+  const seen = new Set();
+  return ranked.filter((r) => { const k = squash(r.name); if (seen.has(k)) return false; seen.add(k); return true; });
 }
 // <rank-end>
 
@@ -338,6 +342,8 @@ function findAndOpen(screen, hints, st) {
         navState.matchedBy = "similar";
         navState.matchedName = chosen.name;
         navState.alternatives = ranked.slice(0, 5).map((r) => nodes[r.idx].name);
+        navState.candidates = ranked.slice(0, 5).map((r) => ({ name: nodes[r.idx].name, score: Math.round(r.score * 100) / 100 }));
+        navState.menuItems = items.map((i) => i.name).slice(0, 300);
         Cypress.log({ name: "menu", message: `no menu item is named "${screen}" - opening the most similar one: "${chosen.name}"` });
         clickNode(chosen.el);
         return;
@@ -449,7 +455,8 @@ Then("I collect the data-cy attributes", () => {
     cy.writeFile(Cypress.env("SCAN_OUT"), {
       url: doc.location.href, elements: elements,
       navigation: { module: navState.module, path: navState.path, matched_by: navState.matchedBy,
-                    matched_name: navState.matchedName, alternatives: navState.alternatives },
+                    matched_name: navState.matchedName, alternatives: navState.alternatives,
+                    candidates: navState.candidates, menu_items: navState.menuItems },
     });
   });
 })
@@ -985,10 +992,16 @@ async def scan_and_merge(project_analysis: dict, module: str, screen: str, log: 
             # Check it really is this screen (its fields are on the page); if not, try the next one.
             best = None
             pick = 0
+            tried: list[str] = []
             while scan is not None and (scan.get("found_navigation") or {}).get("matched_by") == "similar":
                 fn = scan["found_navigation"]
                 found, total = _scan_fit(project_analysis, scan)
                 ratio = (found / total) if total else 1.0
+                tried.append(f"'{fn.get('matched_name')}' ({found}/{total} fields)")
+                if pick == 0:
+                    cands = ", ".join(f"{c.get('name')} ({c.get('score')})" for c in (fn.get("candidates") or []))
+                    await say(f"data-cy scan: no menu item is named '{screen}'. Closest menu items: {cands or 'none'}.", "secondary")
+                    logger.info("data-cy scan: menu items on the page: %s", ", ".join(fn.get("menu_items") or []))
                 if best is None or ratio > best["ratio"]:
                     best = {"ratio": ratio, "scan": scan, "name": fn.get("matched_name") or "?", "found": found, "total": total}
                 if ratio >= _FIT_GOOD:
@@ -1007,8 +1020,8 @@ async def scan_and_merge(project_analysis: dict, module: str, screen: str, log: 
                               f"({best['found']} of {best['total']} fields found on that page). Please check it is the right screen.", "secondary")
                 else:
                     scan = None
-                    reason = (f"no menu item is named '{screen}' and the closest one ('{best['name']}') does not look like "
-                              f"this screen (only {best['found']} of {best['total']} fields on its page)")
+                    reason = (f"no menu item is named '{screen}' and none of the closest ones looks like this screen - "
+                              f"tried {', '.join(tried)}")
         if scan is None:
             cooldown = _int("SCAN_FAIL_COOLDOWN_MINUTES", 30)
             if cooldown > 0:
