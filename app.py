@@ -1626,11 +1626,11 @@ async def _generate_one_screen(ws: WebSocket, src: GitLabService, module: str,
                 else:
                     await send_log(ws, f"{tag}live page check unavailable (the scan did not resolve the page) - using the formjson only.", "muted")
                 _pool = value_gen.build_value_pool(screen_spec_data, business_context)
-                _plan = value_gen.build_scenario_plan(screen_spec_data, _pool)
+                _scenario_plan = value_gen.build_scenario_plan(screen_spec_data, _pool)
                 project_analysis["screen_spec"] = screen_spec_data
                 project_analysis["value_pool"] = _pool
-                project_analysis["scenario_plan"] = _plan
-                await send_log(ws, f"{tag}scenario plan: {len(_plan)} planned row(s) from {len(_pool)} field(s) with real values.", "secondary")
+                project_analysis["scenario_plan"] = _scenario_plan
+                await send_log(ws, f"{tag}scenario plan: {len(_scenario_plan)} planned row(s) from {len(_pool)} field(s) with real values.", "secondary")
             except WebSocketDisconnect:
                 raise
             except Exception:
