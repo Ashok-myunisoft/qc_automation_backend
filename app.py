@@ -3,6 +3,7 @@ import base64
 import copy
 import json
 import logging
+import os
 import posixpath
 import re
 import time
@@ -41,6 +42,7 @@ from service import screen_spec, value_gen  # screen spec (formjson + backend di
 from service import screen_facts, feature_passes, coverage_loop, extended_steps, run_metrics  # topic passes, coverage loop, extended steps
 from service import feature_fixer, template_steps  # code-only feature repair + fixed extended step definitions
 from service import history_store
+from service import request_intent, append_editor, repo_catalog  # request classifier, optimised append editor, live module/screen list
 from service import job_manager
 from service import job_store
 from service.cypress_runner import clear_stash as clear_screenshot_stash
@@ -1059,30 +1061,65 @@ async def _check_output_existing(out_gl: GitLabService, out_tree, module: str, s
     return resolved, True, existing_feature, existing_script
 
 
+async def _append_define_steps(sentences: list[str], script: str, previous_error: str = "") -> str:
+    """Used by the append editor only when a new step sentence has no definition yet."""
+    return await script_generate_agent.generate_extended_steps(sentences, script, [], {}, previous_error=previous_error)
+
+
 async def _append_one_screen(existing_feature: str, existing_script: str,
                               append_request: str, label: str | None = None) -> dict | None:
-    """Runs the append agent against one screen's existing feature/script.
-    Returns {feature, script, summary} on success, or {"error": ...}."""
+    """Applies a free-text request (scenario, test-data change, comment line) to one screen's existing
+    feature/script through service/append_editor.py. Most edits never call the model.
+    Returns {feature_file, script, summary, skipped?} on success, or {"error": ...}."""
     try:
-        result = await append_agent.apply_append(existing_feature, existing_script, append_request)
+        plan = await request_intent.classify(append_request, append_agent.classify_text)
+        result = await append_editor.apply_items(
+            existing_feature, existing_script, plan.actionable,
+            describe_fn=append_agent.describe_scenario, define_fn=_append_define_steps,
+        )
     except Exception as e:
         logger.exception("append pipeline failed for %s", label)
         return {"error": str(e)}
-    # The script is built by code (service/script_builder.py) and is never edited
-    # by the AI or by hand: keep the existing one, and make the appended
-    # scenarios use the step sentence that matches each field's real control type.
-    if (isinstance(result, dict) and "error" not in result
-            and script_builder.is_generated(existing_script)):
-        result["script"] = existing_script
-        if isinstance(result.get("feature_file"), str):
-            result["feature_file"] = script_builder.normalize_feature(
-                result["feature_file"], script_builder.controls_from_script(existing_script))
-    return result
+    hints = [f'"{i.raw.strip()[:60]}": a priority hint only steers generation - nothing to add or change in existing files'
+             for i in plan.items if i.type == request_intent.PRIORITY_HINT and not i.unclear]
+    problems = plan.unclear_messages() + result.skipped
+    if not result.changed:
+        return {"error": " | ".join(problems + hints) or "nothing in that request could be applied."}
+    out = {"feature_file": result.feature, "script": result.script, "summary": result.summary()}
+    if problems:
+        out["skipped"] = problems
+    return out
+
+
+async def _enforce_user_requirements(ws: WebSocket, tag: str, plan, feature: str, script: str) -> tuple[str, str]:
+    """After generation: every scenario / value the user asked for must really be in the files.
+    Anything missing is inserted by the append editor (comment lines too - always by code, never by the model)."""
+    items = plan.actionable
+    if not items:
+        return feature, script
+    try:
+        result = await append_editor.apply_items(
+            feature, script, items, describe_fn=append_agent.describe_scenario,
+            define_fn=_append_define_steps, only_missing=True,
+        )
+    except WebSocketDisconnect:
+        raise
+    except Exception as e:
+        logger.exception("%scould not apply the user's requirements", tag)
+        await send_log(ws, f"{tag}your requested scenarios / values could not be checked ({e}).", "danger")
+        return feature, script
+    if result.present:
+        await send_log(ws, f"{tag}{len(result.present)} item(s) of your request were already in the generated feature.", "secondary")
+    for m in result.applied:
+        await send_log(ws, f"{tag}your request - {m}", "success")
+    for m in result.skipped:
+        await send_log(ws, f"{tag}your request - skipped {m}", "muted" if "priority hint" in m else "danger")
+    return result.feature, result.script
 
 
 async def _run_test_cases_with_chunking(
     project_analysis: dict, user_request: str, business_context: dict | None,
-    tag: str, ws: WebSocket, extended: bool = False,
+    tag: str, ws: WebSocket, extended: bool = False, requirements: str = "",
 ) -> str:
     """Mirrors _run_analysis_with_chunking's rationale, one stage later in
     the pipeline. A tabbed screen's merged project_analysis correctly
@@ -1119,6 +1156,7 @@ async def _run_test_cases_with_chunking(
                     project_analysis=project_analysis,
                     user_request=chunk_analysis.build_focus_test_case_request(user_request, i),
                     business_context=business_context, extended=extended,
+                    requirements=requirements if i == 0 else "",   # hard requirements go in ONCE
                 )
                 texts.append(raw if i == 0 else chunk_analysis.strip_to_scenarios(raw))
             merged = chunk_analysis.merge_test_case_chunks(texts[0], texts[1:])
@@ -1132,7 +1170,7 @@ async def _run_test_cases_with_chunking(
             return merged
         return await test_case_agent.generate_test_cases(
             project_analysis=project_analysis, user_request=user_request,
-            business_context=business_context, extended=extended,
+            business_context=business_context, extended=extended, requirements=requirements,
         )
 
     modules = project_analysis.get("modules") or []
@@ -1148,7 +1186,7 @@ async def _run_test_cases_with_chunking(
     shared_request = chunk_analysis.build_shared_test_case_request(user_request)
     shared_text = await test_case_agent.generate_test_cases(
         project_analysis=shared_analysis, user_request=shared_request,
-        business_context=business_context, extended=extended,
+        business_context=business_context, extended=extended, requirements=requirements,   # once, with the shared call
     )
 
     rule_texts = []
@@ -1403,6 +1441,21 @@ async def _generate_one_screen(ws: WebSocket, src: GitLabService, module: str,
     Callers without a tree handy just omit it; behavior degrades
     gracefully to screen-only."""
     tag = f"[{label}] " if label else ""
+    # The user's request is split ONCE: priority hints travel through every tab / pass call as before; scenarios,
+    # test data and comment lines become hard requirements added exactly once (and checked after generation).
+    _default_request = f"Generate Cypress tests for the {screen_name} screen in the {module} module."
+    _plan = request_intent.Plan()
+    if (user_request or "").strip() and user_request.strip() != _default_request:
+        try:
+            _plan = await request_intent.classify(user_request, append_agent.classify_text)
+        except Exception:
+            logger.exception("%srequest classifier failed - treating the whole request as a priority hint", tag)
+    for _m in _plan.unclear_messages():
+        await send_log(ws, f"{tag}{_m}", "danger")
+    if _plan.items:
+        await send_log(ws, f"{tag}your request: {_plan.summary()}.", "secondary")
+        user_request = _plan.priority_text(_default_request)
+    _requirements = _plan.requirements_text()
     _metrics = run_metrics.ScreenRun(screen_name, module)  # Phase 0: scenario counts per stage, one JSON line per run
     # Detect MM module screens — these 5 modules share one component file.
     # Skip ArchitectureAgent folder lookup and fetch the 4 fixed files directly.
@@ -1595,7 +1648,7 @@ async def _generate_one_screen(ws: WebSocket, src: GitLabService, module: str,
                     await send_log(ws, f"{_t}{text}", "secondary")
                 test_cases, _pass_info = await feature_passes.run(
                     test_case_agent, project_context, project_analysis, project_analysis["screen_spec"],
-                    business_context, user_request, _plog, _metrics)
+                    business_context, user_request, _plog, _metrics, requirements=_requirements)
                 _metrics.note("feature", "passes")
                 async def _gap(gaps, current, _i=_pass_info):
                     return await feature_passes.gap_fill(test_case_agent, _i["prefix"], _i["facts"], _i["ledger"], gaps, current,
@@ -1622,7 +1675,7 @@ async def _generate_one_screen(ws: WebSocket, src: GitLabService, module: str,
             _metrics.note("feature", "single-call/chunked")
             test_cases = await _run_test_cases_with_chunking(
                 project_analysis=project_analysis, user_request=user_request,
-                business_context=business_context, tag=tag, ws=ws, extended=_extended,
+                business_context=business_context, tag=tag, ws=ws, extended=_extended, requirements=_requirements,
             )
             _metrics.stage("agent_output", test_cases)
 
@@ -1763,6 +1816,9 @@ async def _generate_one_screen(ws: WebSocket, src: GitLabService, module: str,
             tag, test_cases, generated_script, automation_contract,
             controls=controls if script_locked else None, script_locked=script_locked, extended=_extended,
         )
+
+        # scenarios / values / comment lines the user asked for: make sure they are really in the files
+        test_cases, generated_script = await _enforce_user_requirements(ws, tag, _plan, test_cases, generated_script)
 
         await send_log(ws, f"{tag}running validate agent...", "secondary")
         validation_result = await validate_agent.validate(
@@ -1957,6 +2013,8 @@ async def handle_generate_decision(ws: WebSocket, session: dict, msg: dict):
         session["feature"] = result["feature_file"]
         session["script"]  = result["script"]
         await send_log(ws, result.get("summary", "addition applied"), "success")
+        for _m in result.get("skipped") or []:
+            await send_log(ws, f"skipped {_m}", "danger")
 
     session["resolved"] = resolved_output
     session.pop("screens", None)
@@ -2163,6 +2221,8 @@ async def handle_start_sweep(ws: WebSocket, session: dict, msg: dict):
                     await send_log(ws, f"[{module}/{screen_name}] append failed — {result.get('error') if result else 'unknown error'} — skipping.", "danger")
                     continue
                 await send_log(ws, f"[{module}/{screen_name}] {result.get('summary', 'appended')}", "success")
+                for _m in result.get("skipped") or []:
+                    await send_log(ws, f"[{module}/{screen_name}] skipped {_m}", "danger")
                 module_screens.append({
                     "resolved": c["resolved"], "feature": result["feature_file"], "script": result["script"],
                     "module": module, "moduleIndex": len(module_screens), "pushed": False,
@@ -2430,7 +2490,7 @@ async def handle_run(ws: WebSocket, session: dict):
     if session.get("scope") == "module" and session.get("screens"):
         screens = session["screens"]
 
-        if session.get("origin") == "generate" and not all(s.get("pushed") for s in screens):
+        if (session.get("origin") == "generate" or any(s.get("modified") for s in screens)) and not all(s.get("pushed") for s in screens):
             await send_error(ws, "approve & push every screen before running.")
             await send_status(ws, "awaiting_approval")  # frontend: re-enable the Run button
             return
@@ -2498,8 +2558,8 @@ async def handle_run(ws: WebSocket, session: dict):
         await send_status(ws, "awaiting_review")  # frontend: re-enable the Run button
         return
 
-    if session.get("origin") == "generate" and not session.get("pushed"):
-        await send_error(ws, "approve the generated files before running.")
+    if (session.get("origin") == "generate" or session.get("modified")) and not session.get("pushed"):
+        await send_error(ws, "approve the generated / edited files before running.")
         await send_status(ws, "awaiting_approval")  # frontend: re-enable the Run button
         return
 
@@ -2630,17 +2690,6 @@ async def handle_auto_run(ws: WebSocket, session: dict, msg: dict):
     scope        = (msg.get("scope") or "module").strip().lower()
     user_request = (msg.get("request") or "").strip()
 
-    # Prerequisite (unchanged from today): the test environment must already
-    # be set. Checked FIRST so a missing env fails in a second instead of
-    # after an hour of generation.
-    if not session.get("test_env"):
-        await send_error(
-            ws,
-            "no test environment set — set baseUrl / db / username / password before starting Auto-run.",
-        )
-        await send_status(ws, "idle")
-        return
-
     single_screen = None
     if scope == "screen":
         module = (msg.get("module") or "").strip()
@@ -2673,13 +2722,13 @@ async def handle_auto_run(ws: WebSocket, session: dict, msg: dict):
     if single_screen:
         await send_log(
             ws,
-            f"auto-run started for {modules[0]} / {single_screen} — generate, push, run and report will follow with no prompts.",
+            f"auto generate started for {modules[0]} / {single_screen} — generate and push will follow with no prompts (nothing is run).",
             "accent",
         )
     else:
         await send_log(
             ws,
-            f"auto-run started for {len(modules)} module(s) — generate, push, run and report will follow with no prompts.",
+            f"auto generate started for {len(modules)} module(s) — generate and push will follow with no prompts (nothing is run).",
             "accent",
         )
 
@@ -2693,7 +2742,7 @@ async def handle_auto_run(ws: WebSocket, session: dict, msg: dict):
             out_gl   = await asyncio.to_thread(_gitlab_service)
             out_tree = await asyncio.to_thread(out_gl.get_repo_tree)
         except Exception as e:
-            await send_error(ws, f"QC repo gitlab connection failed: {e} — nothing to push to, auto-run stopped.")
+            await send_error(ws, f"QC repo gitlab connection failed: {e} — nothing to push to, auto generate stopped.")
             await send_status(ws, "idle")
             return
 
@@ -2702,7 +2751,7 @@ async def handle_auto_run(ws: WebSocket, session: dict, msg: dict):
             src      = await asyncio.to_thread(_source_gitlab_service)
             src_tree = await asyncio.to_thread(src.get_repo_tree)
         except Exception as e:
-            await send_error(ws, f"source gitlab connection failed: {e} — auto-run stopped.")
+            await send_error(ws, f"source gitlab connection failed: {e} — auto generate stopped.")
             await send_status(ws, "idle")
             return
         await send_log(ws, f"scanned {len(src_tree)} source files.", "secondary")
@@ -2812,7 +2861,7 @@ async def handle_auto_run(ws: WebSocket, session: dict, msg: dict):
         )
 
         if not all_screens:
-            await send_log(ws, "auto-run finished — nothing could be generated.", "danger")
+            await send_log(ws, "auto generate finished — nothing could be generated.", "danger")
             await send_status(ws, "not_found")
             return
 
@@ -2823,92 +2872,27 @@ async def handle_auto_run(ws: WebSocket, session: dict, msg: dict):
         session["pushed"]         = len(pushed_screens) == len(all_screens)
 
         if not pushed_screens:
-            await send_log(ws, "nothing was pushed — skipping the Cypress run.", "danger")
+            await send_log(ws, "nothing was pushed — review the generated screens and Approve & push them.", "danger")
             await send_artifacts(ws, session)
             await send_status(ws, "awaiting_approval")
             return
 
-        # ---------------- auto-run Cypress on everything just pushed ----------------
-        session["run_results"] = []
-        await send_log(ws, f"cypress: running {len(pushed_screens)} screen(s)...", "accent")
-        fixtures = await _fetch_shared_fixtures(ws)
-
-        summary = []
-        for i, s in enumerate(pushed_screens, start=1):
-            resolved = s["resolved"]
-            slug     = resolved.slug
-            label    = f"{s.get('module', '')}/{resolved.dir}" if s.get("module") else resolved.dir
-
-            await send_log(ws, f"[{i}/{len(pushed_screens)}] {label} — preparing workspace...", "secondary")
-            await send_log(ws, f"[{i}/{len(pushed_screens)}] {label} — starting run...", "secondary")
-
-            try:
-                async for kind, payload, tone in run_cypress(
-                    session, s["feature"], s["script"], slug,
-                    fixtures=fixtures, test_env=session["test_env"],
-                ):
-                    if kind == "log":
-                        await send_log(ws, f"[{label}] {payload}", tone or "secondary")
-                    elif kind == "exit":
-                        passed = payload == 0
-                        summary.append((label, passed, payload))
-                        await send_log(ws, f"[{label}] {'PASSED' if passed else 'FAILED'} (exit {payload})",
-                                       "success" if passed else "danger")
-                    elif kind == "result":
-                        session.setdefault("run_results", []).append(payload)
-            except asyncio.CancelledError:
-                await send_log(ws, "run cancelled.", "muted")
-                raise
-            except CypressRunError as e:
-                summary.append((label, False, None))
-                await send_log(ws, f"[{label}] run error: {e}", "danger")
-                continue
-            except Exception as e:
-                logger.exception("auto-run cypress crashed for %s", label)
-                summary.append((label, False, None))
-                await send_log(ws, f"[{label}] run error: {e}", "danger")
-                continue
-
-        passed_count = sum(1 for _, p, _ in summary if p)
+        # Auto generate stops here: generated and pushed, NOT run. Running is the separate "Auto run" tab
+        # (all screens of a module) or the Run button on this review screen.
         await send_log(
             ws,
-            f"module run complete: {passed_count}/{len(summary)} screens passed.",
-            "success" if passed_count == len(summary) else "accent",
+            "auto generate complete — nothing was run. Use Run to run these screens now, or the Auto run tab later.",
+            "success",
         )
-
-        # ---------------- auto-report ----------------
-        run_results = session.get("run_results") or []
-        if run_results:
-            report_module = session.get("module") or ""
-            try:
-                xlsx_bytes = await asyncio.to_thread(report_builder.build_report_xlsx, report_module, run_results)
-                shots_html = await asyncio.to_thread(report_builder.build_screenshots_html, report_module, run_results)
-                await _record_history(session, "auto_run", run_results, xlsx_bytes, shots_html)
-                await send_log(
-                    ws,
-                    f"report ready ({len(xlsx_bytes) // 1024} KB Excel + screenshots compilation) — "
-                    f"use the Report (Excel) and Screenshots buttons to download.",
-                    "success",
-                )
-            except Exception as e:
-                logger.exception("auto-run report build failed")
-                await send_log(ws, f"report build failed: {e} — try the Report button once more.", "danger")
-        else:
-            await send_log(ws, "no run data was captured, so there is no report to build.", "danger")
-
-        await send_log(ws, "auto-run complete.", "success")
+        session["_history_saved"] = True  # nothing to record in History; tells the background job it ended cleanly
         await send_artifacts(ws, session)
-        await send_status(ws, "done")
-        await ws.send_json({
-            "type":    "module_result",
-            "results": [{"name": name, "passed": p, "exit_code": ec} for name, p, ec in summary],
-        })
+        await send_status(ws, "awaiting_review" if len(pushed_screens) == len(all_screens) else "awaiting_approval")
 
     except asyncio.CancelledError:
         raise
     except Exception as e:
-        logger.exception("auto-run stopped unexpectedly")
-        await send_error(ws, f"auto-run stopped unexpectedly: {e}")
+        logger.exception("auto generate stopped unexpectedly")
+        await send_error(ws, f"auto generate stopped unexpectedly: {e}")
         if all_screens:
             session["screens"]        = all_screens
             session["module_batches"] = module_batches
@@ -2919,6 +2903,335 @@ async def handle_auto_run(ws: WebSocket, session: dict, msg: dict):
             )
         else:
             await send_status(ws, "idle")
+
+
+# ----------------------------------------------------------------------
+# REFINE — append / edit at the review stage (after Generate AND after Fetch).
+#
+# websocket message:
+#   {"action": "refine", "text": "<free text>", "module": "<m>", "index": <moduleIndex>, "feature": "<edited text, optional>"}
+# "module" + "index" are only needed for a module list (same meaning as in "approve"); a single screen needs just "text".
+# The text may be a pasted scenario, a described scenario / test case, a data change ("use SD-050 for DomainCode")
+# or a comment line ("add a comment ..."). Most of that is applied by code (service/append_editor.py); the model only
+# writes the block of a described scenario. An edited screen is marked modified (pushed=False) so Approve & push and
+# Run work on it exactly as after Generate.
+# ----------------------------------------------------------------------
+def _review_phase(session: dict) -> str:
+    if session.get("scope") == "module" and session.get("screens"):
+        return "awaiting_approval" if any(not s.get("pushed") for s in session["screens"]) else "awaiting_review"
+    return "awaiting_review" if session.get("pushed") else "awaiting_approval"
+
+
+async def handle_refine(ws: WebSocket, session: dict, msg: dict):
+    text = (msg.get("text") or "").strip()
+    if not text:
+        await send_error(ws, "type what to add or change first (a scenario, a test-data change or a comment line).")
+        return
+
+    holder: dict | None = None
+    label, position = "", 0
+    if session.get("scope") == "module" and session.get("screens"):
+        target_module = msg.get("module") or session.get("module")
+        batches = session.get("module_batches") or {}
+        screens_list = batches.get(target_module) if target_module in batches else session.get("screens")
+        index = msg.get("index")
+        if not screens_list or not isinstance(index, int) or index < 0 or index >= len(screens_list):
+            await send_error(ws, "pick the screen you want to edit first.")
+            return
+        holder = screens_list[index]
+        label = f"{holder.get('module') or target_module}/{holder['resolved'].slug}"
+        position = next((i for i, s in enumerate(session["screens"]) if s is holder), 0)
+    elif session.get("feature") and session.get("script"):
+        holder = session
+        label = f"{session.get('module')}/{session.get('screen')}"
+    else:
+        await send_error(ws, "nothing to edit yet - fetch or generate a screen first.")
+        return
+
+    if isinstance(msg.get("feature"), str) and msg["feature"].strip():
+        holder["feature"] = msg["feature"]          # the user's own unsaved-to-backend edits are the base
+
+    await send_status(ws, "resolving")
+    applied: list[str] = []
+    skipped: list[str] = []
+    changed = False
+    try:
+        await send_log(ws, f"[{label}] reading your request...", "secondary")
+        plan = await request_intent.classify(text, append_agent.classify_text)
+        unclear = plan.unclear_messages()
+        for m in unclear:
+            await send_log(ws, f"[{label}] {m}", "danger")
+        skipped += unclear
+        items = plan.actionable
+        if not items and not unclear:
+            await send_log(ws, f"[{label}] nothing to apply - a priority hint only steers generation.", "muted")
+        if items:
+            result = await append_editor.apply_items(
+                holder["feature"], holder["script"], items,
+                describe_fn=append_agent.describe_scenario, define_fn=_append_define_steps,
+            )
+            applied, skipped = result.applied, skipped + result.skipped
+            for m in applied:
+                await send_log(ws, f"[{label}] {m}", "success")
+            for m in result.skipped:
+                await send_log(ws, f"[{label}] skipped {m}", "muted" if "priority hint" in m else "danger")
+            if result.changed:
+                holder["feature"], holder["script"] = result.feature, result.script
+                holder["pushed"] = False
+                holder["modified"] = True
+                changed = True
+                await send_log(ws, f"[{label}] edited - Approve and push to save it to GitLab, then Run.", "accent")
+            else:
+                await send_log(ws, f"[{label}] nothing was changed.", "muted")
+    except WebSocketDisconnect:
+        raise
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:
+        logger.exception("refine failed for %s", label)
+        await send_error(ws, f"could not apply that request: {e}")
+
+    await send_artifacts(ws, session)
+    await ws.send_json({"type": "refine_done", "index": position, "changed": changed,
+                        "applied": applied, "skipped": skipped})
+    await send_status(ws, _review_phase(session))
+
+
+# ----------------------------------------------------------------------
+# CATALOG — live module -> screens list from the QC repo (cached ~5 minutes).
+#   websocket: {"action": "list_catalog", "refresh": false}
+#   reply:     {"type": "catalog", "modules": [{"module": "Skill Management", "screens": ["Skill Domain", ...]}],
+#               "generated_at": "<iso>", "cached": true|false}   (on failure: modules [] plus "error")
+#   HTTP:      GET /api/catalog?refresh=false  (same JSON without "type")
+# ----------------------------------------------------------------------
+async def handle_list_catalog(ws: WebSocket, session: dict, msg: dict):
+    try:
+        data = await repo_catalog.get_catalog_async(_gitlab_service, bool(msg.get("refresh")))
+        await ws.send_json({"type": "catalog", **data})
+    except WebSocketDisconnect:
+        raise
+    except Exception as e:
+        logger.warning("could not read the module list: %s", e)
+        await ws.send_json({"type": "catalog", "modules": [], "error": f"could not read the module list from the QC repo: {e}"})
+
+
+@app.get("/api/catalog")
+async def api_catalog(refresh: bool = False):
+    try:
+        return await repo_catalog.get_catalog_async(_gitlab_service, refresh)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"could not read the module list from the QC repo: {e}")
+
+
+# ----------------------------------------------------------------------
+# OVERNIGHT RUN — RUN ONLY. Takes every screen of the chosen module(s) from the live QC repo, fetches the
+# existing feature + script of each and runs them one after another. It never generates, appends or modifies
+# anything, and it never pushes.
+#
+# Why a new handler and not "auto_run + run_only": handle_auto_run is one 300-line generate -> push -> run pipeline,
+# so a flag would touch every stage of it. This handler reuses the same pieces (resolve_module_screens_precise,
+# gl.fetch_file, run_cypress, history_store, report_builder, the job manager) in one short loop - the smaller change.
+#
+# websocket message:
+#   {"action": "overnight_run", "modules": ["Skill Management", "ESS"]}      (needs the test environment to be set)
+# messages back (besides the usual log / status / error):
+#   log lines "[3/12] running: <module>/<screen>" and "[3/12] <module>/<screen> PASSED|FAILED|skipped ..."
+#   {"type": "overnight_summary", "modules": [...], "total": 12, "passed": 9, "failed": 2, "skipped": 1,
+#    "elapsed_seconds": 5400, "combined_run_id": 57, "items": [{"module", "screen", "status": "passed|failed|error|skipped",
+#                                         "exit_code", "reason", "run_id"}]}      run_id -> /api/history/{run_id}/report
+#   combined_run_id = the ONE whole-run report (all screens together): /api/history/{combined_run_id}/report and /screenshots
+#   {"type": "module_result", "results": [...]}   (same shape the other module runs send)
+# One screen failing, erroring or timing out never stops the rest. Terminate stops the whole run.
+# ----------------------------------------------------------------------
+_OVERNIGHT_SCREEN_TIMEOUT = max(0, int(os.getenv("OVERNIGHT_SCREEN_TIMEOUT_MINUTES", "45"))) * 60
+
+
+def _fmt_duration(seconds: float) -> str:
+    seconds = int(seconds)
+    h, rest = divmod(seconds, 3600)
+    m, s = divmod(rest, 60)
+    return f"{h}h {m:02d}m {s:02d}s" if h else f"{m}m {s:02d}s"
+
+
+async def _save_overnight_history(module: str, screen: str, run_results: list[dict]) -> int | None:
+    """One History row per screen, so each screen has its own report + screenshots link."""
+    try:
+        xlsx_bytes = await asyncio.to_thread(report_builder.build_report_xlsx, module, run_results)
+        shots_html = await asyncio.to_thread(report_builder.build_screenshots_html, module, run_results)
+        base = f"{module}-{screen}".replace(" ", "_").replace("/", "_")
+        return await asyncio.to_thread(
+            history_store.save_run,
+            source="overnight_run", module=module, screen=screen, run_results=run_results,
+            report_filename=f"qc-report-{base}.xlsx", report_xlsx=xlsx_bytes,
+            screenshots_filename=f"qc-screenshots-{base}.html", screenshots_html=shots_html,
+        )
+    except Exception:
+        logger.exception("could not save the overnight run of %s/%s to history", module, screen)
+        return None
+
+
+async def handle_overnight_run(ws: WebSocket, session: dict, msg: dict):
+    modules = list(dict.fromkeys(m.strip() for m in (msg.get("modules") or []) if isinstance(m, str) and m.strip()))
+    if not modules:
+        await send_error(ws, "pick at least one module for the overnight run.")
+        await send_status(ws, "idle")
+        return
+    if not session.get("test_env"):
+        await send_error(ws, "no test environment set - set baseUrl / db / username / password before starting the overnight run.")
+        await send_status(ws, "idle")
+        return
+
+    for key in ("pending_generate", "pending_sweep", "screens", "module_batches", "run_results", "feature", "script", "resolved"):
+        session.pop(key, None)
+    session["scope"], session["origin"], session["pushed"] = "module", "fetch", True
+    session["module"], session["screen"] = ", ".join(modules), ""
+    clear_screenshot_stash()
+
+    await send_status(ws, "auto_running")
+    await send_log(ws, f"overnight run started for {len(modules)} module(s) - RUN ONLY: nothing is generated, appended, "
+                       f"changed or pushed.", "accent")
+    started = time.monotonic()
+
+    try:
+        gl = await asyncio.to_thread(_gitlab_service)
+        tree = await asyncio.to_thread(gl.get_repo_tree)
+    except Exception as e:
+        await send_error(ws, f"gitlab connection failed: {e} - overnight run stopped.")
+        await send_status(ws, "idle")
+        return
+
+    jobs: list[tuple[str, object]] = []
+    items: list[dict] = []
+    for module in modules:
+        candidates = await resolve_module_screens_precise(tree, module)
+        if not candidates:
+            await send_log(ws, f"[{module}] no screens found in the QC repo - skipped.", "danger")
+            items.append({"module": module, "screen": "", "status": "skipped", "exit_code": None,
+                          "reason": "no screens found in the QC repo", "run_id": None})
+            continue
+        await send_log(ws, f"[{module}] {len(candidates)} screen(s) found.", "success")
+        jobs.extend((module, c) for c in candidates)
+
+    total = len(jobs)
+    history_saved = False
+    all_results: list[dict] = []          # every screen's run data, for the one whole-run report at the end
+    done = 0
+    if total:
+        await send_log(ws, f"cypress: overnight run - {total} screen(s) one after another...", "accent")
+        fixtures = await _fetch_shared_fixtures(ws)
+    try:
+        for i, (module, c) in enumerate(jobs, start=1):
+            screen = c.dir.rsplit("/", 1)[-1]
+            label = f"{module}/{screen}"
+            item = {"module": module, "screen": screen, "status": "", "exit_code": None, "reason": "", "run_id": None}
+            items.append(item)
+            await send_log(ws, f"[{i}/{total}] running: {label}", "accent")
+            try:
+                feature = await asyncio.to_thread(gl.fetch_file, c.feature_path)
+                script = await asyncio.to_thread(gl.fetch_file, c.script_path)
+            except Exception as e:
+                item.update(status="error", reason=f"gitlab fetch failed: {e}")
+                await send_log(ws, f"[{i}/{total}] {label} could not be read: {e} - moving on.", "danger")
+                done += 1
+                continue
+            if feature is None or script is None:
+                item.update(status="skipped", reason="not present")
+                await send_log(ws, f"[{i}/{total}] {label} skipped: not present (no feature or no script).", "muted")
+                done += 1
+                continue
+
+            run_results: list[dict] = []
+            box = {"exit": None}
+
+            async def _one(_label=label, _slug=c.slug, _feature=feature, _script=script):
+                async for kind, payload, tone in run_cypress(
+                    session, _feature, _script, _slug, fixtures=fixtures, test_env=session["test_env"],
+                ):
+                    if kind == "log":
+                        await send_log(ws, f"[{_label}] {payload}", tone or "secondary")
+                    elif kind == "exit":
+                        box["exit"] = payload
+                    elif kind == "result":
+                        run_results.append(payload)
+
+            try:
+                await asyncio.wait_for(_one(), timeout=_OVERNIGHT_SCREEN_TIMEOUT or None)
+                if box["exit"] is None:
+                    item.update(status="error", reason="the run produced no result")
+                else:
+                    item.update(status="passed" if box["exit"] == 0 else "failed", exit_code=box["exit"])
+            except asyncio.TimeoutError:
+                proc = session.get("process")
+                if proc is not None:
+                    try:
+                        proc.kill()
+                    except Exception:
+                        pass
+                    session["process"] = None
+                item.update(status="failed", reason=f"timed out after {_OVERNIGHT_SCREEN_TIMEOUT // 60} minute(s)")
+            except CypressRunError as e:
+                item.update(status="error", reason=str(e)[:300])
+            except Exception as e:
+                logger.exception("overnight run crashed on %s", label)
+                item.update(status="error", reason=f"{type(e).__name__}: {e}"[:300])
+
+            if run_results:
+                all_results.extend(run_results)
+                item["run_id"] = await _save_overnight_history(module, screen, run_results)
+                history_saved = history_saved or item["run_id"] is not None
+            done += 1
+            tone = "success" if item["status"] == "passed" else "danger"
+            extra = f" - {item['reason']}" if item["reason"] else ""
+            await send_log(ws, f"[{i}/{total}] {label} {item['status'].upper()}"
+                               + (f" (exit {item['exit_code']})" if item["exit_code"] is not None else "") + extra, tone)
+    except asyncio.CancelledError:
+        await send_log(ws, f"overnight run terminated after {done} of {total} screen(s).", "muted")
+        raise
+
+    # ONE whole-run report across every screen (same Excel + screenshots as a normal run), saved to History too.
+    combined_run_id = None
+    if all_results:
+        session["run_results"] = all_results
+        try:
+            whole = ", ".join(modules)
+            xlsx_bytes = await asyncio.to_thread(report_builder.build_report_xlsx, whole, all_results)
+            shots_html = await asyncio.to_thread(report_builder.build_screenshots_html, whole, all_results)
+            base = "overnight-" + whole.replace(" ", "_").replace("/", "_").replace(",", "")
+            combined_run_id = await asyncio.to_thread(
+                history_store.save_run,
+                source="overnight_run", module=whole, screen=f"All screens ({len(all_results)})",
+                run_results=all_results,
+                report_filename=f"qc-report-{base}.xlsx", report_xlsx=xlsx_bytes,
+                screenshots_filename=f"qc-screenshots-{base}.html", screenshots_html=shots_html,
+            )
+            history_saved = history_saved or combined_run_id is not None
+            await send_log(ws, f"whole-run report ready ({len(xlsx_bytes) // 1024} KB Excel + screenshots compilation) - "
+                               f"download it from the summary below or from History.", "success")
+        except Exception as e:
+            logger.exception("could not build the whole-run overnight report")
+            await send_log(ws, f"whole-run report could not be built: {e} - each screen's own report is still in History.", "danger")
+    session["_history_saved"] = history_saved
+    passed = sum(1 for it in items if it["status"] == "passed")
+    failed = sum(1 for it in items if it["status"] in ("failed", "error"))
+    skipped = sum(1 for it in items if it["status"] == "skipped")
+    elapsed = time.monotonic() - started
+    await send_log(
+        ws,
+        f"overnight run complete: {passed} passed, {failed} failed, {skipped} skipped of {len(items)} - "
+        f"total time {_fmt_duration(elapsed)}. Every screen's own report and the whole-run report are in History.",
+        "success" if failed == 0 else "accent",
+    )
+    await ws.send_json({
+        "type": "overnight_summary", "modules": modules, "total": len(items),
+        "passed": passed, "failed": failed, "skipped": skipped,
+        "elapsed_seconds": int(elapsed), "items": items, "combined_run_id": combined_run_id,
+    })
+    await ws.send_json({
+        "type": "module_result",
+        "results": [{"name": f"{it['module']}/{it['screen']}", "passed": it["status"] == "passed", "exit_code": it["exit_code"]}
+                    for it in items if it["status"] in ("passed", "failed", "error")],
+    })
+    await send_status(ws, "done")
 
 
 # ----------------------------------------------------------------------
@@ -3211,6 +3524,29 @@ async def qc_session(websocket: WebSocket):
                         session=session, ws=websocket, source="auto_run",
                         module=job_module, screen=job_screen, queued_phase="auto_running",
                         runner=lambda jws, _msg=msg: handle_auto_run(jws, session, _msg),
+                    )
+                    session["job"] = job
+                    session["current_task"] = job.task
+
+            elif action == "refine":
+                if _session_job_active(session):
+                    await send_error(websocket, "A run is already in progress for this session, so this request was ignored. Wait for it to finish or click Terminate.")
+                else:
+                    session["current_task"] = asyncio.create_task(handle_refine(websocket, session, msg))
+
+            elif action == "list_catalog":
+                # its own task: Terminate (which cancels current_task) must not cancel a module-list read
+                session["catalog_task"] = asyncio.create_task(handle_list_catalog(websocket, session, msg))
+
+            elif action == "overnight_run":
+                if _session_job_active(session):
+                    await send_error(websocket, "A run is already in progress for this session, so this request was ignored. Wait for it to finish or click Terminate.")
+                else:
+                    job_modules = ", ".join(dict.fromkeys(m.strip() for m in (msg.get("modules") or []) if isinstance(m, str) and m.strip()))
+                    job = job_manager.start_job(
+                        session=session, ws=websocket, source="overnight_run",
+                        module=job_modules, screen="", queued_phase="auto_running",
+                        runner=lambda jws, _msg=msg: handle_overnight_run(jws, session, _msg),
                     )
                     session["job"] = job
                     session["current_task"] = job.task

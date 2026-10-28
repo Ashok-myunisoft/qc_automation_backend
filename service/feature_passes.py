@@ -216,7 +216,8 @@ def update_row_counts(text: str) -> dict[str, int]:
 
 
 async def run(agent, project_context: dict, project_analysis: dict, spec: dict, business_context: dict | None,
-              user_request: str, log: Callable[[str], Awaitable[None]], metrics: run_metrics.ScreenRun | None = None):
+              user_request: str, log: Callable[[str], Awaitable[None]], metrics: run_metrics.ScreenRun | None = None,
+              requirements: str = ""):
     """Returns (feature_text, info). Raises on total failure so the caller can fall back to the old path."""
     facts = pass_planner.build_facts(spec, project_analysis)
     passes = pass_planner.plan_passes(facts)
@@ -241,6 +242,8 @@ async def run(agent, project_context: dict, project_analysis: dict, spec: dict, 
     async def one(idx: int, p: pass_planner.Pass, ledger, titles, first=False, offset: int = 0):
         async with sem:
             tail = build_tail(p, facts, ledger, titles, first, update_pool_text, offset)
+            if first and requirements:
+                tail += "\n\n" + requirements          # the user's hard requirements: in ONE pass only (form_core)
             try:
                 text = await agent.generate_pass(prefix, tail)
             except Exception as e:  # noqa: BLE001

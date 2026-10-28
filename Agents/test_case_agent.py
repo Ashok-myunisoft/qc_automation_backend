@@ -37,8 +37,11 @@ class TestCaseAgent:
         user_request: str,
         business_context: dict = None,
         extended: bool = False,
+        requirements: str = "",
     ):
-        """Every scenario is a Scenario Outline with an aligned Examples table, and
+        """`requirements` is the HARD REQUIREMENTS block built from the user's request (scenarios / test data they asked
+        for); it is passed to ONE call per screen only, so it is never duplicated or dropped by the tab / pass chunking.
+        Every scenario is a Scenario Outline with an aligned Examples table, and
         steps use the QC team's fixed vocabulary (see test_case_prompt.txt,
         #FIXED STEP VOCABULARY) so they match the template step definitions
         that ScriptGenerateAgent copies into every script."""
@@ -61,11 +64,12 @@ class TestCaseAgent:
                               + _ext_steps.EXTENDED_VOCAB)
         except Exception:
             _ext_vocab = ""
+        _req_block = f"{requirements}\n\n" if requirements else ""
         user_message = f"""
 User Request:
 {user_request}
 
-Project Analysis:
+{_req_block}Project Analysis:
 {json.dumps(project_analysis, indent=2)}
 
 Business Context:

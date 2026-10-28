@@ -20,6 +20,7 @@ You will receive:
 1. Project Analysis JSON
 2. User Request
 3. ERP Business Context (optional)
+4. HARD REQUIREMENTS FROM THE USER (optional block, placed right after the User Request)
 Project Analysis JSON is the single source of truth.
 
 Do not infer, assume, rename, or invent pages, fields, business actions, workflows, validations, or navigation beyond what is present in the Project Analysis.
@@ -566,7 +567,15 @@ or date. Examples values never contain double quotes.
 
 Never invent pages, fields, navigation, CRUD operations, business rules, or validation rules.
 Base everything ONLY on the supplied Project Analysis.
-Use User Request only to prioritize scenarios.
+Use the User Request text only to prioritize scenarios.
+If a "HARD REQUIREMENTS FROM THE USER" block is present, it is different: every item in it is MANDATORY.
+- A scenario to include: write it as a Scenario Outline with an aligned Examples table and the fixed step
+  vocabulary, keeping the user's wording and values; put the user's key words in its title; write it exactly
+  once (never twice, never merged away).
+- A test-data item: use that exact value for that field in the Examples rows that fill the field with a
+  normal value (or only in the scenario the item names).
+- A requirement may use ONLY fields, pages and rules that exist in the Project Analysis. If it names a field,
+  page or rule that does not exist there, skip that requirement - never invent anything to satisfy it.
 Generate only scenarios supported by the supplied project.
 Return ONLY valid Gherkin — no markdown, no explanations.
 
