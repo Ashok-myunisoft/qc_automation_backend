@@ -1,8 +1,9 @@
 import json
+import re
 import threading
 
 import psycopg2
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from service.store_db import connection as _connection
 
@@ -102,6 +103,92 @@ def save_run(*, source: str, module: str, screen: str, run_results: list[dict],
         row = cursor.fetchone()
         conn.commit()
     return int(row["id"])
+
+
+def track_key(text) -> str:
+    """Loose name used to match History names with repo names: 'Skill_Management_Module' == 'skill management'.
+
+    The frontend (tracking.js) uses the same rule, so keep the two in step.
+    """
+    name = re.sub(r"[_\-\s]+", " ", str(text or "")).strip().lower()
+    return re.sub(r"\s+module$", "", name).strip()
+
+
+def get_last_runs() -> dict:
+    """When was each module / screen last run, and how often lately? Read straight from History (no blobs).
+
+    Returns {
+      "modules": {module_key: iso}, "screens": {"module_key|screen_key": iso},       # last run, UTC ISO
+      "runs30":  {"modules": {module_key: n}, "screens": {"module_key|screen_key": n}},  # runs in the last 30 days
+      "weekly":  [{"week": "2026-10-26", "screens": 12, "runs": 15}, ...]             # last 8 weeks, oldest first
+    }
+    The whole-run row an overnight run adds ("All screens (N)") is skipped - every screen of that run
+    already has its own row, and the combined row has a comma-joined module name.
+    Weeks start on Monday (UTC). "screens" = different screens run that week, "runs" = runs saved that week.
+    """
+    _ensure_schema()
+    with _connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT created_at, source, module, screen, screens_json FROM run_history")
+        rows = cursor.fetchall()
+
+    now = datetime.now(timezone.utc)
+    cutoff30 = now - timedelta(days=30)
+    this_monday = (now - timedelta(days=now.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
+    weeks = [this_monday - timedelta(weeks=i) for i in range(7, -1, -1)]          # oldest -> newest
+    week_screens: dict[datetime, set] = {w: set() for w in weeks}
+    week_runs: dict[datetime, int] = {w: 0 for w in weeks}
+
+    modules: dict[str, datetime] = {}
+    screens: dict[str, datetime] = {}
+    module_runs30: dict[str, int] = {}
+    screen_runs30: dict[str, int] = {}
+    for row in rows:
+        created = row.get("created_at")
+        if not isinstance(created, datetime):
+            continue
+        if created.tzinfo is None:
+            created = created.replace(tzinfo=timezone.utc)
+        if row.get("source") == "overnight_run" and str(row.get("screen") or "").startswith("All screens"):
+            continue
+        module_key = track_key(row.get("module"))
+        if not module_key:
+            continue
+        if module_key not in modules or created > modules[module_key]:
+            modules[module_key] = created
+
+        try:
+            slugs = [str(item.get("slug")) for item in json.loads(row.get("screens_json") or "[]") if item.get("slug")]
+        except (TypeError, ValueError, AttributeError):
+            slugs = []
+        if not slugs and row.get("screen") and "," not in str(row["screen"]):
+            slugs = [str(row["screen"])]
+
+        recent = created >= cutoff30
+        if recent:
+            module_runs30[module_key] = module_runs30.get(module_key, 0) + 1
+        week = next((w for w in reversed(weeks) if created >= w), None)
+        if week is not None:
+            week_runs[week] += 1
+
+        for slug in dict.fromkeys(slugs):                  # a screen counts once per run
+            key = f"{module_key}|{track_key(slug)}"
+            if key not in screens or created > screens[key]:
+                screens[key] = created
+            if recent:
+                screen_runs30[key] = screen_runs30.get(key, 0) + 1
+            if week is not None:
+                week_screens[week].add(key)
+
+    return {
+        "modules": {k: v.isoformat(timespec="seconds") for k, v in modules.items()},
+        "screens": {k: v.isoformat(timespec="seconds") for k, v in screens.items()},
+        "runs30": {"modules": module_runs30, "screens": screen_runs30},
+        "weekly": [
+            {"week": w.date().isoformat(), "screens": len(week_screens[w]), "runs": week_runs[w]}
+            for w in weeks
+        ],
+    }
 
 
 def list_runs(limit: int = 200) -> list[dict]:

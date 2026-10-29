@@ -41,7 +41,7 @@ from service import chunk_analysis
 from service import screen_spec, value_gen  # screen spec (formjson + backend digest)
 from service import screen_facts, feature_passes, coverage_loop, extended_steps, run_metrics  # topic passes, coverage loop, extended steps
 from service import feature_fixer, template_steps  # code-only feature repair + fixed extended step definitions
-from service import history_store
+from service import history_store, tracking_export, teams_notify
 from service import request_intent, append_editor, repo_catalog  # request classifier, optimised append editor, live module/screen list
 from service import job_manager
 from service import job_store
@@ -2654,6 +2654,23 @@ async def handle_screenshots(ws: WebSocket, session: dict):
 # leave them, so the existing Run / Report / Screenshots buttons keep
 # working afterward. The manual flow above is not touched.
 # ----------------------------------------------------------------------
+async def _notify_teams(ws: WebSocket, notify: bool, card: dict | None) -> None:
+    """Post a finished run to Teams - only when the user switched it on for this run. Never breaks the run."""
+    if not notify or card is None:
+        return
+    try:
+        if not teams_notify.is_configured():
+            await send_log(ws, "Teams message skipped: the Teams link (TEAMS_WEBHOOK_URL) is not set on the server.", "muted")
+            return
+        ok, detail = await asyncio.to_thread(teams_notify.send_card, card)
+        if ok:
+            await send_log(ws, "result sent to Teams.", "success")
+        else:
+            await send_log(ws, f"could not send the result to Teams: {detail}", "danger")
+    except Exception:
+        logger.exception("teams notification crashed")
+
+
 async def _auto_push_entry(ws: WebSocket, out_gl: GitLabService, entry: dict,
                            module: str, label: str, attempts: int = 3) -> bool:
     """Pushes one generated screen (feature + script) to the QC repo.
@@ -2734,6 +2751,19 @@ async def handle_auto_run(ws: WebSocket, session: dict, msg: dict):
 
     all_screens: list = []
     module_batches: dict[str, list] = {}
+    notify = bool(msg.get("notify"))              # "send the result to Teams" switch, chosen per run
+    started_at = time.monotonic()
+    total = 0
+    gen_failed_labels: list[str] = []
+
+    def _gen_card() -> dict:
+        pushed_n = sum(1 for x in all_screens if x.get("pushed"))
+        push_failed = [f"{x.get('module')}/{x['resolved'].slug}" for x in all_screens if not x.get("pushed")]
+        return teams_notify.generate_card(
+            modules=modules, total=total, generated=len(all_screens), pushed=pushed_n,
+            gen_failed=gen_failed_labels, push_failed=push_failed,
+            elapsed_seconds=time.monotonic() - started_at,
+        )
 
     try:
         # ---------------- connect to both repos ----------------
@@ -2837,6 +2867,7 @@ async def handle_auto_run(ws: WebSocket, session: dict, msg: dict):
 
             if outcome is None:
                 gen_failed += 1
+                gen_failed_labels.append(label)
                 await send_log(ws, f"[{label}] skipped — nothing generated, moving on.", "danger")
                 continue
 
@@ -2859,6 +2890,7 @@ async def handle_auto_run(ws: WebSocket, session: dict, msg: dict):
             + ".",
             "success" if len(pushed_screens) == total else "accent",
         )
+        await _notify_teams(ws, notify, _gen_card())
 
         if not all_screens:
             await send_log(ws, "auto generate finished — nothing could be generated.", "danger")
@@ -3100,10 +3132,23 @@ async def handle_overnight_run(ws: WebSocket, session: dict, msg: dict):
         await send_status(ws, "idle")
         return
 
+    # Optional {"screens": [{"module": "...", "screen": "..."}]} (sent by the Tracking page): run only these
+    # screens of the chosen modules. Without it every screen of every module is run, as before.
+    wanted: dict[str, set[str]] = {}
+    for pick in (msg.get("screens") or []):
+        if isinstance(pick, dict) and pick.get("module") and pick.get("screen"):
+            wanted.setdefault(history_store.track_key(pick["module"]), set()).add(history_store.track_key(pick["screen"]))
+
+    notify = bool(msg.get("notify"))                # "send the result to Teams" switch, chosen per run
+    run_label = "Selected screens run" if wanted else "Auto run"
+
     jobs: list[tuple[str, object]] = []
     items: list[dict] = []
     for module in modules:
         candidates = await resolve_module_screens_precise(tree, module)
+        chosen = wanted.get(history_store.track_key(module))
+        if candidates and chosen is not None:
+            candidates = [c for c in candidates if history_store.track_key(c.dir.rsplit("/", 1)[-1]) in chosen]
         if not candidates:
             await send_log(ws, f"[{module}] no screens found in the QC repo - skipped.", "danger")
             items.append({"module": module, "screen": "", "status": "skipped", "exit_code": None,
@@ -3232,6 +3277,9 @@ async def handle_overnight_run(ws: WebSocket, session: dict, msg: dict):
                     for it in items if it["status"] in ("passed", "failed", "error")],
     })
     await send_status(ws, "done")
+    await _notify_teams(ws, notify, teams_notify.run_card(
+        label=run_label, modules=modules, items=items, elapsed_seconds=elapsed, combined_run_id=combined_run_id,
+        list_screens=bool(wanted)))
 
 
 # ----------------------------------------------------------------------
@@ -3244,6 +3292,35 @@ def _clear_stash_if_idle() -> None:
     still going; that must not delete the running job's screenshots."""
     if not job_manager.any_active():
         clear_screenshot_stash()
+
+
+def _apply_run_edits(session: dict, msg: dict) -> None:
+    """Fetched screens only: use the user's edited feature text for THIS run.
+
+    Run-only edits (e.g. commented-out scenarios): the text is placed on the in-memory
+    session entry that Cypress reads, but nothing is pushed to GitLab and the screen is
+    not marked modified, so no Approve & push is required. Generated screens are ignored
+    here - they must go through Approve & push as before.
+    """
+    edits = msg.get("edits")
+    if session.get("origin") != "fetch" or not isinstance(edits, list):
+        return
+    for e in edits:
+        if not isinstance(e, dict):
+            continue
+        feature = e.get("feature")
+        if not isinstance(feature, str) or not feature.strip():
+            continue
+        if session.get("scope") == "module" and session.get("screens"):
+            target_module = e.get("module") or session.get("module")
+            batches = session.get("module_batches") or {}
+            screens_list = batches.get(target_module) if target_module in batches else session.get("screens")
+            index = e.get("index")
+            if not screens_list or not isinstance(index, int) or index < 0 or index >= len(screens_list):
+                continue
+            screens_list[index]["feature"] = feature
+        elif session.get("feature"):
+            session["feature"] = feature
 
 
 def _run_row_info(session: dict) -> tuple[str, str]:
@@ -3299,6 +3376,41 @@ async def _record_history(session: dict, source: str, run_results: list[dict],
 async def api_history_list(limit: int = 200):
     items = await asyncio.to_thread(history_store.list_runs, min(max(limit, 1), 500))
     return {"items": items}
+
+
+@app.get("/api/tracking")
+async def api_tracking():
+    """Last-run time of every module / screen that has ever been run (for the Tracking page and the pick lists)."""
+    try:
+        return await asyncio.to_thread(history_store.get_last_runs)
+    except Exception as e:
+        logger.exception("could not read last-run tracking")
+        raise HTTPException(status_code=502, detail=f"could not read run tracking: {e}")
+
+
+@app.get("/api/notify/status")
+async def api_notify_status():
+    """Is the Teams link set on the server? (the screen disables the Teams switch when it is not)"""
+    return {"configured": teams_notify.is_configured()}
+
+
+@app.post("/api/tracking/export")
+async def api_tracking_export(payload: dict):
+    """Excel file of the rows the Tracking page is showing: {"rows": [...], "summary": {...}}."""
+    rows = payload.get("rows")
+    if not isinstance(rows, list):
+        raise HTTPException(status_code=400, detail="rows must be a list")
+    summary = payload.get("summary") if isinstance(payload.get("summary"), dict) else {}
+    try:
+        data = await asyncio.to_thread(tracking_export.build_tracking_xlsx, [r for r in rows if isinstance(r, dict)], summary)
+    except Exception as e:
+        logger.exception("could not build the tracking export")
+        raise HTTPException(status_code=500, detail=f"could not build the export: {e}")
+    return Response(
+        content=data,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": 'attachment; filename="qc-tracking.xlsx"'},
+    )
 
 
 @app.get("/api/jobs")
@@ -3578,6 +3690,7 @@ async def qc_session(websocket: WebSocket):
                 if _session_job_active(session):
                     await send_error(websocket, "A run is already in progress for this session, so this request was ignored. Wait for it to finish or click Terminate.")
                 else:
+                    _apply_run_edits(session, msg)
                     job_module, job_screen = _run_row_info(session)
                     job = job_manager.start_job(
                         session=session, ws=websocket,
