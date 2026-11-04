@@ -14,12 +14,20 @@ from service import pass_planner, value_gen
 logger = logging.getLogger(__name__)
 
 
+_EXTRA_ROUNDS = {"n": 0}   # raised for the length of a "Refine -> deepen" run (see app.py), then put back to 0
+
+
+def set_extra_rounds(n: int) -> None:
+    _EXTRA_ROUNDS["n"] = max(0, int(n))
+
+
 def max_rounds() -> int:
     """A number setting with a default in code (no .env needed)."""
     try:
-        return max(0, int(os.getenv("COVERAGE_LOOP_MAX_ROUNDS", "2")))
+        base = max(0, int(os.getenv("COVERAGE_LOOP_MAX_ROUNDS", "2")))
     except ValueError:
-        return 2
+        base = 2
+    return base + _EXTRA_ROUNDS["n"]
 
 
 # capability -> regex of the step sentence that proves it is covered

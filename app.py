@@ -43,6 +43,7 @@ from service import screen_facts, feature_passes, coverage_loop, extended_steps,
 from service import feature_fixer, template_steps  # code-only feature repair + fixed extended step definitions
 from service import history_store, tracking_export, teams_notify
 from service import request_intent, append_editor, repo_catalog  # request classifier, optimised append editor, live module/screen list
+from service import refine_engine  # universal refine box: router, free-form edit, deepen merge, undo
 from service import job_manager
 from service import job_store
 from service.cypress_runner import clear_stash as clear_screenshot_stash
@@ -1431,7 +1432,7 @@ async def _add_extended_steps(ws: WebSocket, tag: str, test_cases: str, base_scr
 async def _generate_one_screen(ws: WebSocket, src: GitLabService, module: str,
                                 screen_name: str, resolved_source: ResolvedSource,
                                 user_request: str, label: str | None = None,
-                                source_tree: list[str] | None = None) -> dict | None:
+                                source_tree: list[str] | None = None, deepen: str = "") -> dict | None:
     """Runs the analysis -> test-case -> script -> validate pipeline for one
     resolved source screen. Returns {feature, script, validation} or None on
     failure (caller decides whether that's fatal or skip-and-continue).
@@ -1456,6 +1457,8 @@ async def _generate_one_screen(ws: WebSocket, src: GitLabService, module: str,
         await send_log(ws, f"{tag}your request: {_plan.summary()}.", "secondary")
         user_request = _plan.priority_text(_default_request)
     _requirements = _plan.requirements_text()
+    if deepen:   # Refine box -> "not satisfied / generate again": one extra hard-requirements block (see service/refine_engine.py)
+        _requirements = (_requirements + "\n\n" if _requirements else "") + deepen
     _metrics = run_metrics.ScreenRun(screen_name, module)  # Phase 0: scenario counts per stage, one JSON line per run
     # Detect MM module screens — these 5 modules share one component file.
     # Skip ArchitectureAgent folder lookup and fetch the 4 fixed files directly.
@@ -2938,14 +2941,21 @@ async def handle_auto_run(ws: WebSocket, session: dict, msg: dict):
 
 
 # ----------------------------------------------------------------------
-# REFINE — append / edit at the review stage (after Generate AND after Fetch).
+# REFINE - the universal box, at the review stage (after Generate AND after Fetch).
 #
 # websocket message:
-#   {"action": "refine", "text": "<free text>", "module": "<m>", "index": <moduleIndex>, "feature": "<edited text, optional>"}
-# "module" + "index" are only needed for a module list (same meaning as in "approve"); a single screen needs just "text".
-# The text may be a pasted scenario, a described scenario / test case, a data change ("use SD-050 for DomainCode")
-# or a comment line ("add a comment ..."). Most of that is applied by code (service/append_editor.py); the model only
-# writes the block of a described scenario. An edited screen is marked modified (pushed=False) so Approve & push and
+#   {"action": "refine", "text": "<anything>", "module": "<m>", "index": <moduleIndex>, "feature": "<edited text, optional>"}
+#   {"action": "refine_undo", "module": "<m>", "index": <moduleIndex>}      (steps back one refine)
+# "module" + "index" are only needed for a module list (same meaning as in "approve").
+#
+# What the text may be (service/refine_engine.py):
+#   * pasted scenario / "use X for Field" / "add a comment ..."  -> applied by code (service/append_editor.py), no model
+#   * any other change ("add boundary tests for Amount", "more rows in the negative scenario", "rename ...", "remove ...")
+#       -> EDIT: the model returns block operations, code checks and applies each one (failed ones go back to the model)
+#   * "not satisfied / generate again / more coverage / more test data" -> DEEPEN: the screen is generated again in a thorough
+#       mode and the new scenarios / rows are MERGED into the existing files (nothing is thrown away)
+#   * a question ("what does this cover?") -> answered in the box, files untouched
+# Every change keeps a snapshot so the user can Undo. An edited screen is marked modified (pushed=False) so Approve & push and
 # Run work on it exactly as after Generate.
 # ----------------------------------------------------------------------
 def _review_phase(session: dict) -> str:
@@ -2954,14 +2964,8 @@ def _review_phase(session: dict) -> str:
     return "awaiting_review" if session.get("pushed") else "awaiting_approval"
 
 
-async def handle_refine(ws: WebSocket, session: dict, msg: dict):
-    text = (msg.get("text") or "").strip()
-    if not text:
-        await send_error(ws, "type what to add or change first (a scenario, a test-data change or a comment line).")
-        return
-
-    holder: dict | None = None
-    label, position = "", 0
+async def _refine_target(ws: WebSocket, session: dict, msg: dict):
+    """-> (holder, label, position, module, screen_name) or None (an error has been sent)."""
     if session.get("scope") == "module" and session.get("screens"):
         target_module = msg.get("module") or session.get("module")
         batches = session.get("module_batches") or {}
@@ -2969,63 +2973,194 @@ async def handle_refine(ws: WebSocket, session: dict, msg: dict):
         index = msg.get("index")
         if not screens_list or not isinstance(index, int) or index < 0 or index >= len(screens_list):
             await send_error(ws, "pick the screen you want to edit first.")
-            return
+            return None
         holder = screens_list[index]
         label = f"{holder.get('module') or target_module}/{holder['resolved'].slug}"
         position = next((i for i, s in enumerate(session["screens"]) if s is holder), 0)
-    elif session.get("feature") and session.get("script"):
-        holder = session
-        label = f"{session.get('module')}/{session.get('screen')}"
-    else:
-        await send_error(ws, "nothing to edit yet - fetch or generate a screen first.")
-        return
+        module = holder.get("module") or target_module or ""
+        screen_name = holder["resolved"].dir.rsplit("/", 1)[-1]
+        return holder, label, position, module, screen_name
+    if session.get("feature") and session.get("script"):
+        return session, f"{session.get('module')}/{session.get('screen')}", 0, session.get("module") or "", session.get("screen") or ""
+    await send_error(ws, "nothing to edit yet - fetch or generate a screen first.")
+    return None
 
+
+async def _deepen_source(session: dict, module: str, screen_name: str):
+    """(src gitlab service, source tree, resolved source or None for MM modules) - the source tree is cached for 10 minutes."""
+    cache = session.get("src_cache")
+    if cache and time.monotonic() - cache["at"] < 600:
+        src, src_tree = cache["src"], cache["tree"]
+    else:
+        src = await asyncio.to_thread(_source_gitlab_service)
+        src_tree = await asyncio.to_thread(src.get_repo_tree)
+        session["src_cache"] = {"at": time.monotonic(), "src": src, "tree": src_tree}
+    if is_mm_module(module):
+        return src, src_tree, None
+    resolved_source = await resolve_source_screen_precise(filter_tree_by_module(src_tree, module), module, screen_name)
+    return src, src_tree, resolved_source
+
+
+async def _deepen_holder(ws: WebSocket, session: dict, holder: dict, label: str, module: str, screen_name: str,
+                         focus_text: str):
+    """Generates the screen again in thorough mode and merges the NEW scenarios / rows into the existing files.
+    Returns (ApplyResult, stats) or (None, error text). Nothing existing is removed."""
+    if not module or not screen_name:
+        return None, "the module / screen name is not known for this screen - use Generate for it first"
+    await send_log(ws, f"[{label}] going deeper: reading the source again and generating more scenarios and test data...", "accent")
+    try:
+        src, src_tree, resolved_source = await _deepen_source(session, module, screen_name)
+    except WebSocketDisconnect:
+        raise
+    except Exception as e:
+        return None, f"could not read the source repository ({e})"
+    if not is_mm_module(module) and resolved_source is None:
+        return None, f"no source files found for '{module} / {screen_name}' in the source repo"
+    directive = refine_engine.deepen_directive(holder["feature"], focus_text)
+    default_request = f"Generate Cypress tests for the {screen_name} screen in the {module} module."
+    coverage_loop.set_extra_rounds(2)
+    try:
+        outcome = await _generate_one_screen(ws, src, module, screen_name, resolved_source, default_request,
+                                             label=label, source_tree=src_tree, deepen=directive)
+    finally:
+        coverage_loop.set_extra_rounds(0)
+    if outcome is None or not (outcome.get("feature") or "").strip():
+        return None, "the thorough generation failed - the existing files were not touched"
+    await send_log(ws, f"[{label}] merging the new scenarios and data rows into the existing files...", "secondary")
+    res = append_editor.ApplyResult(holder["feature"], holder["script"])
+    stats = await refine_engine.merge_new_feature(res, outcome["feature"], _append_define_steps)
+    return res, stats
+
+
+async def handle_refine(ws: WebSocket, session: dict, msg: dict):
+    text = (msg.get("text") or "").strip()
+    if not text:
+        await send_error(ws, "type what you want first - anything about the scenarios, test data or script of this screen.")
+        return
+    target = await _refine_target(ws, session, msg)
+    if target is None:
+        return
+    holder, label, position, module, screen_name = target
     if isinstance(msg.get("feature"), str) and msg["feature"].strip():
         holder["feature"] = msg["feature"]          # the user's own unsaved-to-backend edits are the base
 
     await send_status(ws, "resolving")
+    pre = refine_engine.capture(holder)
     applied: list[str] = []
     skipped: list[str] = []
+    answers: list[str] = []
     changed = False
+
+    def take(res) -> bool:
+        """Adopts an ApplyResult into the holder. True when the files changed."""
+        nonlocal changed
+        applied.extend(res.applied)
+        skipped.extend(res.skipped)
+        if res.feature != holder["feature"] or res.script != holder["script"]:
+            holder["feature"], holder["script"] = res.feature, res.script
+            holder["pushed"] = False
+            holder["modified"] = True
+            changed = True
+            return True
+        return False
+
     try:
         await send_log(ws, f"[{label}] reading your request...", "secondary")
-        plan = await request_intent.classify(text, append_agent.classify_text)
-        unclear = plan.unclear_messages()
-        for m in unclear:
-            await send_log(ws, f"[{label}] {m}", "danger")
-        skipped += unclear
-        items = plan.actionable
-        if not items and not unclear:
-            await send_log(ws, f"[{label}] nothing to apply - a priority hint only steers generation.", "muted")
-        if items:
-            result = await append_editor.apply_items(
-                holder["feature"], holder["script"], items,
-                describe_fn=append_agent.describe_scenario, define_fn=_append_define_steps,
-            )
-            applied, skipped = result.applied, skipped + result.skipped
-            for m in applied:
-                await send_log(ws, f"[{label}] {m}", "success")
-            for m in result.skipped:
-                await send_log(ws, f"[{label}] skipped {m}", "muted" if "priority hint" in m else "danger")
-            if result.changed:
-                holder["feature"], holder["script"] = result.feature, result.script
-                holder["pushed"] = False
-                holder["modified"] = True
-                changed = True
-                await send_log(ws, f"[{label}] edited - Approve and push to save it to GitLab, then Run.", "accent")
+        # 1) what code can do without any model: pasted scenarios, "use X for Field", comment lines
+        plan = request_intent.parse(text)
+        rest_pieces: list[str] = []
+        for it in plan.items:
+            if it.type in (request_intent.FULL_SCENARIO, request_intent.TEST_DATA, request_intent.COMMENT) and not it.unclear:
+                res = await append_editor.apply_items(holder["feature"], holder["script"], [it],
+                                                      describe_fn=append_agent.describe_scenario, define_fn=_append_define_steps)
+                if res.changed:
+                    take(res)
+                    for m in res.applied:
+                        await send_log(ws, f"[{label}] {m}", "success")
+                elif it.type == request_intent.TEST_DATA:
+                    rest_pieces.append(it.raw)          # maybe not a value change at all - the router decides
+                else:
+                    skipped.extend(res.skipped)
+                    for m in res.skipped:
+                        await send_log(ws, f"[{label}] skipped {m}", "danger")
             else:
-                await send_log(ws, f"[{label}] nothing was changed.", "muted")
+                rest_pieces.append(it.raw)
+        rest_text = "\n".join(p for p in rest_pieces if p.strip())
+
+        # 2) everything else: route, then edit / question / deepen
+        if rest_text.strip():
+            jobs = await refine_engine.route(rest_text, append_agent.route_request)
+            await send_log(ws, f"[{label}] understood: " + ", ".join(j["intent"].lower() for j in jobs) + ".", "secondary")
+            for job in jobs:
+                if job["intent"] == refine_engine.QUESTION:
+                    try:
+                        ans = await append_agent.answer_question(job["text"], refine_engine.overview(holder["feature"], holder["script"]))
+                    except Exception as e:
+                        ans = f"I could not answer that ({e})."
+                    answers.append(ans)
+                    await send_log(ws, f"[{label}] {ans}", "accent")
+                elif job["intent"] == refine_engine.EDIT:
+                    await send_log(ws, f"[{label}] editing: {job['text'][:90]}", "secondary")
+                    res = await refine_engine.freeform_edit(holder["feature"], holder["script"], job["text"],
+                                                            append_agent.edit_feature, _append_define_steps)
+                    take(res)
+                    for m in res.applied:
+                        await send_log(ws, f"[{label}] {m}", "success")
+                    for m in res.skipped:
+                        await send_log(ws, f"[{label}] could not do: {m}", "danger")
+                else:
+                    res, info = await _deepen_holder(ws, session, holder, label, module, screen_name, job["text"])
+                    if res is None:
+                        skipped.append(info)
+                        await send_log(ws, f"[{label}] {info}", "danger")
+                    else:
+                        res.applied = []          # one summary line is enough; the per-scenario list stays in the backend log
+                        take(res)
+                        summary = f"deeper run added {info['scenarios']} new scenario(s) and {info['rows']} data row(s) in total"
+                        if info["scenarios"] == 0 and info["rows"] == 0:
+                            summary = "the deeper run found nothing new to add (the screen looks fully covered by what the app can see)"
+                        applied.append(summary)
+                        skipped.extend(info["skipped"][:8])
+                        await send_log(ws, f"[{label}] {summary}.", "success" if (info["scenarios"] or info["rows"]) else "muted")
+                        for m in info["skipped"][:8]:
+                            await send_log(ws, f"[{label}] {m}", "muted")
+        if changed:
+            refine_engine.push_snapshot(session, holder, pre)
+            await send_log(ws, f"[{label}] edited - Approve and push to save it to GitLab, then Run. (Undo is available.)", "accent")
+        elif not answers:
+            await send_log(ws, f"[{label}] nothing was changed.", "muted")
     except WebSocketDisconnect:
         raise
     except asyncio.CancelledError:
+        coverage_loop.set_extra_rounds(0)
         raise
     except Exception as e:
         logger.exception("refine failed for %s", label)
-        await send_error(ws, f"could not apply that request: {e}")
+        if changed:
+            refine_engine.push_snapshot(session, holder, pre)
+        await send_error(ws, f"could not finish that request: {e}")
 
     await send_artifacts(ws, session)
     await ws.send_json({"type": "refine_done", "index": position, "changed": changed,
-                        "applied": applied, "skipped": skipped})
+                        "applied": applied, "skipped": skipped, "answers": answers,
+                        "can_undo": refine_engine.can_undo(session, holder)})
+    await send_status(ws, _review_phase(session))
+
+
+async def handle_refine_undo(ws: WebSocket, session: dict, msg: dict):
+    target = await _refine_target(ws, session, msg)
+    if target is None:
+        return
+    holder, label, position, _module, _screen = target
+    ok = refine_engine.undo(session, holder)
+    if ok:
+        await send_log(ws, f"[{label}] undone - the previous version is back. Approve and push to save it.", "accent")
+    else:
+        await send_log(ws, f"[{label}] nothing to undo.", "muted")
+    await send_artifacts(ws, session)
+    await ws.send_json({"type": "refine_done", "index": position, "changed": ok,
+                        "applied": ["undone: the previous version is back"] if ok else [], "skipped": [], "answers": [],
+                        "can_undo": refine_engine.can_undo(session, holder), "undo": True})
     await send_status(ws, _review_phase(session))
 
 
@@ -3645,6 +3780,12 @@ async def qc_session(websocket: WebSocket):
                     await send_error(websocket, "A run is already in progress for this session, so this request was ignored. Wait for it to finish or click Terminate.")
                 else:
                     session["current_task"] = asyncio.create_task(handle_refine(websocket, session, msg))
+
+            elif action == "refine_undo":
+                if _session_job_active(session):
+                    await send_error(websocket, "A run is already in progress for this session, so this request was ignored. Wait for it to finish or click Terminate.")
+                else:
+                    session["current_task"] = asyncio.create_task(handle_refine_undo(websocket, session, msg))
 
             elif action == "list_catalog":
                 # its own task: Terminate (which cancels current_task) must not cancel a module-list read
