@@ -31,7 +31,7 @@ def build_tracking_xlsx(rows: list[dict], summary: dict) -> bytes:
     # ---- sheet 1: one row per screen ------------------------------------------------
     ws = wb.active
     ws.title = "Tracking"
-    headers = ["Module", "Screen", "Last run", "Days since last run", "Runs (last 30 days)", "Status"]
+    headers = ["Module", "Screen", "Scenarios", "Last run", "Days since last run", "Runs (last 30 days)", "Status"]
     ws.append(headers)
     for cell in ws[1]:
         cell.fill, cell.font, cell.border = _HEADER_FILL, _HEADER_FONT, _BORDER
@@ -41,7 +41,9 @@ def build_tracking_xlsx(rows: list[dict], summary: dict) -> bytes:
     for r in rows:
         days = r.get("days")
         ws.append([
-            _text(r.get("module")), _text(r.get("screen")), _text(r.get("last_run_text")) or "Never run",
+            _text(r.get("module")), _text(r.get("screen")),
+            r.get("scenarios") if isinstance(r.get("scenarios"), (int, float)) else "",
+            _text(r.get("last_run_text")) or "Never run",
             days if isinstance(days, (int, float)) else "",
             r.get("runs30") if isinstance(r.get("runs30"), (int, float)) else 0,
             _text(r.get("status")),
@@ -50,19 +52,19 @@ def build_tracking_xlsx(rows: list[dict], summary: dict) -> bytes:
         for cell in ws[row_idx]:
             cell.border = _BORDER
             cell.alignment = Alignment(vertical="center")
-        for col in (4, 5):
+        for col in (3, 5, 6):
             ws.cell(row=row_idx, column=col).alignment = Alignment(horizontal="center", vertical="center")
         style = _STATUS_STYLE.get(_text(r.get("status")))
         if style:
-            status_cell = ws.cell(row=row_idx, column=6)
+            status_cell = ws.cell(row=row_idx, column=7)
             status_cell.fill = PatternFill("solid", fgColor=style[0])
             status_cell.font = Font(color=style[1], bold=True)
 
-    for idx, width in enumerate([28, 38, 24, 20, 20, 22], start=1):
+    for idx, width in enumerate([28, 38, 12, 24, 20, 20, 22], start=1):
         ws.column_dimensions[get_column_letter(idx)].width = width
     ws.freeze_panes = "A2"
     if rows:
-        ws.auto_filter.ref = f"A1:F{ws.max_row}"
+        ws.auto_filter.ref = f"A1:G{ws.max_row}"
 
     # ---- sheet 2: summary -----------------------------------------------------------
     sm = wb.create_sheet("Summary")
@@ -73,6 +75,7 @@ def build_tracking_xlsx(rows: list[dict], summary: dict) -> bytes:
         ("Search", _text(summary.get("search")) or "-"),
         ("", ""),
         ("Screens in this export", len(rows)),
+        ("Scenarios in this export", summary.get("scenarios", "")),
         ("Run in last 7 days", summary.get("fresh", 0)),
         ("Not run in 30+ days", summary.get("stale", 0)),
         ("Never run", summary.get("never", 0)),

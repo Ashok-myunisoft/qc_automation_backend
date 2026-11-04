@@ -41,7 +41,7 @@ from service import chunk_analysis
 from service import screen_spec, value_gen  # screen spec (formjson + backend digest)
 from service import screen_facts, feature_passes, coverage_loop, extended_steps, run_metrics  # topic passes, coverage loop, extended steps
 from service import feature_fixer, template_steps  # code-only feature repair + fixed extended step definitions
-from service import history_store, tracking_export, teams_notify
+from service import history_store, tracking_export, teams_notify, scenario_counts
 from service import request_intent, append_editor, repo_catalog  # request classifier, optimised append editor, live module/screen list
 from service import refine_engine  # universal refine box: router, free-form edit, deepen merge, undo
 from service import job_manager
@@ -3165,29 +3165,39 @@ async def handle_refine_undo(ws: WebSocket, session: dict, msg: dict):
 
 
 # ----------------------------------------------------------------------
-# CATALOG — live module -> screens list from the QC repo (cached ~5 minutes).
-#   websocket: {"action": "list_catalog", "refresh": false}
-#   reply:     {"type": "catalog", "modules": [{"module": "Skill Management", "screens": ["Skill Domain", ...]}],
+# CATALOG — live module -> screens list (cached ~5 minutes): from the QC repo (kind "qc", screens that already
+# have tests) or from the SOURCE repo (kind "source", every screen that can be generated).
+#   websocket: {"action": "list_catalog", "refresh": false, "kind": "qc" | "source"}   (kind defaults to "qc")
+#   reply:     {"type": "catalog", "kind": "qc" | "source", "modules": [{"module": "Skill Management", "screens": ["Skill Domain", ...]}],
 #               "generated_at": "<iso>", "cached": true|false}   (on failure: modules [] plus "error")
 #   HTTP:      GET /api/catalog?refresh=false  (same JSON without "type")
 # ----------------------------------------------------------------------
 async def handle_list_catalog(ws: WebSocket, session: dict, msg: dict):
+    # kind "source" = the SOURCE repo list (Generate / Auto generate: screens that may have no test yet);
+    # anything else = the QC repo list (Fetch / Auto run: screens that already have tests).
+    kind = "source" if msg.get("kind") == "source" else "qc"
     try:
-        data = await repo_catalog.get_catalog_async(_gitlab_service, bool(msg.get("refresh")))
-        await ws.send_json({"type": "catalog", **data})
+        if kind == "source":
+            data = await repo_catalog.get_source_catalog_async(_source_gitlab_service, bool(msg.get("refresh")))
+        else:
+            data = await repo_catalog.get_catalog_async(_gitlab_service, bool(msg.get("refresh")))
+        await ws.send_json({"type": "catalog", "kind": kind, **data})
     except WebSocketDisconnect:
         raise
     except Exception as e:
-        logger.warning("could not read the module list: %s", e)
-        await ws.send_json({"type": "catalog", "modules": [], "error": f"could not read the module list from the QC repo: {e}"})
+        logger.warning("could not read the %s module list: %s", kind, e)
+        where = "source repo" if kind == "source" else "QC repo"
+        await ws.send_json({"type": "catalog", "kind": kind, "modules": [], "error": f"could not read the module list from the {where}: {e}"})
 
 
 @app.get("/api/catalog")
-async def api_catalog(refresh: bool = False):
+async def api_catalog(refresh: bool = False, kind: str = "qc"):
     try:
+        if kind == "source":
+            return await repo_catalog.get_source_catalog_async(_source_gitlab_service, refresh)
         return await repo_catalog.get_catalog_async(_gitlab_service, refresh)
     except Exception as e:
-        raise HTTPException(status_code=502, detail=f"could not read the module list from the QC repo: {e}")
+        raise HTTPException(status_code=502, detail=f"could not read the module list from the {'source' if kind == 'source' else 'QC'} repo: {e}")
 
 
 # ----------------------------------------------------------------------
@@ -3521,6 +3531,18 @@ async def api_tracking():
     except Exception as e:
         logger.exception("could not read last-run tracking")
         raise HTTPException(status_code=502, detail=f"could not read run tracking: {e}")
+
+
+@app.get("/api/scenario-counts")
+async def api_scenario_counts(refresh: bool = False):
+    """Scenario count of every QC screen: {"counts": {"module|screen": n}, "status": "loading"|"ready", "done", "total"}.
+    The counts are read from the feature files in the background; poll until status is "ready"."""
+    try:
+        await repo_catalog.get_catalog_async(_gitlab_service, False)   # makes sure the screen -> file list is there (cached)
+        return await asyncio.to_thread(scenario_counts.snapshot, _gitlab_service, repo_catalog.feature_paths(), refresh)
+    except Exception as e:
+        logger.exception("could not read scenario counts")
+        raise HTTPException(status_code=502, detail=f"could not read scenario counts: {e}")
 
 
 @app.get("/api/notify/status")
