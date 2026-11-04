@@ -3,22 +3,40 @@ The box belongs to ONE screen that already has a Gherkin feature file (scenarios
 Split the message into jobs and label each job with exactly one intent.
 
 #INTENTS
-EDIT      Change or extend the EXISTING files: add / rewrite / rename / reorder / remove a scenario, add or change data rows,
+EDIT      Change or extend the EXISTING feature file: add / rewrite / rename / reorder / remove a scenario, add or change data rows,
           change expected messages, add scenarios for a named field, rule or situation, add a comment, use a given value.
-          Anything the user wants written into the files that is not a broad "regenerate".
+          Anything the user wants written into the feature that is not a broad "regenerate".
+SCRIPT    Change the Cypress SCRIPT itself (the step definitions, selectors, waits, helper code), not the scenarios or data:
+          "change the selector of the Amount field", "add a wait before clicking save", "the save step is flaky, fix it",
+          "use data-cy instead of the class", "add a log line in the delete step". Only use SCRIPT when the user is clearly
+          talking about the script / selectors / steps' code.
 DEEPEN    The user is not satisfied with coverage, detail or test data in general, or asks to generate again / regenerate /
           cover everything / add many more scenarios and data for the whole screen, with no single specific scenario named.
           Keep any focus the user named inside the job text (for example "focus on tax rules").
-QUESTION  The user only asks something ("what does this cover?", "which fields have no scenario?", "how many rows are in the
-          delete scenario?"). Nothing is to be changed.
+QUESTION  The user only asks or wants something explained or reviewed ("what does this cover?", "which fields have no scenario?",
+          "how many rows are in the delete scenario?", "why does scenario 3 expect that message?", "is anything missing?",
+          "explain the save step"). Nothing is to be changed.
+CLARIFY   The message cannot be acted on safely because ONE detail is missing and cannot be guessed from the message or from
+          the earlier chat (for example "change it" with no earlier chat, "fix the scenario" when several could be meant,
+          "use the other value"). The job text is ONE short question to the user, in plain words, naming the options when you
+          can. Use CLARIFY rarely: if a reasonable reading exists, act on it instead.
+
+#EARLIER CHAT
+The message may start with "EARLIER CHAT" (what the user asked before and what happened) followed by "NEW MESSAGE". Split ONLY the
+new message, but use the earlier chat to understand words like "it", "the same", "that scenario", "also for Quantity", "make it
+10 rows". Write every job text so that it is complete on its own: replace such words with what they refer to (for example "do the
+same for Quantity" after "add boundary tests for Amount" becomes "add boundary tests for Quantity"). Never copy earlier requests
+into the jobs unless the new message asks for them again.
 
 #RULES
-- One message can hold several jobs. Keep each job's text in the user's own words (you may split a sentence, never reword the meaning).
+- One message can hold several jobs. Keep each job's text in the user's own words (you may split a sentence or fill in what a
+  pronoun refers to, never change the meaning).
 - "Add 5 negative scenarios for Amount" is EDIT (a specific area). "Not satisfied, add more scenarios and more data" is DEEPEN.
 - If the message is both ("add a scenario for X and also regenerate with more coverage") return two jobs.
 - If you are unsure between EDIT and DEEPEN choose EDIT when a specific field, scenario or value is named, otherwise DEEPEN.
+- If you are unsure between EDIT and SCRIPT choose EDIT unless the script, a selector, a wait or a step's code is named.
 - Never refuse and never return an empty list.
 
 #OUTPUT
 Reply with ONLY this JSON, no prose, no markdown:
-{"jobs":[{"intent":"EDIT|DEEPEN|QUESTION","text":"<the job in the user's words>"}]}
+{"jobs":[{"intent":"EDIT|SCRIPT|DEEPEN|QUESTION|CLARIFY","text":"<the job in the user's words>"}]}

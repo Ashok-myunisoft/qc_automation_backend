@@ -55,12 +55,24 @@ class AppendAgent:
             client=OpenAIChatClient(model=scenario_model),
             instructions=Path("prompts/refine_edit_prompt.txt").read_text(encoding="utf-8"),
         )
+        self.script_editor = Agent(
+            name="RefineScriptAgent",
+            client=OpenAIChatClient(model=scenario_model),
+            instructions=Path("prompts/refine_script_prompt.txt").read_text(encoding="utf-8"),
+        )
         self.answerer = Agent(
             name="RefineAnswerAgent",
             client=OpenAIChatClient(model=classify_model),
-            instructions=("You answer a QA engineer's question about ONE Gherkin feature file of an ERP screen. "
-                          "Use only the overview you are given. Be short, plain and concrete (numbers, scenario names, field names). "
-                          "If the overview does not contain the answer, say so. Never change anything and never write Gherkin unless asked."),
+            instructions=("You answer a QA engineer's question about ONE screen of an ERP application: its Gherkin feature file "
+                          "and its Cypress script. You are given an overview, the feature text, the script text (or the parts "
+                          "related to the question), the fields that exist on the screen and the earlier chat. "
+                          "Use only what you are given - never invent scenarios, rows, fields, messages or behaviour. "
+                          "Be plain and concrete (numbers, scenario names, field names, the exact step or message). Keep it short "
+                          "for a simple question; for 'explain', 'review' or 'what is missing' give a clear short list with the "
+                          "reason for each point (for example fields that no scenario uses, a rule with no negative case, a step "
+                          "whose code looks fragile). If what you were given does not contain the answer, say so and say what "
+                          "would be needed. You never change anything. You may show Gherkin or code only when asked, in a code "
+                          "block, and you must say it has NOT been added to the files (the user can ask for it to be added)."),
         )
 
     async def describe_scenario(self, description: str, context: dict, previous_error: str = "") -> str:
@@ -103,9 +115,12 @@ ONE EXISTING SCENARIO, ONLY AS A STYLE REFERENCE (do not copy its data or title)
     # ------------------------------------------------------------------
     # universal refine box
     # ------------------------------------------------------------------
-    async def route_request(self, text: str) -> str:
-        """Splits the box text into EDIT / DEEPEN / QUESTION jobs (JSON text)."""
-        response = await self.router.run(text)
+    async def route_request(self, text: str, history: str = "") -> str:
+        """Splits the box text into EDIT / SCRIPT / DEEPEN / QUESTION / CLARIFY jobs (JSON text).
+        `history` = the recent chat of this screen, so that "do the same for Quantity" can be understood."""
+        message = text if not history else (
+            f"EARLIER CHAT (oldest first):\n{history}\n\nNEW MESSAGE (split ONLY this one):\n{text}")
+        response = await self.router.run(message)
         return _strip_fence(response.text)
 
     async def edit_feature(self, instruction: str, context: dict, previous_error: str = "") -> str:
@@ -139,6 +154,41 @@ TITLES OF EVERY SCENARIO IN THE FILE (use these exact titles for replace / delet
             pass
         return _strip_fence(response.text)
 
-    async def answer_question(self, question: str, overview: str) -> str:
-        response = await self.answerer.run(f"QUESTION:\n{question}\n\nOVERVIEW OF THE FEATURE FILE:\n{overview}")
+    async def edit_script(self, instruction: str, context: dict, previous_error: str = "") -> str:
+        """Returns exact find / replace operations on the Cypress script as JSON text (see prompts/refine_script_prompt.txt)."""
+        steps = "\n".join(f"- {t}" for t in (context.get("steps") or [])) or "- (none)"
+        retry = f"\n{previous_error}\n" if previous_error else ""
+        message = f"""
+REQUEST:
+{instruction}
+{retry}
+THE SCRIPT ({context.get("note")}):
+{context.get("text")}
+
+STEP SENTENCES USED IN THE FEATURE (the script must keep defining every one of them):
+{steps}
+"""
+        t0 = time.time()
+        response = await self.script_editor.run(message)
+        try:
+            from service import run_metrics
+            run_metrics.log_llm_call("AppendAgent.edit_script", os.getenv("AI_MODEL", ""), response, t0)
+        except Exception:  # noqa: BLE001
+            pass
+        return _strip_fence(response.text)
+
+    async def answer_question(self, question: str, overview: str, feature_text: str = "", script_text: str = "",
+                              history: str = "", fields: str = "", messages: str = "") -> str:
+        message = f"QUESTION:\n{question}\n\nOVERVIEW OF THE FEATURE FILE:\n{overview}"
+        if history:
+            message += f"\n\nEARLIER CHAT (oldest first):\n{history}"
+        if fields:
+            message += f"\n\nFIELDS THAT EXIST ON THIS SCREEN:\n{fields}"
+        if messages:
+            message += f"\n\nMESSAGES ALREADY USED AS ExpectedResult:\n{messages}"
+        if feature_text:
+            message += f"\n\nTHE FEATURE FILE:\n{feature_text}"
+        if script_text:
+            message += f"\n\nTHE CYPRESS SCRIPT:\n{script_text}"
+        response = await self.answerer.run(message)
         return (response.text or "").strip()

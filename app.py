@@ -2965,8 +2965,10 @@ async def handle_auto_run(ws: WebSocket, session: dict, msg: dict):
 # REFINE - the universal box, at the review stage (after Generate AND after Fetch).
 #
 # websocket message:
-#   {"action": "refine", "text": "<anything>", "module": "<m>", "index": <moduleIndex>, "feature": "<edited text, optional>"}
+#   {"action": "refine", "text": "<anything>", "module": "<m>", "index": <moduleIndex>, "feature": "<edited text, optional>",
+#    "script": "<edited script text, optional>"}
 #   {"action": "refine_undo", "module": "<m>", "index": <moduleIndex>}      (steps back one refine)
+#   {"action": "refine_stop"}                                               (stops a refine that is still working)
 # "module" + "index" are only needed for a module list (same meaning as in "approve").
 #
 # What the text may be (service/refine_engine.py):
@@ -2975,7 +2977,12 @@ async def handle_auto_run(ws: WebSocket, session: dict, msg: dict):
 #       -> EDIT: the model returns block operations, code checks and applies each one (failed ones go back to the model)
 #   * "not satisfied / generate again / more coverage / more test data" -> DEEPEN: the screen is generated again in a thorough
 #       mode and the new scenarios / rows are MERGED into the existing files (nothing is thrown away)
-#   * a question ("what does this cover?") -> answered in the box, files untouched
+#   * a change to the Cypress script ("change the selector of Amount", "add a wait before save") -> SCRIPT: the model returns exact
+#       find / replace operations, code checks (text exists once, valid JavaScript, step checker not worse) and applies them
+#   * a question ("what does this cover?", "explain the save step", "what is missing?") -> answered in the box, files untouched
+#   * a request that cannot be done without one missing detail -> the box asks ONE short question, files untouched
+# The box keeps the last turns of each screen (session["refine_chat"]) so follow-ups like "do the same for Quantity" work.
+# Replies carry "refine_progress" lines while working and a "diff" of what changed when it is done.
 # Every change keeps a snapshot so the user can Undo. An edited screen is marked modified (pushed=False) so Approve & push and
 # Run work on it exactly as after Generate.
 # ----------------------------------------------------------------------
@@ -3053,6 +3060,11 @@ async def _deepen_holder(ws: WebSocket, session: dict, holder: dict, label: str,
     return res, stats
 
 
+async def _refine_progress(ws: WebSocket, text: str):
+    """A short 'what I am doing now' line shown in the Refine box while it works (the log keeps the long version)."""
+    await ws.send_json({"type": "refine_progress", "text": text})
+
+
 async def handle_refine(ws: WebSocket, session: dict, msg: dict):
     text = (msg.get("text") or "").strip()
     if not text:
@@ -3064,13 +3076,19 @@ async def handle_refine(ws: WebSocket, session: dict, msg: dict):
     holder, label, position, module, screen_name = target
     if isinstance(msg.get("feature"), str) and msg["feature"].strip():
         holder["feature"] = msg["feature"]          # the user's own unsaved-to-backend edits are the base
+    if isinstance(msg.get("script"), str) and msg["script"].strip():
+        holder["script"] = msg["script"]            # ... the hand-edited script too (it used to be dropped)
 
+    session["refine_task"] = asyncio.current_task() # lets "refine_stop" cancel exactly this request
+    session.pop("refine_stop_requested", None)
     await send_status(ws, "resolving")
     pre = refine_engine.capture(holder)
+    history = refine_engine.chat_text(session, label)
     applied: list[str] = []
     skipped: list[str] = []
     answers: list[str] = []
     changed = False
+    stopped = False
 
     def take(res) -> bool:
         """Adopts an ApplyResult into the holder. True when the files changed."""
@@ -3087,6 +3105,7 @@ async def handle_refine(ws: WebSocket, session: dict, msg: dict):
 
     try:
         await send_log(ws, f"[{label}] reading your request...", "secondary")
+        await _refine_progress(ws, "reading your request...")
         # 1) what code can do without any model: pasted scenarios, "use X for Field", comment lines
         plan = request_intent.parse(text)
         rest_pieces: list[str] = []
@@ -3108,20 +3127,28 @@ async def handle_refine(ws: WebSocket, session: dict, msg: dict):
                 rest_pieces.append(it.raw)
         rest_text = "\n".join(p for p in rest_pieces if p.strip())
 
-        # 2) everything else: route, then edit / question / deepen
+        # 2) everything else: route, then edit / script edit / question / clarify / deepen
         if rest_text.strip():
-            jobs = await refine_engine.route(rest_text, append_agent.route_request)
+            jobs = await refine_engine.route(rest_text, append_agent.route_request, history)
             await send_log(ws, f"[{label}] understood: " + ", ".join(j["intent"].lower() for j in jobs) + ".", "secondary")
+            await _refine_progress(ws, "understood: " + ", ".join(j["intent"].lower() for j in jobs))
             for job in jobs:
                 if job["intent"] == refine_engine.QUESTION:
+                    await _refine_progress(ws, "reading the files to answer...")
                     try:
-                        ans = await append_agent.answer_question(job["text"], refine_engine.overview(holder["feature"], holder["script"]))
+                        qctx = refine_engine.answer_context(holder["feature"], holder["script"], job["text"])
+                        ans = await append_agent.answer_question(job["text"], qctx["overview"], qctx["feature"], qctx["script"],
+                                                                 history, qctx["fields"], qctx["messages"])
                     except Exception as e:
                         ans = f"I could not answer that ({e})."
                     answers.append(ans)
                     await send_log(ws, f"[{label}] {ans}", "accent")
+                elif job["intent"] == refine_engine.CLARIFY:
+                    answers.append(job["text"])
+                    await send_log(ws, f"[{label}] {job['text']}", "accent")
                 elif job["intent"] == refine_engine.EDIT:
                     await send_log(ws, f"[{label}] editing: {job['text'][:90]}", "secondary")
+                    await _refine_progress(ws, f"editing the scenarios: {job['text'][:70]}")
                     res = await refine_engine.freeform_edit(holder["feature"], holder["script"], job["text"],
                                                             append_agent.edit_feature, _append_define_steps)
                     take(res)
@@ -3129,7 +3156,18 @@ async def handle_refine(ws: WebSocket, session: dict, msg: dict):
                         await send_log(ws, f"[{label}] {m}", "success")
                     for m in res.skipped:
                         await send_log(ws, f"[{label}] could not do: {m}", "danger")
+                elif job["intent"] == refine_engine.SCRIPT:
+                    await send_log(ws, f"[{label}] editing the script: {job['text'][:90]}", "secondary")
+                    await _refine_progress(ws, f"editing the script: {job['text'][:70]}")
+                    res = await refine_engine.freeform_script_edit(holder["feature"], holder["script"], job["text"],
+                                                                   append_agent.edit_script)
+                    take(res)
+                    for m in res.applied:
+                        await send_log(ws, f"[{label}] {m}", "success")
+                    for m in res.skipped:
+                        await send_log(ws, f"[{label}] could not do: {m}", "danger")
                 else:
+                    await _refine_progress(ws, "going deeper: reading the source and generating more (this can take a few minutes)...")
                     res, info = await _deepen_holder(ws, session, holder, label, module, screen_name, job["text"])
                     if res is None:
                         skipped.append(info)
@@ -3154,18 +3192,40 @@ async def handle_refine(ws: WebSocket, session: dict, msg: dict):
         raise
     except asyncio.CancelledError:
         coverage_loop.set_extra_rounds(0)
-        raise
+        if not session.pop("refine_stop_requested", False):
+            raise                                   # a Terminate (or a shutdown), not the Stop button: behave as before
+        stopped = True
+        _me = asyncio.current_task()
+        if _me is not None:
+            _me.uncancel()                          # the Stop request is handled; the task carries on to send its reply
+        skipped.append("stopped by you - whatever was not finished was not applied")
+        if changed:
+            refine_engine.push_snapshot(session, holder, pre)
+        await send_log(ws, f"[{label}] stopped.", "muted")
     except Exception as e:
         logger.exception("refine failed for %s", label)
         if changed:
             refine_engine.push_snapshot(session, holder, pre)
         await send_error(ws, f"could not finish that request: {e}")
 
-    await send_artifacts(ws, session)
-    await ws.send_json({"type": "refine_done", "index": position, "changed": changed,
-                        "applied": applied, "skipped": skipped, "answers": answers,
-                        "can_undo": refine_engine.can_undo(session, holder)})
-    await send_status(ws, _review_phase(session))
+    try:
+        refine_engine.push_chat(session, label, text, refine_engine.result_summary(applied, skipped, answers))
+    except Exception:
+        logger.warning("could not remember this refine turn", exc_info=True)
+    try:
+        diff = refine_engine.diff_payload(pre, holder) if changed else {}
+    except Exception:
+        logger.warning("could not build the change diff", exc_info=True)
+        diff = {}
+
+    async def _finish():
+        await send_artifacts(ws, session)
+        await ws.send_json({"type": "refine_done", "index": position, "changed": changed,
+                            "applied": applied, "skipped": skipped, "answers": answers,
+                            "can_undo": refine_engine.can_undo(session, holder), "diff": diff, "stopped": stopped})
+        await send_status(ws, _review_phase(session))
+
+    await asyncio.shield(_finish())                 # a late Stop click must not leave the box waiting for its reply
 
 
 async def handle_refine_undo(ws: WebSocket, session: dict, msg: dict):
@@ -3823,6 +3883,12 @@ async def qc_session(websocket: WebSocket):
                     await send_error(websocket, "A run is already in progress for this session, so this request was ignored. Wait for it to finish or click Terminate.")
                 else:
                     session["current_task"] = asyncio.create_task(handle_refine(websocket, session, msg))
+
+            elif action == "refine_stop":
+                task = session.get("refine_task")
+                if task is not None and not task.done():
+                    session["refine_stop_requested"] = True
+                    task.cancel()
 
             elif action == "refine_undo":
                 if _session_job_active(session):

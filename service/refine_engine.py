@@ -11,22 +11,34 @@ The box accepts ANY request about the feature / script / test data of one screen
             in a thorough mode (app.py) and the new scenarios / data rows are MERGED INTO the existing files
             (merge_new_feature below). Nothing that already exists is thrown away.
   QUESTION  "what does this cover?", "which fields have no scenario?": answered in the box, files untouched.
+  SCRIPT    a change to the Cypress script itself ("change the selector of the Amount field", "add a wait before save").
+            The model returns exact find / replace operations; CODE checks every one (the text must exist once, the
+            result must still be valid JavaScript, the step checker must not get worse) before anything is applied.
+  CLARIFY   the request cannot be done without one missing detail: the box asks one short question, nothing is changed.
 
 Value changes, comment lines and pasted scenarios keep using service/append_editor.py (no model needed).
 Every function here is a pure helper or takes the model call as an argument, so it can be tested without a model.
 """
 from __future__ import annotations
 
+import asyncio
+import difflib
 import json
 import logging
 import re
+import shutil
+import subprocess
+import tempfile
 from dataclasses import dataclass, field
+from pathlib import Path
 
 from service import append_editor as ae
 
 logger = logging.getLogger(__name__)
 
 EDIT, DEEPEN, QUESTION = "EDIT", "DEEPEN", "QUESTION"
+SCRIPT, CLARIFY = "SCRIPT", "CLARIFY"
+_INTENTS = (EDIT, DEEPEN, QUESTION, SCRIPT, CLARIFY)
 FAST = "FAST"          # handled by service/append_editor.py without any model (value change, comment, pasted scenario)
 MAX_ROWS_PER_TABLE = 60
 _CONTEXT_FULL_LIMIT = 24000
@@ -46,6 +58,8 @@ _DEEPEN_RE = re.compile(
 _QUESTION_START_RE = re.compile(
     r"^\s*(?:what|which|why|how\s+many|how|does|do|is|are|can\s+you\s+(?:tell|explain|list|show)|explain|list|"
     r"tell\s+me|summari[sz]e|describe)\b", re.I)
+_SCRIPT_RE = re.compile(r"\b(?:script|cypress|step\s+definitions?|selectors?|locators?|cy\.\w+)\b|\.js\b", re.I)
+_FEATURE_WORDS_RE = re.compile(r"\b(?:scenarios?|rows?|examples?|test\s?data|test\s?cases?|coverage)\b", re.I)
 _DELETE_RE = re.compile(r"\b(?:remove|delete|drop|discard|get\s+rid|take\s+out|eliminate)\b", re.I)
 
 
@@ -60,6 +74,8 @@ def fallback_jobs(text: str) -> list[dict]:
         return [{"intent": QUESTION, "text": t}]
     if looks_like_deepen(t):
         return [{"intent": DEEPEN, "text": t}]
+    if _SCRIPT_RE.search(t) and not _FEATURE_WORDS_RE.search(t):
+        return [{"intent": SCRIPT, "text": t}]
     return [{"intent": EDIT, "text": t}]
 
 
@@ -76,18 +92,19 @@ def _json_obj(raw: str):
         return None
 
 
-async def route(text: str, route_fn=None) -> list[dict]:
-    """-> ordered jobs [{"intent": EDIT|DEEPEN|QUESTION, "text": "..."}]. Never raises, never returns an empty list.
-    EDIT / QUESTION jobs run first and DEEPEN last (so a deepen run builds on the edited files)."""
+async def route(text: str, route_fn=None, history: str = "") -> list[dict]:
+    """-> ordered jobs [{"intent": EDIT|SCRIPT|QUESTION|CLARIFY|DEEPEN, "text": "..."}]. Never raises, never returns an empty list.
+    EDIT jobs run first, then SCRIPT, then QUESTION / CLARIFY, and DEEPEN last (so a deepen run builds on the edited files).
+    `history` is the recent chat of this screen (see chat_text); the router uses it to understand "do the same for ..."."""
     t = (text or "").strip()
     jobs: list[dict] = []
     if route_fn is not None:
         try:
-            data = _json_obj(await route_fn(t))
+            data = _json_obj(await (route_fn(t, history) if history else route_fn(t)))
             for j in (data or {}).get("jobs") or []:
                 intent = str((j or {}).get("intent") or "").upper()
                 jtext = str((j or {}).get("text") or "").strip()
-                if intent in (EDIT, DEEPEN, QUESTION) and jtext:
+                if intent in _INTENTS and jtext:
                     jobs.append({"intent": intent, "text": jtext})
         except Exception:  # noqa: BLE001
             logger.warning("refine router failed - using the keyword fallback", exc_info=True)
@@ -96,7 +113,7 @@ async def route(text: str, route_fn=None) -> list[dict]:
     # a deepen wish the model missed (e.g. "not satisfied") must never be lost
     if looks_like_deepen(t) and not any(j["intent"] == DEEPEN for j in jobs) and not t.endswith("?"):
         jobs.append({"intent": DEEPEN, "text": t})
-    order = {EDIT: 0, QUESTION: 1, DEEPEN: 2}
+    order = {EDIT: 0, SCRIPT: 1, QUESTION: 2, CLARIFY: 2, DEEPEN: 3}
     return sorted(jobs, key=lambda j: order[j["intent"]])
 
 
@@ -452,3 +469,329 @@ async def merge_new_feature(res: ae.ApplyResult, new_feature: str, define_fn=Non
         else:
             stats["skipped"].append(f'new scenario "{spec.title[:50]}" not added: {msg[:140]}')
     return stats
+
+# ---------------------------------------------------------------------------
+# 6) chat memory of the box (kept in the session, per screen) - lets "do the same for Quantity" work
+# ---------------------------------------------------------------------------
+_CHAT_KEEP = 12
+
+
+def result_summary(applied: list[str], skipped: list[str], answers: list[str]) -> str:
+    """One short line describing what a message led to (stored as the 'result' of that chat turn)."""
+    bits: list[str] = []
+    if applied:
+        bits.append("changed: " + "; ".join(a[:140] for a in applied[:4]))
+    if skipped:
+        bits.append("could not do: " + "; ".join(a[:140] for a in skipped[:3]))
+    if answers:
+        bits.append("replied: " + answers[0][:240])
+    return " | ".join(bits) or "nothing was changed"
+
+
+def push_chat(session: dict, key: str, user_text: str, result: str) -> None:
+    turns = session.setdefault("refine_chat", {}).setdefault(key, [])
+    turns.append({"user": (user_text or "").strip()[:500], "result": (result or "").strip()[:500]})
+    del turns[:-_CHAT_KEEP]
+
+
+def chat_text(session: dict, key: str, turns: int = 6) -> str:
+    """The last few turns of this screen's box as plain text ('' when there are none)."""
+    rows = ((session.get("refine_chat") or {}).get(key) or [])[-turns:]
+    return "\n".join(f"USER: {r['user']}\nRESULT: {r['result']}" for r in rows)
+
+
+# ---------------------------------------------------------------------------
+# 7) what the answering model sees (questions): the real file text, not only the overview
+# ---------------------------------------------------------------------------
+_ANSWER_FEATURE_LIMIT = 30000
+_ANSWER_SCRIPT_LIMIT = 14000
+
+
+def answer_context(feature: str, script: str, question: str) -> dict:
+    """{"overview", "feature", "script", "fields", "messages"} - all plain text. The complete feature / script when they
+    are small enough, otherwise the parts that look related to the question."""
+    ctx = edit_context(feature, script, question)
+    fe = ctx["text"] if len(ctx["text"]) <= _ANSWER_FEATURE_LIMIT else ctx["text"][:_ANSWER_FEATURE_LIMIT]
+    sc = script_context(script, question, _ANSWER_SCRIPT_LIMIT)["text"]
+    fields = "\n".join(f"- {n}: {h}" for n, h in (ctx.get("fields") or {}).items())
+    messages = "\n".join(f"- {m}" for m in (ctx.get("messages") or []))
+    return {"overview": overview(feature, script), "feature": fe, "script": sc, "fields": fields, "messages": messages}
+
+
+# ---------------------------------------------------------------------------
+# 8) script edit: the model returns exact find / replace operations, code checks and applies them
+# ---------------------------------------------------------------------------
+_SCRIPT_FULL_LIMIT = 28000
+MAX_SCRIPT_OPS = 12
+_STEP_DEF_RE = re.compile(r"^\s*(?:Given|When|Then|And|But)\s*\(", re.M)
+_FEATURE_STEP_RE = re.compile(r"^\s*(?:Given|When|Then|And|But)\s+(.+?)\s*$")
+
+
+def feature_steps(feature: str, limit: int = 80) -> list[str]:
+    """Every distinct step sentence the feature uses (the script has to keep defining all of them)."""
+    seen: dict[str, None] = {}
+    for line in (feature or "").replace("\r\n", "\n").split("\n"):
+        m = _FEATURE_STEP_RE.match(line)
+        if m:
+            seen.setdefault(m.group(1), None)
+    return list(seen)[:limit]
+
+
+def script_context(script: str, instruction: str, limit: int = _SCRIPT_FULL_LIMIT) -> dict:
+    """The whole script when it is small, else its first lines plus the blocks that look related to the request."""
+    text = (script or "").replace("\r\n", "\n")
+    if len(text) <= limit:
+        return {"text": text, "note": "the complete script"}
+    blocks = [b for b in re.split(r"\n\s*\n", text) if b.strip()]
+    head = "\n".join(text.split("\n")[:40])
+    want = _words(instruction)
+    order = sorted(range(len(blocks)), key=lambda i: -len(want & _words(blocks[i])))
+    keep: list[int] = []
+    size = len(head)
+    for i in order:
+        if size + len(blocks[i]) > limit:
+            continue
+        keep.append(i)
+        size += len(blocks[i])
+        if len(keep) >= 12:
+            break
+    shown = head + "\n\n// ... (parts of the script that look unrelated are left out) ...\n\n" + "\n\n".join(blocks[i] for i in sorted(keep))
+    return {"text": shown[:limit], "note": "the start of the script and the blocks most related to the request (the script has more)"}
+
+
+@dataclass
+class ScriptOp:
+    op: str
+    find: str = ""
+    text: str = ""
+
+
+def parse_script_ops(raw: str) -> tuple[str, list[ScriptOp], str]:
+    """-> (summary, ops, problem). `problem` is set when the answer cannot be used at all."""
+    t = (raw or "").strip()
+    if t.upper().startswith("ERROR:"):
+        return "", [], t[6:].strip()[:300] or "the model could not do this"
+    data = _json_obj(t)
+    if not isinstance(data, dict):
+        return "", [], "the answer was not valid JSON - answer with ONLY the JSON object"
+    ops: list[ScriptOp] = []
+    for o in data.get("operations") or []:
+        if not isinstance(o, dict):
+            continue
+        kind = str(o.get("op") or "").lower()
+        if kind not in ("replace", "insert_after", "insert_before", "append"):
+            continue
+        new = o["replace"] if "replace" in o else o.get("text", "")
+        ops.append(ScriptOp(kind, str(o.get("find") or "").strip("\n"), str(new if new is not None else "").strip("\n")))
+    if not ops:
+        return str(data.get("summary") or ""), [], str(data.get("reason") or "no operations were returned")
+    return str(data.get("summary") or ""), ops, ""
+
+
+def _apply_script_op(script: str, op: ScriptOp, allow_delete: bool) -> tuple[str, str, str]:
+    """-> (new_script, 'ok' | 'skip', message). The anchor text must exist exactly once."""
+    if op.op == "append":
+        if not op.text.strip():
+            return script, "skip", "append needs the text to add"
+        n = len(op.text.split("\n"))
+        return script.rstrip("\n") + "\n\n" + op.text + "\n", "ok", f"{n} line(s) added at the end of the script"
+    find = op.find
+    if not find.strip():
+        return script, "skip", f"{op.op} needs `find` = exact text that already exists in the script"
+    text = op.text
+    chosen = None
+    for cand in ([find] + ([find.strip()] if find.strip() != find else [])):
+        if script.count(cand) >= 1:
+            chosen = cand
+            break
+    if chosen is None:
+        return script, "skip", ("the `find` text was not found in the script - copy it exactly, character for character, "
+                                f"from THE SCRIPT shown (first line: {find.split(chr(10))[0][:80]!r})")
+    if script.count(chosen) > 1:
+        return script, "skip", (f"the `find` text appears {script.count(chosen)} times - include more of the surrounding "
+                                f"lines so it matches exactly one place (first line: {chosen.split(chr(10))[0][:80]!r})")
+    if chosen is not find:
+        text = text.strip()
+    i = script.index(chosen)
+    if op.op == "replace":
+        if not allow_delete and len(_STEP_DEF_RE.findall(chosen)) > len(_STEP_DEF_RE.findall(text)):
+            return script, "skip", "this removes a step definition - only do that when the user clearly asks to remove / delete it"
+        new = script[:i] + text + script[i + len(chosen):]
+        return new, "ok", f"script block changed ({len(chosen.split(chr(10)))} -> {len(text.split(chr(10)))} line(s))"
+    if not text.strip():
+        return script, "skip", f"{op.op} needs the text to insert"
+    n = len(text.split("\n"))
+    if op.op == "insert_after":
+        end = i + len(chosen)
+        nl = script.find("\n", end)
+        end = len(script) if nl < 0 else nl
+        return script[:end] + "\n" + text + script[end:], "ok", f"{n} line(s) added to the script"
+    start = script.rfind("\n", 0, i) + 1                      # insert_before: at the start of the anchor's line
+    return script[:start] + text + "\n" + script[start:], "ok", f"{n} line(s) added to the script"
+
+
+def _bracket_balance(src: str) -> tuple[int, int, int]:
+    """Net count of ( [ { outside strings / comments (only used when node is not available; compared before vs after)."""
+    out = {"(": 0, "[": 0, "{": 0}
+    close = {")": "(", "]": "[", "}": "{"}
+    i, n = 0, len(src)
+    while i < n:
+        c = src[i]
+        if c in "\"'`":
+            j = i + 1
+            while j < n and src[j] != c:
+                if src[j] == "\\":
+                    j += 1
+                elif src[j] == "\n" and c != "`":
+                    break
+                j += 1
+            i = j + 1
+            continue
+        if src.startswith("//", i):
+            j = src.find("\n", i)
+            i = n if j < 0 else j
+            continue
+        if src.startswith("/*", i):
+            j = src.find("*/", i + 2)
+            i = n if j < 0 else j + 2
+            continue
+        if c in out:
+            out[c] += 1
+        elif c in close:
+            out[close[c]] -= 1
+        i += 1
+    return out["("], out["["], out["{"]
+
+
+def js_syntax_error(src: str) -> str | None:
+    """None when the script parses (or when no way to check exists). Uses `node --check` when node is installed."""
+    node = shutil.which("node")
+    if not node:
+        return None
+    try:
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "check.mjs"
+            p.write_text(src, encoding="utf-8")
+            r = subprocess.run([node, "--check", str(p)], capture_output=True, text=True, timeout=20)
+    except Exception:  # noqa: BLE001
+        return None
+    if r.returncode == 0:
+        return None
+    lines = [l.strip() for l in (r.stderr or "").splitlines() if l.strip()]
+    pick = next((l for l in lines if "SyntaxError" in l), lines[-1] if lines else "invalid JavaScript")
+    return "JavaScript syntax error: " + pick[:200]
+
+
+async def _script_problem(feature: str, old: str, new: str, syntax_check=None) -> str:
+    """'' when the edited script is acceptable, else a plain reason (sent back to the model)."""
+    if not new.strip():
+        return "the script would be empty"
+    check = syntax_check or js_syntax_error
+    old_err = await asyncio.to_thread(check, old)
+    if old_err is None:                                   # only judge syntax when the original script was valid
+        new_err = await asyncio.to_thread(check, new)
+        if new_err:
+            return new_err
+        if shutil.which("node") is None and _bracket_balance(new) != _bracket_balance(old):
+            return "the brackets / braces no longer balance"
+    before, after = ae._critical(feature, old), ae._critical(feature, new)
+    if before is not None and after is not None and after > before:
+        detail = ""
+        try:
+            fresh = [f for f in ae.step_checker.check_steps(feature, new) if f.severity == ae.step_checker.CRITICAL]
+            old_keys = {(f.kind, f.detail) for f in ae.step_checker.check_steps(feature, old)}
+            fresh = [f for f in fresh if (f.kind, f.detail) not in old_keys][:3]
+            detail = " (" + "; ".join(f"{f.kind}: {f.detail[:70]}" for f in fresh) + ")" if fresh else ""
+        except Exception:  # noqa: BLE001
+            pass
+        return f"the step checker found {after - before} new problem(s) after the change{detail} - every step the feature uses must stay defined"
+    return ""
+
+
+async def freeform_script_edit(feature: str, script: str, instruction: str, edit_fn, syntax_check=None,
+                               max_attempts: int = 3) -> ae.ApplyResult:
+    """edit_fn(instruction, context, previous_error) -> raw model text (JSON). All operations of one answer are applied
+    together and then checked as a whole (syntax + step checker); if anything fails the whole answer is rejected, the
+    exact reason goes back to the model (up to max_attempts) and the script stays untouched until an answer passes."""
+    res = ae.ApplyResult(feature, script)
+    allow_delete = bool(_DELETE_RE.search(instruction))
+    steps = feature_steps(feature)
+    err = ""
+    failed: list[str] = []
+    for _attempt in range(max_attempts):
+        ctx = script_context(res.script, instruction)
+        ctx["steps"] = steps
+        res.model_calls += 1
+        try:
+            raw = await edit_fn(instruction, ctx, err)
+        except Exception as e:  # noqa: BLE001
+            failed = [f"the model call failed ({type(e).__name__})"]
+            break
+        _summary, ops, problem = parse_script_ops(raw)
+        if problem:
+            failed = [problem]
+            err = problem
+            if "valid JSON" in problem or "no operations" in problem:
+                continue
+            break                                         # the model said it cannot do this - do not retry
+        failed = []
+        working = res.script
+        done: list[str] = []
+        for op in ops[:MAX_SCRIPT_OPS]:
+            try:
+                working2, kind, msg = _apply_script_op(working, op, allow_delete)
+            except Exception as e:  # noqa: BLE001
+                logger.exception("script op crashed")
+                working2, kind, msg = working, "skip", f"unexpected problem ({type(e).__name__}: {e})"
+            if kind == "ok":
+                working = working2
+                done.append(msg)
+            else:
+                failed.append(f'{op.op} "{(op.find or op.text).split(chr(10))[0][:50]}": {msg}')
+        if done and working != res.script:
+            why = await _script_problem(res.feature, res.script, working, syntax_check)
+            if why:
+                failed.append(f"the edited script was rejected: {why}")
+                done = []
+            else:
+                res.script = working
+                res.applied += [f"script: {m}" for m in done]
+        if not failed:
+            break
+        err = ("These script operations were rejected:\n- " + "\n- ".join(failed)
+               + ("\nNo change was applied from your last answer. Fix the problems and answer again with the same JSON format."
+                  if not done else
+                  "\nThe operations that passed are already applied to the script you now see. Fix ONLY the rejected ones."))
+    res.skipped += failed
+    return res
+
+
+# ---------------------------------------------------------------------------
+# 9) "what changed" - a compact unified diff of each file for the box
+# ---------------------------------------------------------------------------
+def make_diff(old: str, new: str, context: int = 2, max_lines: int = 400) -> list[str]:
+    a = (old or "").replace("\r\n", "\n").split("\n")
+    b = (new or "").replace("\r\n", "\n").split("\n")
+    if a == b:
+        return []
+    out: list[str] = []
+    for line in difflib.unified_diff(a, b, lineterm="", n=context):
+        if line.startswith("---") or line.startswith("+++"):
+            continue
+        out.append(line[:300])
+        if len(out) >= max_lines:
+            out.append("... (more changes are not shown)")
+            break
+    return out
+
+
+def diff_payload(before: dict, holder: dict) -> dict:
+    """{"feature": [...], "script": [...]} - only the files that really changed."""
+    d: dict[str, list[str]] = {}
+    f = make_diff(before.get("feature") or "", holder.get("feature") or "")
+    s = make_diff(before.get("script") or "", holder.get("script") or "")
+    if f:
+        d["feature"] = f
+    if s:
+        d["script"] = s
+    return d
