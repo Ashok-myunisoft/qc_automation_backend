@@ -52,6 +52,18 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI()
 
+
+@app.on_event("startup")
+async def _prewarm_source_catalog():
+    """Read the source repo tree in the background as soon as the server starts, so the first Generate
+    does not have to wait for it (it is cached afterwards)."""
+    async def _go():
+        try:
+            await repo_catalog.get_source_catalog_async(_source_gitlab_service, False)
+        except Exception as e:
+            logger.warning("could not pre-load the source module list: %s", e)
+    asyncio.create_task(_go())
+
 # The history screen fetches these endpoints over HTTP rather than the
 # existing WebSocket. The UI can be hosted from any origin.
 app.add_middleware(
@@ -82,8 +94,17 @@ def _gitlab_service() -> GitLabService:
     return GitLabService()
 
 
+_source_gitlab_instance: GitLabService | None = None
+
+
 def _source_gitlab_service() -> GitLabService:
-    return GitLabService(env_prefix="SOURCE_GITLAB")
+    # ONE shared instance: the source repo is big (a full tree read takes minutes), and every new
+    # GitLabService starts with an empty tree cache. Sharing it means the module list, Generate and
+    # Auto generate all reuse the same tree for an hour (the Refresh button on the list forces a re-read).
+    global _source_gitlab_instance
+    if _source_gitlab_instance is None:
+        _source_gitlab_instance = GitLabService(env_prefix="SOURCE_GITLAB")
+    return _source_gitlab_instance
 
 
 _backend_gitlab_instance: GitLabService | None = None  # mmfix

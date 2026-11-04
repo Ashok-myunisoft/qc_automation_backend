@@ -2,6 +2,7 @@ import base64
 import logging
 import os
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 import gitlab
 from dotenv import load_dotenv
@@ -22,6 +23,8 @@ TREE_CACHE_SECONDS = 3600  # 1 hour
 # of failing the whole Generate/Fetch over one bad page.
 TREE_FETCH_RETRIES = 3
 TREE_FETCH_BACKOFF_SECONDS = 2  # doubles each retry: 2s, 4s
+TREE_PARALLEL_PAGES = 8         # pages requested at once by the parallel tree read
+TREE_MAX_PAGES = 5000           # safety stop for the parallel read (500,000 entries)
 
 
 class GitLabService:
@@ -99,7 +102,41 @@ class GitLabService:
                     time.sleep(wait)
         raise last_error
 
-    def get_repo_tree(self, force_refresh: bool = False) -> list[str]:
+    def _fetch_tree_parallel(self) -> list[dict]:
+        """Same listing as _fetch_tree_with_retry, but several pages are requested at once.
+        The sequential walk is one HTTP round-trip after another (70+ for a 7000-file repo), which is
+        what makes the big source repo take minutes; here TREE_PARALLEL_PAGES pages are in flight together."""
+        per_page = 100
+
+        def get_page(n: int) -> list[dict]:
+            last: Exception | None = None
+            for attempt in range(1, TREE_FETCH_RETRIES + 1):
+                try:
+                    return self._project.repository_tree(
+                        recursive=True, ref=self._branch, per_page=per_page, page=n
+                    )
+                except gitlab.exceptions.GitlabGetError as e:
+                    last = e
+                    if attempt < TREE_FETCH_RETRIES:
+                        time.sleep(TREE_FETCH_BACKOFF_SECONDS * (2 ** (attempt - 1)))
+            raise last
+
+        items: dict[str, dict] = {}
+        page = 1
+        with ThreadPoolExecutor(max_workers=TREE_PARALLEL_PAGES) as pool:
+            while page <= TREE_MAX_PAGES:
+                batch = list(pool.map(get_page, range(page, page + TREE_PARALLEL_PAGES)))
+                for rows in batch:
+                    for it in rows:
+                        items[it["path"] + "|" + it["type"]] = it
+                if any(len(rows) < per_page for rows in batch):   # a short page is the last one
+                    break
+                page += TREE_PARALLEL_PAGES
+        return list(items.values())
+
+    def get_repo_tree(self, force_refresh: bool = False, parallel: bool | None = None) -> list[str]:
+        """parallel=None: on for the source repo (SOURCE_GITLAB), off for the others. If the parallel read
+        fails for any reason it falls back to the sequential one, so it can only be faster, never worse."""
         now = time.time()
         if (
             not force_refresh
@@ -108,7 +145,19 @@ class GitLabService:
         ):
             return self._tree_cache
 
-        items = self._fetch_tree_with_retry()
+        if parallel is None:
+            parallel = self._env_prefix == "SOURCE_GITLAB"
+        started = time.time()
+        items = None
+        if parallel:
+            try:
+                items = self._fetch_tree_parallel()
+            except Exception as e:
+                logger.warning("%s: parallel tree read failed (%s) - falling back to the sequential read", self._env_prefix, e)
+        if items is None:
+            items = self._fetch_tree_with_retry()
+        logger.info("%s: read the repo tree (%d entries) in %.1fs%s", self._env_prefix, len(items), time.time() - started,
+                    " [parallel]" if parallel and items is not None else "")
         paths = [item["path"] for item in items if item["type"] == "blob"]
 
         self._tree_cache = paths

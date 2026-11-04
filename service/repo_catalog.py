@@ -213,7 +213,7 @@ def get_source_catalog(gl_factory: Callable, force: bool = False) -> dict:
         if not force and _source_cache["data"] is not None and now - _source_cache["at"] < CACHE_SECONDS:
             return {**_source_cache["data"], "cached": True}
         gl = gl_factory()
-        tree = gl.get_repo_tree(force_refresh=True)
+        tree = gl.get_repo_tree(force_refresh=force)   # the shared source instance keeps its tree for an hour
         qc_data = _cache["data"]                   # only reuse the QC names if that list is already cached
         data = {
             "modules": build_source_catalog(tree, qc_data["modules"] if qc_data else None),
