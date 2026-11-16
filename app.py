@@ -11,6 +11,9 @@ from pathlib import Path
 import logger_config
 from fastapi import FastAPI, HTTPException, Response, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from service.auth_service import install_auth, ws_user
+from service.discussion_service import router as discussion_router
+from service.issue_service import router as issues_router
 from service.gitlab_service import GitLabService
 from service.backend_context import (
     is_mm_module, fetch_mm_source_context, fetch_backend_context, MM_MAX_SOURCE_CHARS,
@@ -63,6 +66,11 @@ async def _prewarm_source_catalog():
         except Exception as e:
             logger.warning("could not pre-load the source module list: %s", e)
     asyncio.create_task(_go())
+
+# QC login (ERP user check + token). Must be added BEFORE the CORS middleware below.
+install_auth(app)
+app.include_router(discussion_router)   # per-screen discussion (chat)
+app.include_router(issues_router)       # issues raised to the QC team
 
 # The history screen fetches these endpoints over HTTP rather than the
 # existing WebSocket. The UI can be hosted from any origin.
@@ -3744,6 +3752,7 @@ def _new_session() -> dict:
         "job": None,
         "test_env": None,
         "ws": None,
+        "user": None,
         "last_seen": time.monotonic(),
     }
 
@@ -3783,11 +3792,18 @@ def _ensure_loop_monitor() -> None:
 @app.websocket("/ws/qc")
 async def qc_session(websocket: WebSocket):
     await websocket.accept()
+    user = ws_user(websocket)
+    if user is None:
+        await websocket.close(code=4401)   # not logged in
+        return
     _ensure_loop_monitor()
     _prune_sessions()
 
     cid = (websocket.query_params.get("cid") or "").strip()[:64]
     session = _SESSIONS.get(cid) if cid else None
+    # a session belongs to one person - nobody can take over someone else's session id
+    if session is not None and (session.get("user") or {}).get("userCode") != user["userCode"]:
+        session = None
     fresh = session is None
     if session is None:
         session = _new_session()
@@ -3803,6 +3819,7 @@ async def qc_session(websocket: WebSocket):
             except Exception:
                 pass
     session["ws"] = websocket
+    session["user"] = user
     session["last_seen"] = time.monotonic()
 
     job = session.get("job")

@@ -8,3 +8,5 @@ python-gitlab
 pymssql==2.3.13
 openpyxl==3.1.5
 psycopg2-binary
+PyJWT
+requests
