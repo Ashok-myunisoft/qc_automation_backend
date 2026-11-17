@@ -1,9 +1,12 @@
 import asyncio
+import atexit
 import json
+import logging
 import os
 import queue
 import re
 import shutil
+import signal
 import subprocess
 import threading
 from datetime import datetime
@@ -33,6 +36,141 @@ _ANSI_RE = re.compile(r'\x1b\[[0-9;]*m')
  
 class CypressRunError(Exception):
     pass
+
+logger = logging.getLogger(__name__)
+
+
+def _int_env(name: str, default: int) -> int:
+    try:
+        return int(os.getenv(name, str(default)).strip())
+    except ValueError:
+        return default
+
+
+# --------------------------------------------------------------------------
+# Limits (all can be changed in .env, nothing needs to be set for the defaults)
+# --------------------------------------------------------------------------
+# A single Cypress run that takes longer than this is stopped (its browser too). 0 = no limit.
+CYPRESS_RUN_TIMEOUT_SECONDS = max(0, _int_env("CYPRESS_RUN_TIMEOUT_MINUTES", 60)) * 60
+# How many Cypress processes may run at the same moment (test runs AND the data-cy scan share this).
+MAX_CONCURRENT_CYPRESS = max(1, _int_env("MAX_CONCURRENT_CYPRESS", _int_env("MAX_CONCURRENT_RUNS", 1)))
+# If Cypress itself has exited but something it started still keeps the output open, clean it up after this.
+_STRAY_GRACE_SECONDS = 10
+_TICK_SECONDS = 1.0
+
+_slot = threading.BoundedSemaphore(MAX_CONCURRENT_CYPRESS)
+
+
+def acquire_slot_blocking(timeout: float) -> bool:
+    """For code that runs in a thread (the data-cy scan). True = you now hold the Cypress slot."""
+    return _slot.acquire(timeout=timeout)
+
+
+def release_slot() -> None:
+    try:
+        _slot.release()
+    except ValueError:
+        pass
+
+
+# --------------------------------------------------------------------------
+# Killing a whole Cypress run (npx -> node -> Cypress -> Electron/Chrome ...)
+# --------------------------------------------------------------------------
+_LIVE: set = set()
+_LIVE_LOCK = threading.Lock()
+
+
+def kill_process_tree(proc) -> None:
+    """Stops `proc` AND everything it started. proc.kill() alone only stops npx and leaves the
+    browser running. Safe to call more than once and on a process that is already gone."""
+    if proc is None:
+        return
+    try:
+        if os.name == "nt":
+            if proc.poll() is not None:
+                return          # Windows reuses process ids quickly - never taskkill a finished one
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                           capture_output=True, timeout=15)
+        else:
+            # The run was started in its own process group (group id == proc.pid), so this
+            # reaches every child even if npx itself is already gone.
+            os.killpg(proc.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    except Exception:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+
+
+def kill_all_live() -> None:
+    """Server is stopping: do not leave any Cypress / browser behind."""
+    with _LIVE_LOCK:
+        procs = list(_LIVE)
+    for p in procs:
+        kill_process_tree(p)
+
+
+atexit.register(kill_all_live)
+
+
+# --------------------------------------------------------------------------
+# Process counting (for the logs only - this never changes behaviour)
+# --------------------------------------------------------------------------
+def process_snapshot() -> dict:
+    """{'total': all processes on this machine/container, 'cypress': Cypress/Electron related ones,
+    'zombies': finished processes nobody has collected}. Any value may be None if it can't be read."""
+    snap = {"total": None, "cypress": None, "zombies": None}
+    try:
+        if os.name == "nt":
+            out = subprocess.run(["tasklist", "/FO", "CSV", "/NH"], capture_output=True,
+                                 text=True, timeout=15).stdout
+            names = [ln.split('","')[0].strip('"').lower() for ln in out.splitlines() if ln.strip()]
+            snap["total"] = len(names)
+            snap["cypress"] = sum(1 for n in names if n == "cypress.exe")
+        elif os.path.isdir("/proc"):
+            total = cy = zombies = 0
+            me = str(os.getpid())
+            for entry in os.listdir("/proc"):
+                if not entry.isdigit():
+                    continue
+                total += 1
+                try:
+                    with open(f"/proc/{entry}/stat", "rb") as fh:
+                        stat = fh.read(2048).decode("utf-8", "replace")
+                    if stat.rsplit(")", 1)[-1].strip()[:1] == "Z":
+                        zombies += 1
+                        continue
+                    if entry == me:
+                        continue
+                    with open(f"/proc/{entry}/cmdline", "rb") as fh:
+                        cmd = fh.read(4096).replace(b"\0", b" ").decode("utf-8", "replace").lower()
+                    if "cypress" in cmd:
+                        cy += 1
+                except OSError:
+                    continue
+            snap.update(total=total, cypress=cy, zombies=zombies)
+    except Exception:
+        pass
+    return snap
+
+
+class _LoopQueue:
+    """Hands lines from the reader thread to the event loop without parking a worker thread."""
+
+    def __init__(self, loop):
+        self._loop = loop
+        self._q: asyncio.Queue = asyncio.Queue()
+
+    def put(self, item) -> None:          # called from the reader thread
+        try:
+            self._loop.call_soon_threadsafe(self._q.put_nowait, item)
+        except RuntimeError:
+            pass                           # event loop already closed (server stopping)
+
+    async def get(self):
+        return await self._q.get()
  
 def _ensure_workspace() -> None:
     if not _WORKSPACE.exists():
@@ -171,61 +309,111 @@ async def run_cypress(session: dict, feature_content: str, script_content: str, 
                        fixtures: dict | None=None, test_env: dict | None=None):
     _ensure_workspace()
     _ensure_npm_installed()
-    if fixtures:
-        fixtures_dir = _WORKSPACE / 'cypress' / 'fixtures'
-        fixtures_dir.mkdir(parents=True, exist_ok=True)
-        for filename, content in fixtures.items():
-            (fixtures_dir / filename).write_text(content, encoding='utf-8')
+
+    # Only MAX_CONCURRENT_CYPRESS Cypress processes at a time (shared with the data-cy scan).
+    if not _slot.acquire(blocking=False):
+        yield ('log', 'waiting for another Cypress run or scan to finish...', 'secondary')
+        while not _slot.acquire(blocking=False):
+            await asyncio.sleep(0.25)
+
     run_dir = _RUNS_DIR / slug
-    if run_dir.exists():
-        shutil.rmtree(run_dir, ignore_errors=True)
-    run_dir.mkdir(parents=True, exist_ok=True)
-    feature_file = run_dir / f'{slug}.feature'
-    script_file = run_dir / f'{slug}.js'
-    feature_file.write_text(feature_content, encoding='utf-8')
-    script_file.write_text(script_content, encoding='utf-8')
-    spec_path = str(feature_file.relative_to(_WORKSPACE)).replace('\\', '/')
-    out_queue: 'queue.Queue' = queue.Queue()
-    started_at = datetime.utcnow().isoformat() + 'Z'
-    cmd = [_NPX, 'cypress', 'run', '--spec', spec_path] + _build_env_overrides(test_env)
-    # Ask Cypress/Node not to emit ANSI color codes at all — belt-and-braces
-    # with the _ANSI_RE stripping in _stream_process above, since which
-    # environment variable(s) an underlying tool actually respects can vary.
-    proc_env = {**os.environ, 'FORCE_COLOR': '0', 'NO_COLOR': '1'}
+    proc = None
+    reader_thread = None
+    getter = None
     try:
-        proc = subprocess.Popen(cmd, cwd=str(_WORKSPACE), stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding='utf-8', errors='replace', bufsize=1, env=proc_env)
-    except FileNotFoundError as e:
-        shutil.rmtree(run_dir, ignore_errors=True)
-        raise CypressRunError(f"couldn't launch npx ({e}) — is Node.js/npm installed and on PATH for the account running this backend?")
-    session['process'] = proc
-    reader_thread = threading.Thread(target=_stream_process, args=(proc, out_queue), daemon=True)
-    reader_thread.start()
-    loop = asyncio.get_event_loop()
-    returncode: int | None = None
-    try:
+        if fixtures:
+            fixtures_dir = _WORKSPACE / 'cypress' / 'fixtures'
+            fixtures_dir.mkdir(parents=True, exist_ok=True)
+            for filename, content in fixtures.items():
+                (fixtures_dir / filename).write_text(content, encoding='utf-8')
+        if run_dir.exists():
+            shutil.rmtree(run_dir, ignore_errors=True)
+        run_dir.mkdir(parents=True, exist_ok=True)
+        feature_file = run_dir / f'{slug}.feature'
+        script_file = run_dir / f'{slug}.js'
+        feature_file.write_text(feature_content, encoding='utf-8')
+        script_file.write_text(script_content, encoding='utf-8')
+        spec_path = str(feature_file.relative_to(_WORKSPACE)).replace('\\', '/')
+        loop = asyncio.get_running_loop()
+        aq = _LoopQueue(loop)
+        started_at = datetime.utcnow().isoformat() + 'Z'
+        cmd = [_NPX, 'cypress', 'run', '--spec', spec_path] + _build_env_overrides(test_env)
+        # Ask Cypress/Node not to emit ANSI color codes at all - belt-and-braces
+        # with the _ANSI_RE stripping in _stream_process above, since which
+        # environment variable(s) an underlying tool actually respects can vary.
+        proc_env = {**os.environ, 'FORCE_COLOR': '0', 'NO_COLOR': '1'}
+        popen_kwargs = dict(cwd=str(_WORKSPACE), stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                            encoding='utf-8', errors='replace', bufsize=1, env=proc_env)
+        if os.name != 'nt':
+            # Own process group, so the whole run (npx, node, Cypress, the browser) can be stopped together.
+            popen_kwargs['start_new_session'] = True
+        try:
+            proc = subprocess.Popen(cmd, **popen_kwargs)
+        except FileNotFoundError as e:
+            raise CypressRunError(f"couldn't launch npx ({e}) - is Node.js/npm installed and on PATH for the account running this backend?")
+        with _LIVE_LOCK:
+            _LIVE.add(proc)
+        session['process'] = proc
+        reader_thread = threading.Thread(target=_stream_process, args=(proc, aq), daemon=True)
+        reader_thread.start()
+
+        deadline = (loop.time() + CYPRESS_RUN_TIMEOUT_SECONDS) if CYPRESS_RUN_TIMEOUT_SECONDS else None
+        leader_gone_at = None
+        swept = False
+        timed_out = False
+        returncode: int | None = None
         while True:
-            kind, payload = await loop.run_in_executor(None, out_queue.get)
-            if kind == 'log':
-                yield ('log', payload, _cypress_tone(payload))
-            else:
+            if getter is None:
+                getter = asyncio.ensure_future(aq.get())
+            done, _ = await asyncio.wait({getter}, timeout=_TICK_SECONDS)
+            if done:
+                kind, payload = getter.result()
+                getter = None
+                if kind == 'log':
+                    yield ('log', payload, _cypress_tone(payload))
+                    continue
                 returncode = payload
+                # Cypress has finished: make sure no browser / helper it started is left running.
+                kill_process_tree(proc)
                 yield ('exit', returncode, None)
                 break
+            now = loop.time()
+            if deadline is not None and now >= deadline:
+                timed_out = True
+                yield ('log', f'this run took longer than {CYPRESS_RUN_TIMEOUT_SECONDS // 60} minute(s) - stopping Cypress and its browser.', 'danger')
+                kill_process_tree(proc)
+                returncode = 124
+                yield ('exit', returncode, None)
+                break
+            if proc.poll() is not None and not swept:
+                # Cypress is gone but its output is still held open by something it left behind.
+                leader_gone_at = leader_gone_at if leader_gone_at is not None else now
+                if now - leader_gone_at >= _STRAY_GRACE_SECONDS:
+                    swept = True
+                    kill_process_tree(proc)
+
         # File reads / screenshot copying / parsing: off the event loop, so the WebSocket keeps
         # answering its keepalive pings while a big run is being summarised.
-        mocha = await asyncio.to_thread(_read_latest_mochawesome)
+        # A run that was stopped for taking too long has no trustworthy report (it could be an older run's).
+        mocha = None if timed_out else await asyncio.to_thread(_read_latest_mochawesome)
         screenshots = await asyncio.to_thread(_stash_screenshots, slug)
         summary = await asyncio.to_thread(_summarize_run, mocha, returncode, slug, screenshots)
         summary['started_at'] = started_at
         summary['feature_text'] = feature_content
         yield ('result', summary, None)
     except asyncio.CancelledError:
-        try:
-            proc.kill()
-        except Exception:
-            pass
+        kill_process_tree(proc)
         raise
     finally:
+        if getter is not None and not getter.done():
+            getter.cancel()
         session['process'] = None
-        reader_thread.join(timeout=2)
+        if proc is not None:
+            if proc.poll() is None:
+                kill_process_tree(proc)      # whatever got us here, never leave it running
+            with _LIVE_LOCK:
+                _LIVE.discard(proc)
+        if reader_thread is not None:
+            reader_thread.join(timeout=2)
         shutil.rmtree(run_dir, ignore_errors=True)
+        release_slot()

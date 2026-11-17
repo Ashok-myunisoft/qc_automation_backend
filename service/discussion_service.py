@@ -8,8 +8,8 @@ Tables (created automatically in the same PostgreSQL database as History - HISTO
     discussion_messages   one row per message (a deleted message stays as a row for the record, but it is never shown or sent out again)
     discussion_reactions  one row per (message, person, emoji)
 
-Admins = people whose ERP account is an admin, plus the user codes listed in .env:
-    QC_ADMINS=E574,E101
+Admins = people whose ERP account is an admin, the user codes listed in .env (QC_ADMINS / QC_TEAM) and the
+people added on the Admin screen - see roles_service.py.
 """
 import logging
 import os
@@ -20,6 +20,7 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
 from service.auth_service import request_user
+from service.roles_service import user_is_admin
 from service.store_db import connection as _connection
 
 logger = logging.getLogger(__name__)
@@ -88,8 +89,7 @@ def _iso(value) -> str | None:
 
 
 def is_admin(user: dict) -> bool:
-    admins = {c.strip().lower() for c in (os.getenv("QC_ADMINS") or "").split(",") if c.strip()}
-    return bool(user.get("isAdmin")) or str(user.get("userCode") or "").lower() in admins
+    return user_is_admin(user)
 
 
 def _clean_key(value: str, label: str) -> str:

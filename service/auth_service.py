@@ -21,6 +21,7 @@ TOKEN_HOURS   = 8          # optional
 import json
 import logging
 import os
+import threading
 import time
 from collections import defaultdict, deque
 
@@ -217,6 +218,11 @@ def api_login(body: LoginBody):
 
     _FAILS.pop(key, None)
     logger.info("QC login OK: %s (%s)", user["userCode"], user["database"])  # no password, no tokens
+    try:  # remember the name for the Admin screen - in the background, so a slow database never delays a login
+        from service.roles_service import remember_user
+        threading.Thread(target=remember_user, args=(user,), daemon=True).start()
+    except Exception:  # noqa: BLE001
+        pass
     return {"token": make_token(user), "user": user, "expiresInHours": _token_hours()}
 
 

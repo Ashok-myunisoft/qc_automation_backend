@@ -17,6 +17,8 @@ from typing import Awaitable, Callable
 
 from dotenv import load_dotenv
 
+from service.cypress_runner import acquire_slot_blocking, release_slot
+
 load_dotenv()
 
 logger = logging.getLogger(__name__)
@@ -552,9 +554,26 @@ def _open_form_selectors(project_analysis: dict) -> list[str]:
     return out
 
 
+_BUSY_PREFIX = "another Cypress run is in progress"
+
+
 def _run_scan(module: str, screen: str, nav: list[str], is_mm: bool = False,
               biz_field: str = "", open_cy: list[str] | None = None,
               labels: list[str] | None = None, pick: int = 0) -> tuple[dict | None, str]:
+    """Blocking. Waits for the shared one-Cypress-at-a-time slot, then scans.
+    Returns (scan_dict, "") on success or (None, reason)."""
+    wait = max(10, _int("SCAN_SLOT_WAIT_SECONDS", 180))
+    if not acquire_slot_blocking(wait):
+        return None, f"{_BUSY_PREFIX} (waited {wait}s for it to finish)"
+    try:
+        return _run_scan_locked(module, screen, nav, is_mm, biz_field, open_cy, labels, pick)
+    finally:
+        release_slot()
+
+
+def _run_scan_locked(module: str, screen: str, nav: list[str], is_mm: bool = False,
+                     biz_field: str = "", open_cy: list[str] | None = None,
+                     labels: list[str] | None = None, pick: int = 0) -> tuple[dict | None, str]:
     """Blocking. Returns (scan_dict, "") on success or (None, reason)."""
     if not _WORKSPACE.exists():
         return None, "cypress-workspace/ folder not found"
@@ -1024,7 +1043,7 @@ async def scan_and_merge(project_analysis: dict, module: str, screen: str, log: 
                               f"tried {', '.join(tried)}")
         if scan is None:
             cooldown = _int("SCAN_FAIL_COOLDOWN_MINUTES", 30)
-            if cooldown > 0:
+            if cooldown > 0 and not str(reason).startswith(_BUSY_PREFIX):   # being busy is not the screen's fault
                 _fail_until[key] = time.time() + cooldown * 60
             logger.warning("data-cy scan failed for %s / %s: %s", module, screen, reason)
             await say(f"data-cy scan skipped: {reason}. Generating without it.", "muted")

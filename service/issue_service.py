@@ -3,12 +3,8 @@
 Who can do what
 ---------------
 * Anyone logged in: raise an issue, read all issues, comment, edit the title/description of THEIR OWN issue.
-* QC team: everything above on any issue, plus change the status (Open / Looking into it / Fixed) and the severity.
-* Admins: all of the above, plus delete an issue.
-
-The QC team is the list of user codes in .env (admins count as QC team too):
-    QC_TEAM=E574,E101
-    QC_ADMINS=E574
+* Admins (one role, managed on the Admin screen - see roles_service.py): everything above on any issue, plus change
+  the status (Open / Looking into it / Fixed) and the severity, and delete an issue.
 
 Tables (created automatically in the same PostgreSQL database as History):
     qc_issues          one row per issue
@@ -84,8 +80,8 @@ def _ensure_schema() -> None:
 # ---------------------------------------------------------------- helpers
 
 def is_team(user: dict) -> bool:
-    team = {c.strip().lower() for c in (os.getenv("QC_TEAM") or "").split(",") if c.strip()}
-    return is_admin(user) or str(user.get("userCode") or "").lower() in team
+    # One role: every admin is "the QC team" (the old QC_TEAM list in .env is now also read as admins).
+    return is_admin(user)
 
 
 def _name(user: dict) -> str:

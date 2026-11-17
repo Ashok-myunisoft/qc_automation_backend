@@ -15,6 +15,7 @@ from service.auth_service import install_auth, ws_user
 from service.discussion_service import router as discussion_router
 from service.issue_service import router as issues_router
 from service.notification_service import router as notifications_router
+from service.roles_service import router as roles_router
 from service import screen_history, source_tracking
 from service.gitlab_service import GitLabService
 from service.backend_context import (
@@ -28,7 +29,7 @@ from service.architecture_resolver import (
     resolve_source_screen_precise, resolve_source_module_screens_precise,
     filter_tree_by_module,
 )
-from service.cypress_runner import run_cypress, CypressRunError
+from service.cypress_runner import run_cypress, CypressRunError, kill_process_tree
 from Agents.project_analyze_agent import ProjectAnalysisAgent
 from Agents.shared_component_locator_agent import SharedComponentLocatorAgent
 from Agents.test_case_agent import TestCaseAgent
@@ -74,6 +75,7 @@ install_auth(app)
 app.include_router(discussion_router)   # per-screen discussion (chat)
 app.include_router(issues_router)       # issues raised to the QC team
 app.include_router(notifications_router)  # bell icon: who gets told about issues
+app.include_router(roles_router)  # Admin screen: who is an admin
 app.include_router(screen_history.router)  # who generated / ran a screen, and when
 app.include_router(source_tracking.router)  # has the source code of a screen changed since its tests were generated
 
@@ -3482,10 +3484,7 @@ async def handle_overnight_run(ws: WebSocket, session: dict, msg: dict):
             except asyncio.TimeoutError:
                 proc = session.get("process")
                 if proc is not None:
-                    try:
-                        proc.kill()
-                    except Exception:
-                        pass
+                    kill_process_tree(proc)
                     session["process"] = None
                 item.update(status="failed", reason=f"timed out after {_OVERNIGHT_SCREEN_TIMEOUT // 60} minute(s)")
             except CypressRunError as e:
@@ -3968,6 +3967,8 @@ async def qc_session(websocket: WebSocket):
                         session=session, ws=websocket, source="auto_run",
                         module=job_module, screen=job_screen, queued_phase="auto_running",
                         runner=lambda jws, _msg=msg: handle_auto_run(jws, session, _msg),
+                        dedupe_key="|".join([scope_, job_module, job_screen, ";".join(sorted(
+                            f"{(i or {}).get('module', '')}/{(i or {}).get('screen', '')}" for i in (msg.get("items") or [])))]),
                     )
                     session["job"] = job
                     session["current_task"] = job.task
@@ -4003,6 +4004,7 @@ async def qc_session(websocket: WebSocket):
                         session=session, ws=websocket, source="overnight_run",
                         module=job_modules, screen="", queued_phase="auto_running",
                         runner=lambda jws, _msg=msg: handle_overnight_run(jws, session, _msg),
+                        dedupe_key=",".join(sorted(job_modules.split(", "))),
                     )
                     session["job"] = job
                     session["current_task"] = job.task
@@ -4059,10 +4061,7 @@ async def qc_session(websocket: WebSocket):
                     cancelled = True
                 proc = session.get("process")
                 if proc is not None:
-                    try:
-                        proc.kill()
-                    except ProcessLookupError:
-                        pass
+                    kill_process_tree(proc)
                     session["process"] = None
                     cancelled = True
                 session["feature"] = None
@@ -4099,6 +4098,6 @@ async def qc_session(websocket: WebSocket):
             job.detach()
         elif session.get("process") is not None:
             try:
-                session["process"].kill()
+                kill_process_tree(session["process"])
             except ProcessLookupError:
                 pass

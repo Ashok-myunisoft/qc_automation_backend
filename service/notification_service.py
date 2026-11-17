@@ -2,7 +2,7 @@
 
 Who gets notified
 -----------------
-* A new issue is raised        -> the QC team (QC_TEAM and QC_ADMINS in .env)
+* A new issue is raised        -> every admin (.env QC_ADMINS / QC_TEAM and the Admin screen)
 * The status of an issue moves -> the person who raised it, the person handling it, and everybody who commented
 * A comment is added           -> the same people (plus the QC team when a non-QC person writes)
 Nobody is ever notified about their OWN action.
@@ -23,6 +23,7 @@ import threading
 from fastapi import APIRouter, HTTPException, Request
 
 from service.discussion_service import _iso, _me, _now
+from service.roles_service import all_admin_codes
 from service.store_db import connection as _connection
 
 logger = logging.getLogger(__name__)
@@ -63,11 +64,8 @@ def ensure_schema() -> None:
 
 
 def team_codes() -> set[str]:
-    """QC team + admins from .env, lower-case."""
-    codes: set[str] = set()
-    for var in ("QC_TEAM", "QC_ADMINS"):
-        codes |= {c.strip().lower() for c in (os.getenv(var) or "").split(",") if c.strip()}
-    return codes
+    """Everybody who is an admin (.env + Admin screen), lower-case."""
+    return all_admin_codes()
 
 
 def notify(cur, recipients, kind: str, issue_id: int | None, message: str, actor: dict) -> None:
