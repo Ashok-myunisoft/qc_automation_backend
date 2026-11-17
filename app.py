@@ -15,7 +15,7 @@ from service.auth_service import install_auth, ws_user
 from service.discussion_service import router as discussion_router
 from service.issue_service import router as issues_router
 from service.notification_service import router as notifications_router
-from service import screen_history
+from service import screen_history, source_tracking
 from service.gitlab_service import GitLabService
 from service.backend_context import (
     is_mm_module, fetch_mm_source_context, fetch_backend_context, MM_MAX_SOURCE_CHARS,
@@ -75,6 +75,7 @@ app.include_router(discussion_router)   # per-screen discussion (chat)
 app.include_router(issues_router)       # issues raised to the QC team
 app.include_router(notifications_router)  # bell icon: who gets told about issues
 app.include_router(screen_history.router)  # who generated / ran a screen, and when
+app.include_router(source_tracking.router)  # has the source code of a screen changed since its tests were generated
 
 # The history screen fetches these endpoints over HTTP rather than the
 # existing WebSocket. The UI can be hosted from any origin.
@@ -118,6 +119,8 @@ def _source_gitlab_service() -> GitLabService:
         _source_gitlab_instance = GitLabService(env_prefix="SOURCE_GITLAB")
     return _source_gitlab_instance
 
+
+source_tracking.configure(lambda: GitLabService(env_prefix="SOURCE_GITLAB"))   # a fresh client per check: safe to use from threads
 
 _backend_gitlab_instance: GitLabService | None = None  # mmfix
 
@@ -1508,6 +1511,8 @@ async def _generate_one_screen(ws: WebSocket, src: GitLabService, module: str,
             project_context = await asyncio.to_thread(
                 _fetch_source_project_context, src, resolved_source, source_tree,
             )
+        # remember what the source looked like for this generation; saved when the tests are pushed (source_tracking.py)
+        source_tracking.remember_pending(module, screen_name, project_context.get("source_files") or [])
         # screenspec: build the screen spec by code (formjson + rendered HTML + labels + calculated fields + the entity's
         # backend files). Every normal (non-MM) screen; no formjson or any problem -> carry on with the normal analysis.
         screen_spec_data = None
@@ -1923,10 +1928,13 @@ async def handle_generate(ws: WebSocket, session: dict, msg: dict):
             "existing_feature": existing_feature, "existing_script": existing_script,
         }
         await send_log(ws, f"existing tests found at {resolved_output.dir} — choose Replace or Append before continuing.", "accent")
+        await send_log(ws, "checking whether the source code changed since these tests were generated...", "secondary")
+        source_check = await asyncio.to_thread(source_tracking.check, module, screen)
         await ws.send_json({
             "type": "conflict",
             "scope": "screen",
-            "conflicts": [{"name": screen, "existing_feature": existing_feature, "existing_script": existing_script}],
+            "conflicts": [{"name": screen, "existing_feature": existing_feature, "existing_script": existing_script,
+                           "source_check": source_check}],
             "new_count": 0,
         })
         await send_status(ws, "awaiting_conflict")
@@ -2752,7 +2760,19 @@ async def handle_auto_run(ws: WebSocket, session: dict, msg: dict):
     user_request = (msg.get("request") or "").strip()
 
     single_screen = None
-    if scope == "screen":
+    screen_pairs: list[tuple[str, str]] = []     # scope "screens": an exact list of (module, screen) - used by "Regenerate changed" on the Tracking page
+    if scope == "screens":
+        for it in msg.get("items") or []:
+            m_ = str((it or {}).get("module") or "").strip()
+            s_ = str((it or {}).get("screen") or "").strip()
+            if m_ and s_ and (m_, s_) not in screen_pairs:
+                screen_pairs.append((m_, s_))
+        if not screen_pairs:
+            await send_error(ws, "no screens were chosen.")
+            await send_status(ws, "idle")
+            return
+        modules = list(dict.fromkeys(m_ for m_, _ in screen_pairs))
+    elif scope == "screen":
         module = (msg.get("module") or "").strip()
         single_screen = (msg.get("screen") or "").strip()
         if not module or not single_screen:
@@ -2780,7 +2800,13 @@ async def handle_auto_run(ws: WebSocket, session: dict, msg: dict):
     clear_screenshot_stash()
 
     await send_status(ws, "auto_running")
-    if single_screen:
+    if screen_pairs:
+        await send_log(
+            ws,
+            f"regenerating {len(screen_pairs)} screen(s) whose source code changed — generate and push will follow with no prompts (nothing is run).",
+            "accent",
+        )
+    elif single_screen:
         await send_log(
             ws,
             f"auto generate started for {modules[0]} / {single_screen} — generate and push will follow with no prompts (nothing is run).",
@@ -2832,23 +2858,24 @@ async def handle_auto_run(ws: WebSocket, session: dict, msg: dict):
 
         # ---------------- discover every screen in the queue ----------------
         jobs: list[dict] = []
-        for module in modules:
+        _plan = screen_pairs if screen_pairs else [(m_, single_screen) for m_ in modules]
+        for module, item_screen in _plan:
             filtered_src_tree = filter_tree_by_module(src_tree, module)
 
-            if single_screen:
+            if item_screen:
                 if is_mm_module(module):
                     resolved_source = None
                     await send_log(ws, f"[{module}] MM module detected — using shared materialmanagement component.", "secondary")
                 else:
-                    resolved_source = await resolve_source_screen_precise(filtered_src_tree, module, single_screen)
+                    resolved_source = await resolve_source_screen_precise(filtered_src_tree, module, item_screen)
                     if resolved_source is None:
-                        await send_log(ws, f"[{module}] no source files found for '{single_screen}' — skipping.", "danger")
+                        await send_log(ws, f"[{module}] no source files found for '{item_screen}' — skipping.", "danger")
                         continue
                     if resolved_source.ambiguous:
                         await send_log(ws, f"[{module}] more than one close match ({resolved_source.resolved_by}) — picked {resolved_source.dir}.", "accent")
                     else:
                         await send_log(ws, f"[{module}] matched source {resolved_source.dir} via {resolved_source.resolved_by}", "success")
-                candidates = [(single_screen, resolved_source)]
+                candidates = [(item_screen, resolved_source)]
             else:
                 await send_log(ws, f"[{module}] scanning source repo for screens...", "secondary")
                 found = await resolve_source_module_screens_precise(filtered_src_tree, module)
@@ -3614,6 +3641,9 @@ async def _log_screen_push(session: dict, module: str, screen: str) -> None:
     label = _PUSH_LABEL.get(mode) or ("Edited the tests and pushed them to the repo" if session.get("origin") == "fetch"
                                       else "Generated / updated the tests and pushed them to the repo")
     await asyncio.to_thread(screen_history.log_event, module, screen, "generated", session.get("user"), label)
+    # the source fingerprint taken while generating becomes "the source these tests were made from"
+    pairs = [(m, sc) for m in (module, session.get("module")) for sc in (screen, session.get("screen"))]
+    await asyncio.to_thread(source_tracking.commit_pending, pairs, session.get("user"))
 
 
 async def _record_history(session: dict, source: str, run_results: list[dict],
@@ -3928,6 +3958,9 @@ async def qc_session(websocket: WebSocket):
                     if scope_ == "screen":
                         job_module = (msg.get("module") or "").strip()
                         job_screen = (msg.get("screen") or "").strip()
+                    elif scope_ == "screens":
+                        job_module = ", ".join(dict.fromkeys(str((i or {}).get("module") or "").strip() for i in (msg.get("items") or []) if (i or {}).get("module")))
+                        job_screen = ""
                     else:
                         job_module = ", ".join(dict.fromkeys(m.strip() for m in (msg.get("modules") or []) if m and m.strip()))
                         job_screen = ""
