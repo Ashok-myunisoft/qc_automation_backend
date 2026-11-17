@@ -14,6 +14,7 @@ _SCHEMA_READY = False
 _LIST_COLUMNS = """
     id, created_at, source, module, screen, status, total, passed_count,
     failed_count, screens_json, report_filename, screenshots_filename,
+    run_by_code, run_by_name, env_base_url, env_db, env_user,
     (report_xlsx IS NOT NULL) AS has_report,
     (screenshots_html IS NOT NULL) AS has_screenshots
 """
@@ -48,6 +49,10 @@ def _ensure_schema() -> None:
                     screenshots_html TEXT NULL
                 )
             """)
+            # who ran it and against which environment (never the password)
+            for col, kind in (("run_by_code", "VARCHAR(64)"), ("run_by_name", "VARCHAR(255)"),
+                              ("env_base_url", "VARCHAR(500)"), ("env_db", "VARCHAR(255)"), ("env_user", "VARCHAR(255)")):
+                cursor.execute(f"ALTER TABLE run_history ADD COLUMN IF NOT EXISTS {col} {kind} NULL")
             cursor.execute("""
                 CREATE INDEX IF NOT EXISTS ix_run_history_created_at
                 ON run_history (created_at DESC, id DESC)
@@ -69,13 +74,26 @@ def _row_to_dict(row: dict) -> dict:
         result["screens"] = json.loads(result.pop("screens_json") or "[]")
     except (TypeError, ValueError):
         result["screens"] = []
+    # A run that went to the end is "completed" even when some test cases failed; "error" = nothing could be executed.
+    # Worked out from the stats saved with every screen, so it also works for old rows.
+    passed_n = failed_n = total_n = 0
+    for item in result["screens"]:
+        st = item.get("stats") or {}
+        passed_n += st.get("passes") or 0
+        failed_n += st.get("failures") or 0
+        total_n += st.get("tests") or 0
+    result["scen_passed"], result["scen_failed"], result["scen_total"] = passed_n, failed_n, total_n
+    result["outcome"] = "completed" if total_n > 0 else "error"
     return result
 
 
 def save_run(*, source: str, module: str, screen: str, run_results: list[dict],
              report_filename: str, report_xlsx: bytes | None,
-             screenshots_filename: str, screenshots_html: str | None) -> int:
+             screenshots_filename: str, screenshots_html: str | None,
+             meta: dict | None = None) -> int:
+    """meta = {run_by_code, run_by_name, env_base_url, env_db, env_user} - who ran it and where."""
     _ensure_schema()
+    meta = meta or {}
     total = len(run_results)
     passed = sum(1 for result in run_results if result.get("passed"))
     failed = total - passed
@@ -90,15 +108,18 @@ def save_run(*, source: str, module: str, screen: str, run_results: list[dict],
         cursor.execute("""
             INSERT INTO run_history (
                 created_at, source, module, screen, status, total, passed_count, failed_count,
-                screens_json, report_filename, report_xlsx, screenshots_filename, screenshots_html
+                screens_json, report_filename, report_xlsx, screenshots_filename, screenshots_html,
+                run_by_code, run_by_name, env_base_url, env_db, env_user
             )
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING id
         """, (
             datetime.now(timezone.utc).replace(tzinfo=None), source, module, screen, status,
             total, passed, failed, json.dumps(screens), report_filename,
             psycopg2.Binary(report_xlsx) if report_xlsx is not None else None,
             screenshots_filename, screenshots_html,
+            meta.get("run_by_code"), meta.get("run_by_name"),
+            meta.get("env_base_url"), meta.get("env_db"), meta.get("env_user"),
         ))
         row = cursor.fetchone()
         conn.commit()

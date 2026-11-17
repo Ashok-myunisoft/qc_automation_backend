@@ -14,6 +14,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from service.auth_service import install_auth, ws_user
 from service.discussion_service import router as discussion_router
 from service.issue_service import router as issues_router
+from service.notification_service import router as notifications_router
+from service import screen_history
 from service.gitlab_service import GitLabService
 from service.backend_context import (
     is_mm_module, fetch_mm_source_context, fetch_backend_context, MM_MAX_SOURCE_CHARS,
@@ -71,6 +73,8 @@ async def _prewarm_source_catalog():
 install_auth(app)
 app.include_router(discussion_router)   # per-screen discussion (chat)
 app.include_router(issues_router)       # issues raised to the QC team
+app.include_router(notifications_router)  # bell icon: who gets told about issues
+app.include_router(screen_history.router)  # who generated / ran a screen, and when
 
 # The history screen fetches these endpoints over HTTP rather than the
 # existing WebSocket. The UI can be hosted from any origin.
@@ -1889,6 +1893,7 @@ async def handle_generate(ws: WebSocket, session: dict, msg: dict):
 
     session["module"], session["screen"], session["scope"] = module, screen, "screen"
     session["origin"] = "generate"
+    session["gen_mode"] = "new"
     session["pushed"] = False
     session.pop("pending_generate", None)
 
@@ -1992,6 +1997,7 @@ async def handle_generate_decision(ws: WebSocket, session: dict, msg: dict):
         await send_error(ws, "describe what you want to add.")
         return
 
+    session["gen_mode"] = decision          # "replace" or "append" - used for the screen's history line
     module       = pending["module"]
     user_request = pending["user_request"]
     screen          = pending["screen"]
@@ -2337,6 +2343,7 @@ async def handle_approve(ws: WebSocket, session: dict, msg: dict | None = None):
 
         entry["pushed"] = True
         await send_log(ws, f"pushed {target_module}/{resolved.slug} to gitlab.", "success")
+        await _log_screen_push(session, target_module, resolved.slug)
         await send_artifacts(ws, session)
         await send_status(ws, "awaiting_approval" if any(not s.get("pushed") for s in screens_list) else "awaiting_review")
         return
@@ -2369,6 +2376,7 @@ async def handle_approve(ws: WebSocket, session: dict, msg: dict | None = None):
 
     session["pushed"] = True
     await send_log(ws, f"pushed to gitlab at {resolved.dir}", "success")
+    await _log_screen_push(session, session.get("module") or "", session.get("screen") or getattr(resolved, "slug", ""))
     await send_artifacts(ws, session)
     await send_status(ws, "awaiting_review")
 
@@ -2416,6 +2424,7 @@ async def handle_approve_all(ws: WebSocket, session: dict, msg: dict | None = No
         entry["pushed"] = True
         pushed_count += 1
         await send_log(ws, f"[{module}/{resolved.slug}] pushed.", "success")
+        await _log_screen_push(session, module, resolved.slug)
 
     await send_log(ws, f"pushed {pushed_count}/{len(pending)} screen(s) to gitlab.", "success")
     await send_artifacts(ws, session)
@@ -2536,6 +2545,7 @@ async def handle_run(ws: WebSocket, session: dict):
         fixtures = await _fetch_shared_fixtures(ws)
 
         summary = []
+        stats_by_label: dict = {}
         for i, s in enumerate(screens, start=1):
             resolved = s["resolved"]
             slug     = resolved.slug
@@ -2559,9 +2569,10 @@ async def handle_run(ws: WebSocket, session: dict):
                         passed = payload == 0
                         summary.append((label, passed, payload))
                         tone_ = "success" if passed else "danger"
-                        await send_log(ws, f"[{label}] {'PASSED' if passed else 'FAILED'} (exit {payload})", tone_)
+                        await send_log(ws, f"[{label}] run finished (exit {payload}{' - all scenarios passed' if passed else ''})", "success" if passed else "secondary")
                     elif kind == "result":
                         session.setdefault("run_results", []).append(payload)
+                        stats_by_label[label] = payload.get("stats")
             except CypressRunError as e:
                 summary.append((label, False, None))
                 await send_log(ws, f"[{label}] run error: {e}", "danger")
@@ -2581,7 +2592,7 @@ async def handle_run(ws: WebSocket, session: dict):
         await send_status(ws, "done")
         await ws.send_json({
             "type":    "module_result",
-            "results": [{"name": name, "passed": p, "exit_code": ec} for name, p, ec in summary],
+            "results": [{"name": name, "passed": p, "exit_code": ec, "stats": stats_by_label.get(name)} for name, p, ec in summary],
         })
         return
 
@@ -2624,6 +2635,7 @@ async def handle_run(ws: WebSocket, session: dict):
                 await ws.send_json({"type": "result", "passed": passed, "exit_code": payload})
             elif kind == "result":
                 session.setdefault("run_results", []).append(payload)
+                await ws.send_json({"type": "run_stats", "stats": payload.get("stats")})
     except CypressRunError as e:
         await send_error(ws, str(e))
     except asyncio.CancelledError:
@@ -2644,7 +2656,7 @@ async def handle_report(ws: WebSocket, session: dict):
         return
 
     module = session.get("module") or ""
-    xlsx_bytes = await asyncio.to_thread(report_builder.build_report_xlsx, module, run_results)
+    xlsx_bytes = await asyncio.to_thread(report_builder.build_report_xlsx, module, run_results, _run_meta(session))
     filename = f"qc-report-{module or 'run'}.xlsx".replace(" ", "_")
     content_b64 = await asyncio.to_thread(lambda: base64.b64encode(xlsx_bytes).decode("ascii"))
     await ws.send_json({
@@ -3319,10 +3331,10 @@ def _fmt_duration(seconds: float) -> str:
     return f"{h}h {m:02d}m {s:02d}s" if h else f"{m}m {s:02d}s"
 
 
-async def _save_overnight_history(module: str, screen: str, run_results: list[dict]) -> int | None:
+async def _save_overnight_history(module: str, screen: str, run_results: list[dict], meta: dict | None = None) -> int | None:
     """One History row per screen, so each screen has its own report + screenshots link."""
     try:
-        xlsx_bytes = await asyncio.to_thread(report_builder.build_report_xlsx, module, run_results)
+        xlsx_bytes = await asyncio.to_thread(report_builder.build_report_xlsx, module, run_results, meta)
         shots_html = await asyncio.to_thread(report_builder.build_screenshots_html, module, run_results)
         base = f"{module}-{screen}".replace(" ", "_").replace("/", "_")
         return await asyncio.to_thread(
@@ -3330,6 +3342,7 @@ async def _save_overnight_history(module: str, screen: str, run_results: list[di
             source="overnight_run", module=module, screen=screen, run_results=run_results,
             report_filename=f"qc-report-{base}.xlsx", report_xlsx=xlsx_bytes,
             screenshots_filename=f"qc-screenshots-{base}.html", screenshots_html=shots_html,
+            meta=meta,
         )
     except Exception:
         logger.exception("could not save the overnight run of %s/%s to history", module, screen)
@@ -3455,8 +3468,9 @@ async def handle_overnight_run(ws: WebSocket, session: dict, msg: dict):
                 item.update(status="error", reason=f"{type(e).__name__}: {e}"[:300])
 
             if run_results:
+                item["stats"] = run_results[-1].get("stats")
                 all_results.extend(run_results)
-                item["run_id"] = await _save_overnight_history(module, screen, run_results)
+                item["run_id"] = await _save_overnight_history(module, screen, run_results, _run_meta(session))
                 history_saved = history_saved or item["run_id"] is not None
             done += 1
             tone = "success" if item["status"] == "passed" else "danger"
@@ -3473,7 +3487,7 @@ async def handle_overnight_run(ws: WebSocket, session: dict, msg: dict):
         session["run_results"] = all_results
         try:
             whole = ", ".join(modules)
-            xlsx_bytes = await asyncio.to_thread(report_builder.build_report_xlsx, whole, all_results)
+            xlsx_bytes = await asyncio.to_thread(report_builder.build_report_xlsx, whole, all_results, _run_meta(session))
             shots_html = await asyncio.to_thread(report_builder.build_screenshots_html, whole, all_results)
             base = "overnight-" + whole.replace(" ", "_").replace("/", "_").replace(",", "")
             combined_run_id = await asyncio.to_thread(
@@ -3482,6 +3496,7 @@ async def handle_overnight_run(ws: WebSocket, session: dict, msg: dict):
                 run_results=all_results,
                 report_filename=f"qc-report-{base}.xlsx", report_xlsx=xlsx_bytes,
                 screenshots_filename=f"qc-screenshots-{base}.html", screenshots_html=shots_html,
+                meta=_run_meta(session),
             )
             history_saved = history_saved or combined_run_id is not None
             await send_log(ws, f"whole-run report ready ({len(xlsx_bytes) // 1024} KB Excel + screenshots compilation) - "
@@ -3493,21 +3508,24 @@ async def handle_overnight_run(ws: WebSocket, session: dict, msg: dict):
     passed = sum(1 for it in items if it["status"] == "passed")
     failed = sum(1 for it in items if it["status"] in ("failed", "error"))
     skipped = sum(1 for it in items if it["status"] == "skipped")
+    # "completed" = the screen's run went to the end and executed test cases (some may have failed). That is normal in QC.
+    completed = sum(1 for it in items if it["status"] in ("passed", "failed") and ((it.get("stats") or {}).get("tests") or 0) > 0)
+    run_errors = sum(1 for it in items if it["status"] in ("passed", "failed", "error")) - completed
     elapsed = time.monotonic() - started
     await send_log(
         ws,
-        f"overnight run complete: {passed} passed, {failed} failed, {skipped} skipped of {len(items)} - "
+        f"overnight run complete: {completed} completed, {run_errors} could not run, {skipped} skipped of {len(items)} - "
         f"total time {_fmt_duration(elapsed)}. Every screen's own report and the whole-run report are in History.",
-        "success" if failed == 0 else "accent",
+        "success" if run_errors == 0 else "accent",
     )
     await ws.send_json({
         "type": "overnight_summary", "modules": modules, "total": len(items),
-        "passed": passed, "failed": failed, "skipped": skipped,
+        "passed": passed, "failed": failed, "skipped": skipped, "completed": completed, "run_errors": run_errors,
         "elapsed_seconds": int(elapsed), "items": items, "combined_run_id": combined_run_id,
     })
     await ws.send_json({
         "type": "module_result",
-        "results": [{"name": f"{it['module']}/{it['screen']}", "passed": it["status"] == "passed", "exit_code": it["exit_code"]}
+        "results": [{"name": f"{it['module']}/{it['screen']}", "passed": it["status"] == "passed", "exit_code": it["exit_code"], "stats": it.get("stats")}
                     for it in items if it["status"] in ("passed", "failed", "error")],
     })
     await send_status(ws, "done")
@@ -3573,6 +3591,31 @@ def _run_row_info(session: dict) -> tuple[str, str]:
     return module, screen
 
 
+def _run_meta(session: dict) -> dict:
+    """Who is running and against which environment. The password is never included."""
+    user = session.get("user") or {}
+    env = session.get("test_env") or {}
+    return {
+        "run_by_code": user.get("userCode"), "run_by_name": user.get("userName") or user.get("userCode"),
+        "env_base_url": env.get("baseUrl"), "env_db": env.get("dbName"), "env_user": env.get("userName"),
+    }
+
+
+_PUSH_LABEL = {
+    "new": "Generated the tests (new screen) and pushed them to the repo",
+    "replace": "Regenerated the tests - replaced the old ones",
+    "append": "Added scenarios to the existing tests",
+}
+
+
+async def _log_screen_push(session: dict, module: str, screen: str) -> None:
+    """One line in the screen's history: who pushed generated tests, and how."""
+    mode = session.get("gen_mode") if session.get("origin") == "generate" else None
+    label = _PUSH_LABEL.get(mode) or ("Edited the tests and pushed them to the repo" if session.get("origin") == "fetch"
+                                      else "Generated / updated the tests and pushed them to the repo")
+    await asyncio.to_thread(screen_history.log_event, module, screen, "generated", session.get("user"), label)
+
+
 async def _record_history(session: dict, source: str, run_results: list[dict],
                           xlsx_bytes: bytes | None = None, shots_html: str | None = None) -> None:
     """Persist one completed run without allowing storage errors to break it."""
@@ -3582,7 +3625,7 @@ async def _record_history(session: dict, source: str, run_results: list[dict],
     try:
         module = session.get("module") or ""
         if xlsx_bytes is None:
-            xlsx_bytes = await asyncio.to_thread(report_builder.build_report_xlsx, module, run_results)
+            xlsx_bytes = await asyncio.to_thread(report_builder.build_report_xlsx, module, run_results, _run_meta(session))
         if shots_html is None:
             shots_html = await asyncio.to_thread(report_builder.build_screenshots_html, module, run_results)
         screen = session.get("screen") or ", ".join(
@@ -3599,6 +3642,7 @@ async def _record_history(session: dict, source: str, run_results: list[dict],
             report_xlsx=xlsx_bytes,
             screenshots_filename=f"qc-screenshots-{base}.html",
             screenshots_html=shots_html,
+            meta=_run_meta(session),
         )
         logger.info("run saved to SQL Server history (id=%s, source=%s)", run_id, source)
         session["_history_saved"] = True  # tells the background job its result is on the shelf

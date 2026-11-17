@@ -55,19 +55,80 @@ def _match_block(scenario_name: str, blocks: list[dict]) -> tuple[dict | None, s
             return (block, condition)
     return (None, None)
 
-def build_report_xlsx(module: str, run_results: list[dict]) -> bytes:
+def _local_time(now):
+    """Run time shown in the report. Set REPORT_TZ in .env (default Asia/Kolkata); falls back to UTC."""
+    import os
+    name = os.getenv('REPORT_TZ') or 'Asia/Kolkata'
+    try:
+        from zoneinfo import ZoneInfo
+        local = now.astimezone(ZoneInfo(name))
+        return local.strftime('%d %b %Y, %I:%M %p'), name
+    except Exception:
+        return now.strftime('%d %b %Y, %I:%M %p'), 'UTC'
+
+
+def _write_info_block(ws, module: str, run_results: list[dict], meta: dict | None) -> None:
+    """Rows 1-5 on top of the report: who ran it, when, and against which environment."""
+    from datetime import datetime, timezone
+    meta = meta or {}
+    passed = failed = 0
+    for run in run_results:
+        for suite in run.get('suites') or []:
+            for scen in suite.get('scenarios') or []:
+                if (scen.get('state') or 'failed') == 'passed':
+                    passed += 1
+                else:
+                    failed += 1
+    when, tz = _local_time(datetime.now(timezone.utc))
+    who = meta.get('run_by_name') or meta.get('run_by_code')
+    if who and meta.get('run_by_code') and who != meta.get('run_by_code'):
+        who = f"{who} ({meta['run_by_code']})"
+    screens = ', '.join(str(r.get('slug')) for r in run_results if r.get('slug')) or '-'
+    na = 'Not recorded'
+    ws.merge_cells('A1:H1')
+    ws['A1'] = 'QC Test Report'
+    ws['A1'].font = Font(bold=True, size=14, color='FFFFFF')
+    ws['A1'].fill = _HEADER_FILL
+    ws['A1'].alignment = Alignment(horizontal='left', vertical='center', indent=1)
+    ws.row_dimensions[1].height = 24
+    pairs = [
+        (2, ('Run by', who or na), ('Run finished', f'{when} ({tz})')),
+        (3, ('Environment URL', meta.get('env_base_url') or na), ('Database', meta.get('env_db') or na)),
+        (4, ('Test user', meta.get('env_user') or na), ('Module', module or '-')),
+        (5, ('Screens', screens), ('Result', f'Completed - {passed} passed, {failed} failed ({passed + failed} scenarios)'
+                                    if passed + failed else 'Run error - no scenarios were executed')),
+    ]
+    label_fill = PatternFill('solid', start_color='EEF0FF')
+    for r, (l1, v1), (l2, v2) in pairs:
+        ws.cell(row=r, column=1, value=l1)
+        ws.merge_cells(start_row=r, start_column=2, end_row=r, end_column=4)
+        ws.cell(row=r, column=2, value=v1)
+        ws.cell(row=r, column=5, value=l2)
+        ws.merge_cells(start_row=r, start_column=6, end_row=r, end_column=8)
+        ws.cell(row=r, column=6, value=v2)
+        for c in (1, 5):
+            ws.cell(row=r, column=c).font = Font(bold=True)
+            ws.cell(row=r, column=c).fill = label_fill
+        for c in (2, 6):
+            ws.cell(row=r, column=c).alignment = Alignment(horizontal='left', vertical='center', wrap_text=True)
+        ws.cell(row=r, column=1).alignment = Alignment(vertical='center')
+        ws.cell(row=r, column=5).alignment = Alignment(vertical='center')
+
+
+def build_report_xlsx(module: str, run_results: list[dict], meta: dict | None = None) -> bytes:
     wb = Workbook()
     ws = wb.active
     ws.title = 'QC Report'
+    _write_info_block(ws, module, run_results, meta)
+    HEADER_ROW = 7                      # rows 1-5 = run information, row 6 = empty
     headers = ['Module', 'Screen', 'Scenario', 'Test Case', 'Pass/Fail', 'Passed', 'Failed', 'Total']
-    ws.append(headers)
-    for col in range(1, len(headers) + 1):
-        cell = ws.cell(row=1, column=col)
+    for col, title in enumerate(headers, start=1):
+        cell = ws.cell(row=HEADER_ROW, column=col, value=title)
         cell.fill = _HEADER_FILL
         cell.font = _HEADER_FONT
         cell.alignment = _CENTER
-    ws.freeze_panes = 'A2'
-    row = 2
+    ws.freeze_panes = f'A{HEADER_ROW + 1}'
+    row = HEADER_ROW + 1
     for run in run_results:
         screen = run.get('slug') or '(unnamed)'
         screen_start_row = row

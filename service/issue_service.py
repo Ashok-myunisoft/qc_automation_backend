@@ -22,6 +22,7 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
 from service.discussion_service import _iso, _me, _now, is_admin
+from service.notification_service import notify, team_codes
 from service.store_db import connection as _connection
 
 logger = logging.getLogger(__name__)
@@ -168,6 +169,16 @@ def _me_info(user: dict) -> dict:
     return {"userCode": user["userCode"], "userName": _name(user), "isTeam": is_team(user), "isAdmin": is_admin(user)}
 
 
+def _people_of_issue(cur, row: dict) -> set[str]:
+    """Everybody who follows an issue: who raised it, who handles it, and everybody who commented."""
+    people = {row["raised_by_code"]}
+    if row.get("handled_by_code"):
+        people.add(row["handled_by_code"])
+    cur.execute("SELECT DISTINCT author_code FROM qc_issue_comments WHERE issue_id = %s AND kind = 'comment'", (row["id"],))
+    people |= {r["author_code"] for r in cur.fetchall()}
+    return people
+
+
 # ---------------------------------------------------------------- routes
 
 router = APIRouter(prefix="/api/issues")
@@ -270,6 +281,8 @@ def create_issue(request: Request, payload: NewIssue):
             (title, description, module, screen, payload.severity, user["userCode"], _name(user), now, now),
         )
         new_id = cur.fetchone()["id"]
+        notify(cur, team_codes(), "issue_new", new_id,
+               f"{_name(user)} raised a {SEVERITIES[payload.severity]} issue: {title}", user)
         conn.commit()
         return _issue_json(_get_issue(cur, new_id), user, 0)
 
@@ -340,6 +353,9 @@ def update_issue(request: Request, issue_id: int, payload: IssuePatch):
             cur.execute(f"UPDATE qc_issues SET {', '.join(sets)} WHERE id = %s", params + [issue_id])
             for kind, text in events:
                 _add_event(cur, issue_id, user, "status", text)
+            if payload.status is not None and payload.status != row["status"]:
+                notify(cur, _people_of_issue(cur, row), "issue_status", issue_id,
+                       f"{_name(user)} set \"{row['title']}\" to {STATUSES[payload.status]}", user)
             conn.commit()
         return _issue_json(_get_issue(cur, issue_id), user, _comment_count(cur, issue_id))
 
@@ -366,7 +382,8 @@ def add_comment(request: Request, issue_id: int, payload: NewComment):
     _ensure_schema()
     with _connection() as conn:
         cur = conn.cursor()
-        _get_issue(cur, issue_id)
+        issue_row = _get_issue(cur, issue_id)
+        followers = _people_of_issue(cur, issue_row)   # taken BEFORE this comment is added
         cur.execute(
             "INSERT INTO qc_issue_comments (issue_id, kind, author_code, author_name, body, created_at) "
             "VALUES (%s, 'comment', %s, %s, %s, %s) RETURNING *",
@@ -374,6 +391,10 @@ def add_comment(request: Request, issue_id: int, payload: NewComment):
         )
         row = cur.fetchone()
         cur.execute("UPDATE qc_issues SET updated_at = %s WHERE id = %s", (_now(), issue_id))
+        if not is_team(user):
+            followers |= team_codes()   # a non-QC person wrote: the QC team should see it too
+        notify(cur, followers, "issue_comment", issue_id,
+               f"{_name(user)} commented on \"{issue_row['title']}\"", user)
         conn.commit()
         return _comment_json(row, user)
 
