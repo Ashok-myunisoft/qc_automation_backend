@@ -58,6 +58,7 @@ def ensure_schema() -> None:
                     read_at TIMESTAMP NULL
                 )
             """)
+            cur.execute("ALTER TABLE qc_notifications ADD COLUMN IF NOT EXISTS ref VARCHAR(64) NULL")   # e.g. the chat a notification belongs to
             cur.execute("CREATE INDEX IF NOT EXISTS ix_qc_notif_user ON qc_notifications (user_code, id)")
             conn.commit()
         _SCHEMA_READY = True
@@ -68,7 +69,7 @@ def team_codes() -> set[str]:
     return all_admin_codes()
 
 
-def notify(cur, recipients, kind: str, issue_id: int | None, message: str, actor: dict) -> None:
+def notify(cur, recipients, kind: str, issue_id: int | None, message: str, actor: dict, ref: str | None = None) -> None:
     """Add one notification per recipient, inside the caller's open transaction.
     The actor is never notified. A failure here must never break the real action, so it runs in a savepoint."""
     actor_code = str(actor.get("userCode") or "").strip()
@@ -84,9 +85,9 @@ def notify(cur, recipients, kind: str, issue_id: int | None, message: str, actor
         actor_name = actor.get("userName") or actor_code
         for code in sorted(targets):
             cur.execute(
-                "INSERT INTO qc_notifications (user_code, kind, issue_id, message, actor_code, actor_name, created_at) "
-                "VALUES (%s, %s, %s, %s, %s, %s, %s)",
-                (code, kind, issue_id, message[:500], actor_code, actor_name, now),
+                "INSERT INTO qc_notifications (user_code, kind, issue_id, message, actor_code, actor_name, created_at, ref) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
+                (code, kind, issue_id, message[:500], actor_code, actor_name, now, ref),
             )
         cur.execute("RELEASE SAVEPOINT qc_notify")
     except Exception as e:  # noqa: BLE001
@@ -107,6 +108,7 @@ def _json(row: dict) -> dict:
         "id": row["id"],
         "kind": row["kind"],
         "issue_id": row["issue_id"],
+        "ref": row.get("ref"),
         "message": row["message"],
         "actor_name": row["actor_name"],
         "created_at": _iso(row["created_at"]),
