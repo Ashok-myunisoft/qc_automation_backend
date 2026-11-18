@@ -1,25 +1,21 @@
 """Admin tools and personal pages of the Admins page.
 
-    GET    /api/admin/live                    admin: runs that are running or waiting + the Cypress process count
+    GET    /api/admin/live                    admin: who is running / waiting, who was active in the last 24 hours, and one plain server status
     POST   /api/admin/live/{key}/cancel       admin: stop one run
     POST   /api/admin/cleanup                 admin: kill leftover Cypress / browser processes (only while no run is active)
 
-    GET    /api/announcements                 everybody: messages that are currently active (shown as a banner)
-    GET    /api/admin/announcements           admin: recent messages, also expired ones
-    POST   /api/admin/announcements           admin: {"message": "...", "level": "info|warning", "hours": 24 or null}
-    DELETE /api/admin/announcements/{id}      admin: remove one
-
     GET    /api/me/work                       my recent runs and my issues
+
+Announcements live in announcement_service.py.
 """
 import logging
 import os
 import signal
 import subprocess
-import threading
-from datetime import datetime, timedelta, timezone
+import time
+from datetime import datetime, timedelta
 
 from fastapi import APIRouter, HTTPException, Request
-from pydantic import BaseModel
 
 from service import history_store, job_manager, roles_service
 from service.discussion_service import _iso, _me, _now
@@ -89,30 +85,73 @@ def _process_report() -> dict:
     if rows is None:
         return {"available": False}
     mine = os.getpid()
-    cy = [r for r in rows if _is_cypress(r["args"]) and r["pid"] != mine]
-    zombies = [r for r in rows if r["stat"].startswith("Z")]
-    return {"available": True, "total": len(rows), "cypress": len([r for r in cy if not r["stat"].startswith("Z")]), "zombies": len(zombies)}
+    cy = [r for r in rows if _is_cypress(r["args"]) and r["pid"] != mine and not r["stat"].startswith("Z")]
+    return {"available": True, "leftover": len(cy)}
 
 
 def _live_jobs() -> list[dict]:
+    now = time.time()
     jobs = []
     for job in list(job_manager._JOBS.values()):
         if not job.active:
             continue
         user = job.session.get("user") or {}
+        since = getattr(job, "started_at", None) if job.status == "running" else getattr(job, "created_at", None)
         jobs.append({
             "key": job.key, "source": job.source, "module": job.module, "screen": job.screen,
-            "status": job.status, "progress": job.progress, "lastLog": (job.last_log or "")[:160],
+            "status": job.status, "progress": job.progress,
+            "minutes": max(0, int((now - since) // 60)) if since else None,
             "userCode": user.get("userCode") or "", "userName": user.get("userName") or user.get("userCode") or "unknown",
         })
     jobs.sort(key=lambda j: (j["status"] != "running", j["key"]))
     return jobs
 
 
+def _active_people() -> list[dict]:
+    """People who logged in or ran something in the last 24 hours (most recent first)."""
+    since = _now() - timedelta(hours=24)
+    people: dict[str, dict] = {}
+    try:
+        roles_service._ensure_schema()
+        history_store._ensure_schema()
+        with _connection() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT user_code, user_name, last_login FROM qc_users WHERE last_login >= %s ORDER BY last_login DESC LIMIT 100", (since,))
+            for r in cur.fetchall():
+                people[r["user_code"].lower()] = {"userCode": r["user_code"], "userName": r["user_name"] or r["user_code"],
+                                                  "lastLogin": _iso(r["last_login"]), "runs": 0}
+            cur.execute(
+                "SELECT LOWER(run_by_code) AS code, MAX(run_by_name) AS name, MAX(run_by_code) AS raw, COUNT(*) AS n FROM run_history "
+                "WHERE created_at >= %s AND run_by_code IS NOT NULL AND run_by_code <> '' GROUP BY LOWER(run_by_code)",
+                (since,),
+            )
+            for r in cur.fetchall():
+                p = people.setdefault(r["code"], {"userCode": r["raw"], "userName": r["name"] or r["raw"], "lastLogin": None, "runs": 0})
+                p["runs"] = int(r["n"] or 0)
+    except Exception:  # noqa: BLE001  (a missing table must not break the page)
+        logger.warning("could not list today's activity", exc_info=True)
+    out = list(people.values())
+    out.sort(key=lambda p: p["lastLogin"] or "", reverse=True)
+    return out
+
+
+def _server_status(has_jobs: bool) -> dict:
+    """One plain line - no process numbers. state: clean | leftover | busy | unknown"""
+    report = _process_report()
+    if not report["available"]:
+        return {"state": "unknown", "canCleanup": False}
+    if has_jobs:
+        return {"state": "busy", "canCleanup": False}
+    if report["leftover"] > 0:
+        return {"state": "leftover", "canCleanup": True}
+    return {"state": "clean", "canCleanup": False}
+
+
 @router.get("/admin/live")
 def live(request: Request):
     _admin(request)
-    return {"jobs": _live_jobs(), "processes": _process_report(), "maxConcurrent": job_manager.MAX_CONCURRENT_RUNS}
+    jobs = _live_jobs()
+    return {"jobs": jobs, "people": _active_people(), "server": _server_status(bool(jobs))}
 
 
 @router.post("/admin/live/{key}/cancel")
@@ -147,107 +186,7 @@ def cleanup(request: Request):
         except Exception:  # noqa: BLE001
             logger.warning("could not stop process %s", r["pid"], exc_info=True)
     logger.info("cleanup by %s: %s leftover process(es) stopped", me.get("userCode"), killed)
-    return {"killed": killed, "processes": _process_report()}
-
-
-# ------------------------------------------------------------------ announcements
-
-_SCHEMA_LOCK = threading.Lock()
-_SCHEMA_READY = False
-MAX_ANNOUNCEMENT = 300
-
-
-def _ensure_schema() -> None:
-    global _SCHEMA_READY
-    if _SCHEMA_READY:
-        return
-    with _SCHEMA_LOCK:
-        if _SCHEMA_READY:
-            return
-        with _connection() as conn:
-            cur = conn.cursor()
-            cur.execute("""
-                CREATE TABLE IF NOT EXISTS qc_announcements (
-                    id BIGSERIAL PRIMARY KEY,
-                    message VARCHAR(400) NOT NULL,
-                    level VARCHAR(12) NOT NULL DEFAULT 'info',
-                    created_by_code VARCHAR(64) NULL,
-                    created_by_name VARCHAR(255) NULL,
-                    created_at TIMESTAMP NOT NULL,
-                    expires_at TIMESTAMP NULL
-                )
-            """)
-            conn.commit()
-        _SCHEMA_READY = True
-
-
-def _ann_json(r: dict) -> dict:
-    return {"id": r["id"], "message": r["message"], "level": r["level"], "by": r["created_by_name"] or r["created_by_code"] or "",
-            "createdAt": _iso(r["created_at"]), "expiresAt": _iso(r["expires_at"]),
-            "active": r["expires_at"] is None or r["expires_at"] > _now()}
-
-
-@router.get("/announcements")
-def active_announcements(request: Request):
-    _me(request)
-    _ensure_schema()
-    with _connection() as conn:
-        cur = conn.cursor()
-        cur.execute("SELECT * FROM qc_announcements WHERE expires_at IS NULL OR expires_at > %s ORDER BY id DESC LIMIT 5", (_now(),))
-        return {"announcements": [_ann_json(r) for r in cur.fetchall()]}
-
-
-@router.get("/admin/announcements")
-def all_announcements(request: Request):
-    _admin(request)
-    _ensure_schema()
-    with _connection() as conn:
-        cur = conn.cursor()
-        cur.execute("SELECT * FROM qc_announcements ORDER BY id DESC LIMIT 30")
-        return {"announcements": [_ann_json(r) for r in cur.fetchall()]}
-
-
-class NewAnnouncement(BaseModel):
-    message: str
-    level: str = "info"
-    hours: int | None = None       # None = until an admin removes it
-
-
-@router.post("/admin/announcements")
-def add_announcement(request: Request, payload: NewAnnouncement):
-    me = _admin(request)
-    text = " ".join((payload.message or "").split())
-    if not text:
-        raise HTTPException(status_code=400, detail="Write the message first.")
-    if len(text) > MAX_ANNOUNCEMENT:
-        raise HTTPException(status_code=400, detail=f"Keep it under {MAX_ANNOUNCEMENT} characters.")
-    level = payload.level if payload.level in ("info", "warning") else "info"
-    now = _now()
-    expires = now + timedelta(hours=max(1, min(int(payload.hours), 24 * 90))) if payload.hours else None
-    _ensure_schema()
-    with _connection() as conn:
-        cur = conn.cursor()
-        cur.execute(
-            "INSERT INTO qc_announcements (message, level, created_by_code, created_by_name, created_at, expires_at) "
-            "VALUES (%s, %s, %s, %s, %s, %s) RETURNING *",
-            (text, level, me.get("userCode"), me.get("userName") or me.get("userCode"), now, expires),
-        )
-        row = cur.fetchone()
-        conn.commit()
-    return _ann_json(row)
-
-
-@router.delete("/admin/announcements/{ann_id}")
-def remove_announcement(request: Request, ann_id: int):
-    _admin(request)
-    _ensure_schema()
-    with _connection() as conn:
-        cur = conn.cursor()
-        cur.execute("DELETE FROM qc_announcements WHERE id = %s", (ann_id,))
-        if cur.rowcount == 0:
-            raise HTTPException(status_code=404, detail="That announcement is already gone.")
-        conn.commit()
-    return {"ok": True}
+    return {"cleaned": killed > 0, "server": _server_status(False)}
 
 
 # ------------------------------------------------------------------ my work

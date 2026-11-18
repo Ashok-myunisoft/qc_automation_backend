@@ -6,6 +6,9 @@
 * People whose ERP account is an admin but who are not listed in .env / the Admin screen are not notified
   (the same limit the issue notifications have).
 
+Opening a chat (the user's own, or an admin opening a user's conversation) also marks the matching bell
+notifications as read, so the bell count goes down.
+
 Tables (created automatically): support_threads (one per user), support_messages.
 
 Routes (login required):
@@ -105,6 +108,22 @@ def _json(row: dict) -> dict:
             "sender_code": row["sender_code"], "body": row["body"], "created_at": _iso(row["created_at"])}
 
 
+def _mark_chat_notifications_read(cur, user_code: str, key: str) -> None:
+    """The person has opened this chat, so its bell notifications are seen (the bell count goes down). Never raises."""
+    try:
+        cur.execute("SAVEPOINT qc_chat_seen")
+        cur.execute(
+            "UPDATE qc_notifications SET read_at = %s WHERE user_code = %s AND kind = 'support' AND ref = %s AND read_at IS NULL",
+            (_now(), _key(user_code), key),
+        )
+        cur.execute("RELEASE SAVEPOINT qc_chat_seen")
+    except Exception:  # noqa: BLE001  (no notifications table yet = nothing to mark)
+        try:
+            cur.execute("ROLLBACK TO SAVEPOINT qc_chat_seen")
+        except Exception:  # noqa: BLE001
+            pass
+
+
 def _preview(text: str, n: int = 80) -> str:
     one = " ".join(text.split())
     return one if len(one) <= n else one[: n - 1] + "…"
@@ -137,6 +156,7 @@ def my_thread(request: Request):
         cur = conn.cursor()
         messages = _messages(cur, key)
         cur.execute("UPDATE support_threads SET user_seen_at = %s WHERE code_key = %s", (_now(), key))
+        _mark_chat_notifications_read(cur, me["userCode"], key)
         conn.commit()
     return {"messages": messages}
 
@@ -187,7 +207,7 @@ def inbox(request: Request):
 
 @router.get("/inbox/{key}")
 def open_thread(request: Request, key: str):
-    _admin(request)
+    me = _admin(request)
     _ensure_schema()
     key = _key(key)
     with _connection() as conn:
@@ -198,6 +218,7 @@ def open_thread(request: Request, key: str):
             raise HTTPException(status_code=404, detail="This conversation does not exist.")
         messages = _messages(cur, key)
         cur.execute("UPDATE support_threads SET admin_seen_at = %s WHERE code_key = %s", (_now(), key))
+        _mark_chat_notifications_read(cur, me["userCode"], key)
         conn.commit()
     return {"user": {"userCode": t["user_code"], "userName": t["user_name"] or t["user_code"]}, "messages": messages}
 

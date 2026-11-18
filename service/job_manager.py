@@ -92,6 +92,8 @@ class Job:
         self.db_task: asyncio.Task | None = None   # background create_job, never awaited before the run
 
         self.status = "queued"
+        self.created_at = time.time()          # when the run was requested
+        self.started_at: float | None = None   # when it got a free slot and really started
         self.stage = ""
         self.counter = ""
         self.last_log = ""
@@ -272,6 +274,7 @@ async def _execute(job: Job, runner) -> None:
 
         async with gate:
             job.status = "running"
+            job.started_at = time.time()
             job.dirty = True
             job.session["_history_saved"] = False
             await job._flush()

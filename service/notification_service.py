@@ -10,6 +10,9 @@ Nobody is ever notified about their OWN action.
 Table (created automatically in the same PostgreSQL database as History):
     qc_notifications   one row per person per event
 
+Announcements (kind "announcement", ref "ann:<id>") are added to everybody's bell by announcement_service.
+An announcement that has ended no longer counts as unread. Opening a chat (Contact admin) marks its notifications as read.
+
 Routes (all need login):
     GET  /api/notifications?limit=30   newest first + number of unread
     GET  /api/notifications/count      only the unread number (cheap - the bell polls this)
@@ -102,6 +105,29 @@ def notify(cur, recipients, kind: str, issue_id: int | None, message: str, actor
 
 router = APIRouter(prefix="/api/notifications")
 
+# An announcement notification only counts while its announcement is active (started, not ended, not removed).
+_ANN_ACTIVE = (
+    "EXISTS (SELECT 1 FROM qc_announcements a WHERE 'ann:' || a.id = n.ref "
+    "AND (a.starts_at IS NULL OR a.starts_at <= %s) AND (a.expires_at IS NULL OR a.expires_at > %s))"
+)
+
+
+def _prepare(cur, me: str) -> None:
+    """Make sure the announcement tables exist and this person has a notification for every active announcement."""
+    from service import announcement_service
+    announcement_service.ensure_schema()
+    announcement_service.sync_notifications(cur, me)
+
+
+def _unread(cur, me: str) -> int:
+    now = _now()
+    cur.execute(
+        "SELECT COUNT(*) AS n FROM qc_notifications n WHERE n.user_code = %s AND n.read_at IS NULL "
+        f"AND (n.kind <> 'announcement' OR {_ANN_ACTIVE})",
+        (me, now, now),
+    )
+    return cur.fetchone()["n"]
+
 
 def _json(row: dict) -> dict:
     return {
@@ -112,7 +138,8 @@ def _json(row: dict) -> dict:
         "message": row["message"],
         "actor_name": row["actor_name"],
         "created_at": _iso(row["created_at"]),
-        "read": row["read_at"] is not None,
+        "read": row["read_at"] is not None or bool(row.get("expired")),
+        "expired": bool(row.get("expired")),
     }
 
 
@@ -120,13 +147,13 @@ def _json(row: dict) -> dict:
 def unread_count(request: Request):
     user = _me(request)
     ensure_schema()
+    me = user["userCode"].lower()
     with _connection() as conn:
         cur = conn.cursor()
-        cur.execute(
-            "SELECT COUNT(*) AS n FROM qc_notifications WHERE user_code = %s AND read_at IS NULL",
-            (user["userCode"].lower(),),
-        )
-        return {"unread": cur.fetchone()["n"]}
+        _prepare(cur, me)
+        unread = _unread(cur, me)
+        conn.commit()
+        return {"unread": unread}
 
 
 @router.get("")
@@ -137,13 +164,15 @@ def list_notifications(request: Request, limit: int = DEFAULT_LIMIT):
     ensure_schema()
     with _connection() as conn:
         cur = conn.cursor()
+        _prepare(cur, me)
+        now = _now()
         cur.execute(
-            "SELECT * FROM qc_notifications WHERE user_code = %s ORDER BY id DESC LIMIT %s",
-            (me, limit),
+            f"SELECT n.*, (n.kind = 'announcement' AND NOT {_ANN_ACTIVE}) AS expired "
+            "FROM qc_notifications n WHERE n.user_code = %s ORDER BY n.id DESC LIMIT %s",
+            (now, now, me, limit),
         )
         rows = cur.fetchall()
-        cur.execute("SELECT COUNT(*) AS n FROM qc_notifications WHERE user_code = %s AND read_at IS NULL", (me,))
-        unread = cur.fetchone()["n"]
+        unread = _unread(cur, me)
         # tidy up old, already-read notifications (cheap, keeps the table small)
         cur.execute(
             "DELETE FROM qc_notifications WHERE user_code = %s AND read_at IS NOT NULL "
@@ -158,12 +187,15 @@ def list_notifications(request: Request, limit: int = DEFAULT_LIMIT):
 def read_all(request: Request):
     user = _me(request)
     ensure_schema()
+    me, now = user["userCode"].lower(), _now()
     with _connection() as conn:
         cur = conn.cursor()
         cur.execute(
             "UPDATE qc_notifications SET read_at = %s WHERE user_code = %s AND read_at IS NULL",
-            (_now(), user["userCode"].lower()),
+            (now, me),
         )
+        from service import announcement_service
+        announcement_service.mark_seen_from_notifications(cur, me, now)
         conn.commit()
     return {"unread": 0}
 
@@ -180,5 +212,7 @@ def read_one(request: Request, notification_id: int):
         )
         if cur.rowcount == 0:
             raise HTTPException(status_code=404, detail="Notification not found.")
+        from service import announcement_service
+        announcement_service.mark_seen_from_notifications(cur, user["userCode"].lower())
         conn.commit()
     return {"ok": True}

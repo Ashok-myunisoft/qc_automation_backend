@@ -16,7 +16,7 @@ from service.discussion_service import router as discussion_router
 from service.issue_service import router as issues_router
 from service.notification_service import router as notifications_router
 from service.roles_service import router as roles_router
-from service import screen_history, source_tracking, support_service, console_service
+from service import screen_history, source_tracking, support_service, console_service, announcement_service
 from service.gitlab_service import GitLabService
 from service.backend_context import (
     is_mm_module, fetch_mm_source_context, fetch_backend_context, MM_MAX_SOURCE_CHARS,
@@ -78,7 +78,8 @@ app.include_router(notifications_router)  # bell icon: who gets told about issue
 app.include_router(roles_router)  # Admin screen: who is an admin
 app.include_router(screen_history.router)  # who generated / ran a screen, and when
 app.include_router(support_service.router)  # Contact admin: chat between a user and the admins
-app.include_router(console_service.router)  # Admins page: live runs, announcements, my work
+app.include_router(console_service.router)  # Admins page: live runs, my work
+app.include_router(announcement_service.router)  # Announcements: bell, popup, banner, expiry
 app.include_router(source_tracking.router)  # has the source code of a screen changed since its tests were generated
 
 # The history screen fetches these endpoints over HTTP rather than the
