@@ -1,26 +1,3 @@
-"""Has the SOURCE CODE of a screen changed since its tests were generated?
-
-How it works
-------------
-1. While a screen's tests are generated, the source files that were read are fingerprinted (SHA-256 of every
-   file's content) and kept in memory ("pending").
-2. When the generated tests are pushed to the QC repo (Approve and push), the pending fingerprint is saved in the
-   table screen_sources, together with who generated it and when.
-3. Later the same files are read again from the source repo and compared with the saved fingerprints:
-       unchanged  - every file is identical            -> regenerating would give nearly the same tests
-       changed    - a file differs or was removed      -> the tests may be out of date
-       unknown    - never generated with tracking on, or the source repo could not be reached
-   Only the files that were really used are compared, so an unrelated commit elsewhere never raises a false alarm.
-
-Where it shows
---------------
-* Generate -> "already has tests" popup: "Source unchanged since 12 Oct - regenerate anyway?"
-* Tracking page: a Source column (Up to date / Changed) for every screen that has a fingerprint.
-
-Routes (login required)
-    GET /api/source-check?module=ADMIN&screen=AdvanceUserRights   exact check of one screen (popup)
-    GET /api/source-status?refresh=false                          every tracked screen, checked in the background
-"""
 from __future__ import annotations
 
 import hashlib

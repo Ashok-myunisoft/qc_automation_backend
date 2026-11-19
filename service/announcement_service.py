@@ -1,23 +1,3 @@
-"""Announcements: a message an admin publishes for everybody.
-
-* Shown in the bell (one notification per user), in a popup after login, on the Contact admin page,
-  and (warnings only) as a banner at the top.
-* An admin can set when it starts ("show from") and the exact time it ends, extend it, end it early or remove it.
-* Who has seen it is stored here on the server, so a person sees the popup once - on any computer.
-
-Tables (created automatically): qc_announcements, qc_announcement_seen
-
-Routes (login required):
-    GET    /api/announcements                 everybody: announcements that are active now (+ whether I have seen them)
-    POST   /api/announcements/seen            everybody: I have seen these  {"ids": [1, 2]}  (no ids = all active)
-    GET    /api/admin/announcements           admin: recent announcements (scheduled, active, ended)
-    POST   /api/admin/announcements           admin: {"message", "level", "startsAt", "endsAt"}  (ISO times, both optional)
-    PATCH  /api/admin/announcements/{id}      admin: {"endsAt": "..."} | {"noEnd": true} | {"endNow": true}
-    DELETE /api/admin/announcements/{id}      admin: remove one
-
-Bell notifications are created lazily: the first time a person's bell is checked after an announcement became
-active, one notification (kind "announcement", ref "ann:<id>") is added for that person - see sync_notifications().
-"""
 import logging
 import threading
 from datetime import datetime, timedelta, timezone

@@ -1,8 +1,3 @@
-"""Pass planner (code only): decides which topic passes a screen needs, plus ScreenFacts,
-the record ledger and the merge ordering (spec 01 sections 2, 3 and 5).
-
-The update scenarios are planned as separate passes by kind (single field per field kind, several fields, options,
-boundaries, dates, clear, no change), each only when the screen has the matching field type."""
 from __future__ import annotations
 
 import logging

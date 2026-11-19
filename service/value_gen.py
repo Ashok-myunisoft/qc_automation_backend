@@ -1,8 +1,3 @@
-"""Test values, scenario plan and the text block for the test-case agent - all built by CODE
-from the screen spec (service/screen_spec.py).
-
-The agent may use ONLY the values in the pool, so it never has to invent PLACEHOLDER_ text.
-"""
 from __future__ import annotations
 
 import random

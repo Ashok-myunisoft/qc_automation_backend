@@ -1,5 +1,3 @@
-"""Extended step vocabulary: which feature steps have no definition yet, and the guarded
-assembly of the agent-written definitions into the code-built script (spec 02 part B)."""
 from __future__ import annotations
 
 import logging

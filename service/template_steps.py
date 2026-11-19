@@ -1,21 +1,3 @@
-"""Fixed (code-written) definitions for the EXTENDED step vocabulary.
-
-Why: asking the AI for ~25 step definitions in one block is the step that fails most often
-(the guard rejects the whole block when one definition is missing or one rule is broken).
-These definitions are plain, reviewed JavaScript. Only the screen facts (modal selector,
-filter class, sortable columns, counters, empty state ...) are filled in from the facts that
-service/screen_behavior.py read from the screen's own HTML/TS.
-
-Use:  block, covered = build_block(behavior, missing_sentences)
-      -> `block` is ONE JavaScript block (no imports, no beforeEach) to append to the code-built
-         script, `covered` are the step sentences it defines.  Anything not covered is left to
-         the agent (service/extended_steps.py guards that block exactly as before).
-
-Only helpers of the QC template / code-built script are used:
-  CONTROLS, ACTIONS, DEFAULT_ACTIONS, actionCandidates, clickAction, controlOf, readCheckbox,
-  checkboxNames, findSearchBox, searchList, squashText
-Every helper that is new here has the prefix `tpl`, so nothing can clash with the base script.
-"""
 from __future__ import annotations
 
 import html

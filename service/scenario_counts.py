@@ -1,10 +1,3 @@
-"""Scenario count of every screen in the QC repo (Tracking page, Excel export, module / screen pick lists).
-
-The count is read from each screen's .feature file: every "Scenario:" and "Scenario Outline:" line is one
-scenario - the same rule the review panel uses. Reading hundreds of files from GitLab takes a while, so it
-runs in a background thread and fills the cache as it goes; the page polls snapshot() until status is "ready".
-An entry is re-read after TTL_SECONDS, when it is missing (a new screen), or when snapshot(force=True) is used.
-"""
 from __future__ import annotations
 
 import logging

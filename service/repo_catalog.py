@@ -1,11 +1,3 @@
-"""Live module -> screens list, read from the QC repo tree (the same tree Fetch / Overnight Run use).
-
-The tree is read once and the result is cached for about 5 minutes (force=True re-reads it).
-get_catalog() is blocking (GitLab) - call it through asyncio.to_thread, or use get_catalog_async().
-A module is a folder directly under Regression-Testing/ (for example Skill_Management_Module is shown as
-"Skill Management"); its screens are every folder below it that has both a .feature and a script - the same
-matching rule resolve_module_screens_exact() applies, so a module picked from this list always fetches.
-"""
 from __future__ import annotations
 
 import asyncio

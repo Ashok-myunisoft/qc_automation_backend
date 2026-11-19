@@ -1,6 +1,3 @@
-"""Coverage loop: code computes a checklist from ScreenFacts, finds gaps in the feature text (fields, options, messages,
-rules, capabilities, tabs and the UPDATE scenarios), the agent fills only the gaps (max COVERAGE_LOOP_MAX_ROUNDS rounds,
-default 2)."""
 from __future__ import annotations
 
 import logging

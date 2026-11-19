@@ -1,8 +1,3 @@
-"""Feature generation in topic passes (every screen that has a formjson spec and is not an MM screen), spec 01.
-
-The agent writes the scenarios; code decides which passes a screen needs, packages the raw source and verified facts,
-keeps a record ledger (the values each record holds NOW, updated after every update pass), orders and merges the passes,
-and the coverage loop asks for the gaps only."""
 from __future__ import annotations
 
 import asyncio

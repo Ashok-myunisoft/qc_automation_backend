@@ -1,11 +1,3 @@
-"""Post a run result to a Microsoft Teams chat / channel through a Workflows webhook.
-
-Setup (once, in the server's .env):
-    TEAMS_WEBHOOK_URL=<the link copied from Teams -> Workflows -> "Copy webhook link">
-    REPORT_BASE_URL=http://<server>:8053        (optional - adds report + screenshots download buttons)
-
-Nothing here ever raises into a run: send_card() returns (ok, detail) and the caller only logs it.
-"""
 from __future__ import annotations
 
 import json

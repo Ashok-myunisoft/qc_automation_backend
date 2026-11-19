@@ -1,21 +1,3 @@
-"""Turns C# references like  SuccessResponse.SaveSuccessWithCodeAndName  into the real message text.
-
-Why this exists
----------------
-The backend keeps its messages in .resx files (SuccessResponse.resx, ErrorResponse.resx).
-C# code reads them through a generated class (SuccessResponse.Designer.cs) whose
-property names are *cleaned* versions of the .resx keys. For example the .resx key
-    SaveSuccesfullyCode&Name
-is read in C# as the property
-    SaveSuccesfullyCode_Name
-(the "&" is not allowed in a C# name, so it becomes "_").
-
-So a direct lookup of the C# name in the .resx fails for these keys. This module
-builds the property -> key mapping so the lookup works for every message.
-
-New file, nothing else in the project imports it yet. It never raises on bad input:
-a message that cannot be resolved comes back as None.
-"""
 from __future__ import annotations
 
 import re

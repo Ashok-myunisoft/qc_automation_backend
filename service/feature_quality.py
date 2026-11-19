@@ -1,35 +1,3 @@
-"""Deterministic clean-up of a generated feature file.
-
-The test-case agent writes the feature; this module then fixes the defects that
-the QC team found in real runs, in plain code (no AI call), so the result does
-not depend on the model following a long prompt perfectly:
-
-  1. "X* Should not be Empty" messages use the field's visible LABEL
-     ("Domain Code*"), not its data-cy name ("DomainCode*").
-  2. A "field missing" row really leaves THAT field empty and fills the others,
-     and the field's step + column exist even when the model left them out.
-  3. Duplicate rows / duplicate scenarios are removed.
-  4. Delete scenarios come last; Update / Delete use a record that an earlier
-     Create row of this file saved; a Create row that saves a key a previous
-     row already saved is dropped (it would fail as a duplicate).
-  5. Update opens the record with a step that works on picklist screens AND on
-     list screens (search box + row icons).
-  6. Delete is split into two scenarios: confirm (Yes) and cancel (No), with the
-     delete prompt checked before it is answered.
-
-  7. A Create row that leaves a REQUIRED field empty expects the "X* Should not be Empty"
-     messages (it never expects "Details Saved Successfully"); validation rows run first.
-  8. Empty / duplicate generic scenarios (smoke test, "save with nothing" that expects success,
-     update that changes nothing) are removed.
-  9. Update / Delete scenarios that sit before the Rule blocks that create their records are
-     moved behind them, so the file always runs Create -> Update -> Delete.
- 10. Update rows expect the confirmed "Updated" message and the Yes-delete scenario checks the
-     confirmed "deleted" message (both read from config/expected_messages.json, never guessed).
- 11. Examples tables are re-aligned.
-
-Everything is best-effort: refine_feature() never raises, and any step that
-fails leaves the feature exactly as it was before that step.
-"""
 from __future__ import annotations
 
 import json

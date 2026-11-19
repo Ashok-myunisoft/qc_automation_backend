@@ -1,8 +1,3 @@
-"""Extracts list / form behaviour facts from the raw screen HTML and TS (no LLM).
-
-Every detected item keeps the exact source snippet it came from, so a pass can cite it and
-the checker can verify it exists. If nothing is detected for a capability its key is absent.
-"""
 from __future__ import annotations
 
 import re

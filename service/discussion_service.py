@@ -1,16 +1,3 @@
-"""Per-screen discussion (chat) for the QC console.
-
-Every screen (module + screen name, exactly as they appear in the module list) has its own chat.
-Anyone logged in can read and write. You can edit and delete your own messages; an admin can delete
-any message. Anyone can react to any message with an emoji (click again to take the reaction back).
-
-Tables (created automatically in the same PostgreSQL database as History - HISTORY_DATABASE_URL):
-    discussion_messages   one row per message (a deleted message stays as a row for the record, but it is never shown or sent out again)
-    discussion_reactions  one row per (message, person, emoji)
-
-Admins = people whose ERP account is an admin, the user codes listed in .env (QC_ADMINS / QC_TEAM) and the
-people added on the Admin screen - see roles_service.py.
-"""
 import logging
 import os
 import threading

@@ -1,16 +1,3 @@
-"""Deterministic editor for an existing feature file + script (the 'append' path, optimised).
-
-Most edits never call the model:
-  * TEST_DATA  -> the matching Examples cell(s) are changed in place and the table is re-aligned
-  * COMMENT    -> a '#' line in the feature and a '//' line in the script, inserted by code
-  * FULL_SCENARIO -> the pasted Gherkin is converted to a Scenario Outline + Examples table, checked and inserted by code
-  * DESCRIBED_SCENARIO -> the model returns ONLY the new scenario block (describe_fn); code merges it in
-
-The script changes only when a new step sentence really needs a definition (service/extended_steps.py path).
-Every edit is verified: existing lines unchanged (apart from re-padding / the edited cells), the step checker does
-not get worse, and the requested value / scenario is really there. A failed item leaves the files as they were and
-says exactly why.
-"""
 from __future__ import annotations
 
 import asyncio

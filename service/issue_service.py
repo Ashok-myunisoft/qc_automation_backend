@@ -1,15 +1,3 @@
-"""Issues: concerns raised to the QC team, tracked until they are fixed.
-
-Who can do what
----------------
-* Anyone logged in: raise an issue, read all issues, comment, edit the title/description of THEIR OWN issue.
-* Admins (one role, managed on the Admin screen - see roles_service.py): everything above on any issue, plus change
-  the status (Open / Looking into it / Fixed) and the severity, and delete an issue.
-
-Tables (created automatically in the same PostgreSQL database as History):
-    qc_issues          one row per issue
-    qc_issue_comments  comments and the automatic "status changed" lines of an issue
-"""
 import logging
 import os
 import threading

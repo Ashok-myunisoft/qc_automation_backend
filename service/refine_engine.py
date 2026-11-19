@@ -1,24 +1,3 @@
-"""Universal "Refine this screen" engine.
-
-The box accepts ANY request about the feature / script / test data of one screen. A request is split into jobs:
-
-  EDIT      any change to the existing files that is not a plain value / comment / pasted scenario:
-            "add boundary tests for Amount", "rename scenario 2", "more rows in the negative scenario",
-            "remove the duplicate delete scenario". The model returns block-level operations (add / replace /
-            delete one scenario); CODE validates and applies each one (known fields only, fixed step vocabulary,
-            rows never silently lost, step checker not worse, step definitions added when needed).
-  DEEPEN    "not satisfied", "generate again", "more coverage", "more test data": the screen is generated again
-            in a thorough mode (app.py) and the new scenarios / data rows are MERGED INTO the existing files
-            (merge_new_feature below). Nothing that already exists is thrown away.
-  QUESTION  "what does this cover?", "which fields have no scenario?": answered in the box, files untouched.
-  SCRIPT    a change to the Cypress script itself ("change the selector of the Amount field", "add a wait before save").
-            The model returns exact find / replace operations; CODE checks every one (the text must exist once, the
-            result must still be valid JavaScript, the step checker must not get worse) before anything is applied.
-  CLARIFY   the request cannot be done without one missing detail: the box asks one short question, nothing is changed.
-
-Value changes, comment lines and pasted scenarios keep using service/append_editor.py (no model needed).
-Every function here is a pure helper or takes the model call as an argument, so it can be tested without a model.
-"""
 from __future__ import annotations
 
 import asyncio

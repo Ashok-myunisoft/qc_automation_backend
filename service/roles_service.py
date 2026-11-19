@@ -1,27 +1,3 @@
-"""Who is an admin of the QC console - one role, managed on the Admin screen.
-
-An admin can do everything: handle issues, delete issues and chat messages, and add / remove other admins.
-Everybody else who is logged in is a normal user (chat, raise issues, comment, run tests).
-
-Who counts as an admin
-----------------------
-* anyone whose ERP account is an admin (decided by the ERP at login - never listed here)
-* the user codes in .env (QC_ADMINS and QC_TEAM both count, so nobody loses access). A name can be written
-  after the code with a colon - it is only used for the list on the Admin screen:
-      QC_ADMINS=E574:Sanchana,E486:Ragul,E531:Divya
-      QC_TEAM=E102
-  These are "permanent": they can only be changed in .env, not on the Admin screen.
-* the people an admin adds on the Admin screen (table qc_roles, same PostgreSQL database as History)
-
-A change on the Admin screen is used straight away by this backend; another backend copy sees it within
-about 10 seconds. If the database cannot be read, the last known list (plus .env) is used - a problem here
-never locks anybody out and never breaks a request.
-
-Routes (admin only):
-    GET    /api/admin/roles            the list
-    POST   /api/admin/roles            add  {"userCode": "E101", "userName": "optional"}
-    DELETE /api/admin/roles/{code}     remove (only people added on the screen)
-"""
 import logging
 import os
 import re

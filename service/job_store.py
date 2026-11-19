@@ -1,15 +1,3 @@
-"""PostgreSQL bookkeeping for background runs that are queued or in progress.
-
-A row here is the "order slip" for one run. It exists only while the run is
-queued or running (plus a short-lived "failed" row so a broken run is visible
-in History). When a run finishes normally its result lives in
-run_history and the slip is deleted. When a run is cancelled, or the
-server dies mid-run, the slip is deleted too - nothing half-finished is kept.
-
-The table is in the shared PostgreSQL database (same connection as history_store), so
-every backend copy sees the same jobs.
-"""
-
 import threading
 
 from service.store_db import connection as _connection

@@ -1,17 +1,3 @@
-"""Reads the user's free-text request and splits it into typed items.
-
-Item types
-  FULL_SCENARIO      pasted Gherkin (inserted near-verbatim, converted to Scenario Outline + Examples)
-  DESCRIBED_SCENARIO "add a negative amount scenario" / "I need a test case for ..." (written by the model)
-  TEST_DATA          "use SD-050 for DomainCode", "change email from a@x.com to b@x.com"
-  PRIORITY_HINT      "focus on validation" (only steers generation)
-  COMMENT            "add a comment ..." -> a '#' line in the feature and a '//' line in the script.
-                     Never an executable step, never a command; always inserted by code.
-
-Detection is deterministic first (Gherkin keywords, "change X to Y", "comment ...").
-The model is asked only for pieces that stay ambiguous, and only when a model_fn is given.
-An unclear piece is reported with its own text (see Plan.unclear_messages) - never a bare error.
-"""
 from __future__ import annotations
 
 import json

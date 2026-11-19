@@ -1,27 +1,3 @@
-"""Deterministic repair of a generated feature file (no AI).
-
-The topic passes write their scenarios at the same time and cannot see each other, so the merged
-feature has defects that code can find and fix reliably:
-
-  * the same record code is saved by many scenarios (only the first save can succeed)
-  * a NEW record's key is entered with the "picklist field" step (that step picks an EXISTING row)
-  * rows that cannot be run on the real screen (an option the dropdown does not have, a field that
-    is not on the screen, a filter / sort column / view that does not exist)
-  * nonsense or wrongly worded steps ("form open or closed", a bare "filter ... by type")
-  * delete scenarios that reuse a record an earlier scenario already deleted
-  * the duplicate scenario that expects success twice
-  * "open existing" checks that expect values the record was never saved with
-  * list scenarios that put search, filter, sort and view into one row of blanks
-  * low-value scenarios (rows that repeat the same test, a "read-only" scenario that tests nothing)
-  * steps that are not in the step vocabulary (mapped to the right sentence, or removed and logged)
-  * input steps / Examples cells aimed at calculated fields (removed, logged); the calculated value is checked instead
-  * dates written as literal dates (made relative: today+N), messages written with {placeholders} (fixed part only)
-  * update rows that repeat a value the record already holds, or repeat another row (replaced / removed)
-
-Public function:  fix_feature(feature_text, project_analysis, behavior=None, controls=None)
-                  -> (new_feature_text, {"notes": [...]})
-Any problem inside returns the feature unchanged.
-"""
 from __future__ import annotations
 
 import copy

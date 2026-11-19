@@ -1,9 +1,3 @@
-"""Backend source context fetcher.
-
-Fetches C# backend files (BL/DL/Service) for a given screen from the
-backend GitLab repo and appends them to the project_context source_files
-so ProjectAnalysisAgent can use them for business logic coverage.
-"""
 import json
 import logging
 import os

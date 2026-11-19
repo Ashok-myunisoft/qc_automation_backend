@@ -1,15 +1,3 @@
-"""The overall history of ONE screen: who generated it, who replaced it, who ran it, and when.
-
-Two sources are merged into one timeline (newest first):
-* screen_events (this file's table)  - generate / replace / append / push to the repo
-* run_history   (History page table) - every run, with the person and the environment
-
-So a screen that one person generated on Monday and another person ran on Tuesday shows both,
-each with the right name.
-
-Route (login required):
-    GET /api/screen-history?module=ADMIN&screen=AdvanceUserRights&limit=100
-"""
 import json
 import logging
 import threading

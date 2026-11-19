@@ -1,13 +1,3 @@
-"""Admin tools and personal pages of the Admins page.
-
-    GET    /api/admin/live                    admin: who is running / waiting, who was active in the last 24 hours, and one plain server status
-    POST   /api/admin/live/{key}/cancel       admin: stop one run
-    POST   /api/admin/cleanup                 admin: kill leftover Cypress / browser processes (only while no run is active)
-
-    GET    /api/me/work                       my recent runs and my issues
-
-Announcements live in announcement_service.py.
-"""
 import logging
 import os
 import signal

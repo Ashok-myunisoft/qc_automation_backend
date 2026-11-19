@@ -388,7 +388,7 @@ only applies when there is real leftover-data risk to guard against.
   any other common/shared object file — every helper, command, and login
   flow the screen needs must be defined inline, in this one file.
 - Do NOT use `Cypress.Commands.add(...)` anywhere in the output — every
-  helper (login, field entry, selection logic, anything else) must be a
+  helper (login, field en2try, selection logic, anything else) must be a
   plain JavaScript function instead. See #REAL PROJECT CONVENTIONS above.
 - Do NOT use a hardcoded `cy.wait(<ms>)` as a page-load, navigation, or
   async-data wait. See #REAL PROJECT CONVENTIONS above for the one narrow

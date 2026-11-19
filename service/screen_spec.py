@@ -1,19 +1,3 @@
-"""Builds a "screen spec" for one screen by CODE (no AI):
-
-  frontend : formjson  (type / required / max length / regex / dropdown options / picklist)
-             intersected with the fields the screen's HTML really renders,
-             real labels from gbhost i18n, the frontend's own validation messages,
-             calculated / read-only fields (formjson + HTML + TS) and the date format the screen shows
-  backend  : every file of the screen's backend entity, condensed into a small digest of the Save / Delete
-             rules and messages (when the backend repository can be reached)
-
-Everything here is best-effort: every public function returns None / {} on any problem and
-the caller carries on with the old behaviour.
-
-Optional settings (repo paths / a safety cap, all with defaults in code):
-  I18N_PATH, SAVEURL_PATH   repo paths of the label file / the route map
-  BACKEND_ENTITY_MAX_FILES  safety cap on fetched backend files (default 40)
-"""
 from __future__ import annotations
 
 import json

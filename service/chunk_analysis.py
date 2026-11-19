@@ -1,30 +1,3 @@
-"""
-Dynamic chunking for ProjectAnalysisAgent.
-
-Problem: a screen with hundreds of fields across many tabs cannot be
-reliably enumerated in one LLM call — the model either truncates with an
-invalid comment placeholder (fixed separately in the prompt) or silently
-stops early and returns a small-but-valid JSON as if it were complete
-(confirmed on Item Master: only 5 of ~200+ real fields came back, twice,
-even after the truncation fix).
-
-This is NOT a prompt problem — no wording can make one LLM call decide to
-call itself again for the next tab. It has to be a code-level decision:
-scan the screen first (cheap, deterministic, no LLM), decide whether it's
-"small" (single call, unchanged) or "large" (one call per tab, merged
-after), and only pay the extra token/call cost on screens that actually
-need it. A 5-field screen and a 200-field screen must NOT be treated the
-same way — this module makes that decision per-screen, not globally.
-
-Token efficiency: the expensive part of a large screen is its .html file,
-not the shared library files (those stay constant regardless of tab
-count). So each per-tab call resends the SAME shared library files/.ts
-content, but only that one tab's HTML slice instead of the whole
-multi-thousand-line file — that's where the real per-call savings come
-from, and it also keeps each call's field count small enough to reliably
-enumerate in full.
-"""
-
 import logging
 import re
 
